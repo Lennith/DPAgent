@@ -1,0 +1,89 @@
+api:
+  apiKey: ''
+  apiBase: https://api.minimaxi.com
+  model: MiniMax-M2.7-highspeed
+  provider: anthropic
+  maxOutputTokens: 32768
+llmProfiles:
+  defaultProfileId: legacy-default
+  profiles:
+    - id: legacy-default
+      name: Default Profile
+      provider: anthropic
+      apiKey: ''
+      apiBase: https://api.minimaxi.com
+      defaultModel: MiniMax-M2.7-highspeed
+      maxOutputTokens: 32768
+      enabled: true
+      capabilities:
+        modelDiscovery: true
+        reasoningEffort: false
+        thinkingBudget: true
+      createdAt: '2026-04-26T17:06:41.824Z'
+      updatedAt: '2026-04-26T17:26:44.889Z'
+agent:
+  maxSteps: 100
+  tokenLimit: 210000
+  workspaceDir: D:\Agent\MinimaxAgentNodeJs\workspace
+  completionMarkerEnforcementEnabled: false
+  defaultToolset: windows-dev
+  skillWriteMode: confirm
+  subAgentMaxParallelPerParent: 4
+  subAgentGlobalMaxParallel: 10
+  contextReplayMinRounds: 6
+  contextReplayMaxRounds: 12
+  contextReplayBudgetRatio: 0.55
+  contextCompressionMaxChars: 6000
+  contextWindowChars: 230000
+  contextPrecompressTriggerRatio: 0.85
+  contextOverflowForcedTrimChars: 160000
+  contextOverflowMaxErrorsBeforeTrim: 2
+  contextPrecompressKeepLlmRounds: 5
+  contextPrecompressChunkChars: 20000
+  contextPrecompressRetry: 1
+  contextDir: ./contexts
+  runtimeDataDir: ./runtime
+  globalAgentsDir: ./agents
+  skillListPath: D:\Agent\MinimaxAgentNodeJs\skill-list.yaml
+  skillsDir: C:\Users\pc\.codex\skills
+tools:
+  enableFileTools: true
+  enableWeb: true
+  enableShell: true
+  shellType: powershell
+  shellTimeout: 30000
+mcp:
+  enabled: true
+  servers:
+    - name: MiniMax-Coding-Plan
+      type: stdio
+      command: uvx
+      args:
+        - minimax-coding-plan-mcp
+        - '-y'
+  connectTimeout: 10
+  executeTimeout: 60
+retry:
+  enabled: true
+  maxRetries: 3
+  initialDelay: 1
+  maxDelay: 60
+  exponentialBase: 2
+agentProviders:
+  - id: local-default
+    type: local
+    enabled: true
+    timeoutMs: 300000
+subAgentPresets:
+  coding:
+    description: Code implementation and debugging specialist
+    providerId: local-default
+    systemPrompt: You are a coding sub-agent. Focus on implementation, debugging, and concise progress updates.
+  research:
+    description: Repository and technical investigation specialist
+    providerId: local-default
+    systemPrompt: You are a research sub-agent. Focus on evidence-driven exploration and clear findings.
+  review:
+    description: Code review and risk assessment specialist
+    providerId: local-default
+    systemPrompt: You are a review sub-agent. Focus on correctness risks, regressions, and missing tests.

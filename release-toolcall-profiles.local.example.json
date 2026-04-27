@@ -1,0 +1,33 @@
+{
+  "profiles": [
+    {
+      "id": "kimi-release-dev",
+      "label": "kimi",
+      "name": "Kimi",
+      "provider": "anthropic",
+      "apiKey": "YOUR_API_KEY",
+      "apiBase": "https://api.minimaxi.com",
+      "maxOutputTokens": 32768
+    },
+    {
+      "id": "deepseek-release-dev",
+      "label": "deepseek",
+      "name": "DeepSeek",
+      "provider": "anthropic",
+      "apiKey": "YOUR_API_KEY",
+      "apiBase": "https://api.minimaxi.com",
+      "model": "deepseek-v4-flash",
+      "maxOutputTokens": 32768
+    },
+    {
+      "id": "minimax-release-dev",
+      "label": "minimax",
+      "name": "MiniMax",
+      "provider": "anthropic",
+      "apiKey": "YOUR_API_KEY",
+      "apiBase": "https://api.minimaxi.com",
+      "model": "MiniMax-M2.7-highspeed",
+      "maxOutputTokens": 32768
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Test
+coverage/
+
+# Workspace data (optional - uncomment if you don't want to commit)
+# workspace/
+
+# Session data
+workspace/minimax-session/
+contexts/
+sessions/
+/runtime/
+
+# UX workspace runtime artifacts
+ux-workspace/reports/
+ux-workspace/workspace/
+ux-workspace/contexts/
+ux-workspace/runtime/
+ux-workspace/sessions/
+ux-workspace/config.yaml
+ux-workspace/skill-list.yaml
+
+# Reference project
+Mini-Agent-Reference/
+
+# Temp files
+*.tmp
+*.temp
+
+# Local release credentials
+release-toolcall-profiles.local.json
