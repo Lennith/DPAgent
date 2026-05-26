@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="380" viewBox="0 0 1040 380" role="img" aria-label="DPAgent mobile access">
+  <rect width="1040" height="380" fill="#f7fff8"/>
+  <rect x="68" y="84" width="260" height="150" rx="18" fill="#ffffff" stroke="#7ccf91" stroke-width="2"/>
+  <text x="112" y="132" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#285c35">电脑运行 DPAgent</text>
+  <text x="110" y="170" font-family="Arial, sans-serif" font-size="16" fill="#285c35">http://192.168.x.x:53721</text>
+  <path d="M354 160 L486 160" stroke="#45a85f" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="510" y="54" width="180" height="278" rx="30" fill="#ffffff" stroke="#7ccf91" stroke-width="3"/>
+  <rect x="534" y="86" width="132" height="200" rx="12" fill="#effaf1" stroke="#b7e6c1"/>
+  <text x="552" y="130" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#285c35">手机浏览器</text>
+  <text x="552" y="168" font-family="Arial, sans-serif" font-size="14" fill="#285c35">或 Android 客户端</text>
+  <path d="M714 160 L846 160" stroke="#45a85f" stroke-width="4" marker-end="url(#arrow)"/>
+  <rect x="868" y="84" width="120" height="150" rx="18" fill="#ffffff" stroke="#7ccf91" stroke-width="2"/>
+  <text x="896" y="132" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#285c35">会话</text>
+  <text x="890" y="168" font-family="Arial, sans-serif" font-size="15" fill="#285c35">查看</text>
+  <text x="890" y="194" font-family="Arial, sans-serif" font-size="15" fill="#285c35">输入</text>
+  <text x="70" y="320" font-family="Arial, sans-serif" font-size="16" fill="#285c35">手机不要访问 localhost。请使用电脑局域网 IP，或打开 DPAgent 生成的 share link。</text>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#45a85f"/>
+    </marker>
+  </defs>
+</svg>

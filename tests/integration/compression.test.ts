@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentCallback } from '../src/types.js';
 
-const API_KEY = 'sk-cp-6VmqjCaCEtLrtmM1B2qAlObOAa_3XVf6fzqgwpk_oleR87SzhFT6ViXmPcGJyWI2nzGbQNFRkxsI-itPbLoSGU5dSwQJHI0CO1SdNqylAz2KZZbcHz82CSE';
+const API_KEY = process.env.MINIMAX_INTEGRATION_API_KEY ?? 'YOUR_MINIMAX_API_KEY';
 
 async function testCompression() {
   console.log('=== Context Compression Test ===\n');
@@ -68,7 +68,7 @@ async function testCompression() {
     ];
 
     let totalSize = 0;
-    const sessionDir = path.join('./workspace', 'minimax-session', sessionId);
+    const sessionDir = path.join('./workspace', 'dpagent-session', sessionId);
 
     for (let i = 0; i < prompts.length; i++) {
       console.log(`\n=== Turn ${i + 1} ===`);

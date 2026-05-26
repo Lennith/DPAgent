@@ -1,19 +1,24 @@
 import * as assert from 'node:assert/strict';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import type { ContextRef, PlanInputAnswer, PlanInputRequest } from '../../src/types.js';
 import { WebSocket } from 'ws';
+import {
+  attachEmitCapture,
+  createOpenSocket,
+  createWebServerDouble,
+  getPendingPlanInputs,
+  RecordingMap,
+  replacePendingPlanInputs,
+  type CapturedWebMessage,
+} from './helpers/web-server-harness.js';
 
-interface EmittedMessage {
-  ws: object;
-  type: string;
-  data: unknown;
-}
+const DEFAULT_RUN_ID = 'run-1';
+const DEFAULT_REQUEST_ID = 'req-1';
 
 interface PlanInputHarness {
   server: any;
   ownerSocket: object;
   otherSocket: object;
-  emitted: EmittedMessage[];
+  emitted: CapturedWebMessage[];
   lifecycle: string[];
   metaUpdates: Array<{ context: ContextRef; patch: Record<string, unknown> }>;
   resolvedAnswers: PlanInputAnswer[] | null;
@@ -22,26 +27,11 @@ interface PlanInputHarness {
   context: ContextRef;
 }
 
-class RecordingPendingPlanInputMap extends Map<string, unknown> {
-  constructor(
-    private readonly lifecycle: string[],
-    entries?: ReadonlyArray<readonly [string, unknown]>
-  ) {
-    super(entries);
-  }
-
-  override delete(key: string): boolean {
-    this.lifecycle.push(`delete:${key}`);
-    return super.delete(key);
-  }
-}
-
 function createHarness(): PlanInputHarness {
-  const emitted: EmittedMessage[] = [];
-  const ownerSocket = { socket: 'owner', readyState: WebSocket.OPEN };
-  const otherSocket = { socket: 'other', readyState: WebSocket.OPEN };
+  const ownerSocket = createOpenSocket('owner');
+  const otherSocket = createOpenSocket('other');
   const request: PlanInputRequest = {
-    requestId: 'req-1',
+    requestId: DEFAULT_REQUEST_ID,
     questions: [
       {
         header: 'Mode',
@@ -71,19 +61,19 @@ function createHarness(): PlanInputHarness {
   const metaUpdates: Array<{ context: ContextRef; patch: Record<string, unknown> }> = [];
   let metaState: Record<string, unknown> = {
     pendingPlanInput: {
-      runId: 'run-1',
+      runId: DEFAULT_RUN_ID,
       requestId: request.requestId,
       requestedAt: '2026-04-22T00:00:00.000Z',
       questions: request.questions,
     },
   };
 
-  const server = Object.create(WebServer.prototype) as any;
-  server.pendingPlanInputByRunId = new RecordingPendingPlanInputMap(lifecycle, [
+  const server = createWebServerDouble();
+  replacePendingPlanInputs(server, new RecordingMap<string, any>(lifecycle, [
     [
-      'run-1',
+      DEFAULT_RUN_ID,
       {
-        runId: 'run-1',
+        runId: DEFAULT_RUN_ID,
         context,
         ws: ownerSocket,
         request,
@@ -97,11 +87,11 @@ function createHarness(): PlanInputHarness {
         },
       },
     ],
-  ]);
-  server.emitToClient = (ws: object, message: Omit<EmittedMessage, 'ws'>) => {
-    lifecycle.push(`emit:${message.type}:${ws === ownerSocket ? 'owner' : 'other'}`);
-    emitted.push({ ws, ...message });
-  };
+  ]));
+  const { emitted } = attachEmitCapture(server, {
+    lifecycle,
+    labelForSocket: (ws) => (ws === ownerSocket ? 'owner' : 'other'),
+  });
   server.getContextNamespaceMetaSafe = () => metaState;
   server.updateContextNamespaceMetaSafe = (nextContext: ContextRef, patch: Record<string, unknown>) => {
     lifecycle.push('meta:update');
@@ -111,6 +101,7 @@ function createHarness(): PlanInputHarness {
       ...patch,
     };
   };
+  server.isObserveOnlyActiveRun = () => false;
 
   return {
     server,
@@ -130,6 +121,14 @@ function createHarness(): PlanInputHarness {
   };
 }
 
+function getDefaultPendingPlanInput<T>(harness: PlanInputHarness): T {
+  return getPendingPlanInputs(harness.server).get(DEFAULT_RUN_ID) as T;
+}
+
+function hasDefaultPendingPlanInput(harness: PlanInputHarness): boolean {
+  return getPendingPlanInputs(harness.server).has(DEFAULT_RUN_ID);
+}
+
 function testMissingRunIdEmitsTransportError(): void {
   const harness = createHarness();
   harness.server.handlePlanInputResponse(harness.ownerSocket, {
@@ -145,7 +144,7 @@ function testMissingRunIdEmitsTransportError(): void {
     },
   ]);
   assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:owner']);
-  assert.equal(harness.server.pendingPlanInputByRunId.size, 1);
+  assert.equal(getPendingPlanInputs(harness.server).size, 1);
   assert.equal(harness.resolvedAnswers, null);
   assert.equal(harness.rejectedError, null);
 }
@@ -166,22 +165,22 @@ function testUnknownRunIdEmitsTransportError(): void {
     },
   ]);
   assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:owner']);
-  assert.equal(harness.server.pendingPlanInputByRunId.size, 1);
+  assert.equal(getPendingPlanInputs(harness.server).size, 1);
 }
 
 function testResponseFromNewSocketRebindsAndResolvesPendingRequest(): void {
   const harness = createHarness();
-  const pending = harness.server.pendingPlanInputByRunId.get('run-1') as {
+  const pending = getDefaultPendingPlanInput<{
     detachedAt?: number;
     detachTimer?: ReturnType<typeof setTimeout>;
-  };
+  }>(harness);
   const detachTimer = setTimeout(() => undefined, 60000);
   detachTimer.unref?.();
   pending.detachedAt = Date.now();
   pending.detachTimer = detachTimer;
 
   harness.server.handlePlanInputResponse(harness.otherSocket, {
-    runId: 'run-1',
+    runId: DEFAULT_RUN_ID,
     requestId: harness.request.requestId,
     answers: [
       { id: 'notes', freeText: 'Reconnected socket' },
@@ -204,25 +203,170 @@ function testResponseFromNewSocketRebindsAndResolvesPendingRequest(): void {
     },
   ]);
   assert.equal(harness.rejectedError, null);
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), false);
+  assert.equal(hasDefaultPendingPlanInput(harness), false);
   assert.deepEqual(harness.emitted, [
     {
       ws: harness.otherSocket,
       type: 'plan_input_resolved',
       data: {
-        runId: 'run-1',
+        runId: DEFAULT_RUN_ID,
         context: harness.context,
-        requestId: 'req-1',
+        requestId: DEFAULT_REQUEST_ID,
       },
     },
   ]);
-  assert.deepEqual(harness.lifecycle, ['delete:run-1', 'meta:update', 'resolve', 'emit:plan_input_resolved:other']);
+  assert.deepEqual(harness.lifecycle, [`delete:${DEFAULT_RUN_ID}`, 'meta:update', 'resolve', 'emit:plan_input_resolved:other']);
+}
+
+function testResponseFromSecondLiveSocketIsRejectedWithoutRebinding(): void {
+  const harness = createHarness();
+  const pending = getDefaultPendingPlanInput<{
+    ws: object;
+  }>(harness);
+
+  harness.server.handlePlanInputResponse(harness.otherSocket, {
+    runId: DEFAULT_RUN_ID,
+    requestId: harness.request.requestId,
+    answers: [
+      { id: 'notes', freeText: 'Wrong socket' },
+      { id: 'mode', selectedLabel: 'Safe' },
+    ],
+  });
+
+  assert.equal(pending.ws, harness.ownerSocket);
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
+  assert.equal(harness.resolvedAnswers, null);
+  assert.equal(harness.rejectedError, null);
+  assert.deepEqual(harness.emitted, [
+    {
+      ws: harness.otherSocket,
+      type: 'plan_input_error',
+      data: {
+        runId: DEFAULT_RUN_ID,
+        requestId: DEFAULT_REQUEST_ID,
+        error: 'plan_input_response must come from the pending request owner socket',
+      },
+    },
+  ]);
+  assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:other']);
+}
+
+function testResponseFromSecondSocketIsRejectedWhenOwnerClosedButNotDetached(): void {
+  const harness = createHarness();
+  const pending = getDefaultPendingPlanInput<{
+    ws: { readyState: number };
+    detachedAt?: number;
+    detachTimer?: ReturnType<typeof setTimeout>;
+  }>(harness);
+  pending.ws.readyState = WebSocket.CLOSED;
+
+  harness.server.handlePlanInputResponse(harness.otherSocket, {
+    runId: DEFAULT_RUN_ID,
+    requestId: harness.request.requestId,
+    answers: [
+      { id: 'notes', freeText: 'Racy socket' },
+      { id: 'mode', selectedLabel: 'Safe' },
+    ],
+  });
+
+  assert.equal(pending.ws, harness.ownerSocket);
+  assert.equal(pending.detachedAt, undefined);
+  assert.equal(pending.detachTimer, undefined);
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
+  assert.equal(harness.resolvedAnswers, null);
+  assert.equal(harness.rejectedError, null);
+  assert.deepEqual(harness.emitted, [
+    {
+      ws: harness.otherSocket,
+      type: 'plan_input_error',
+      data: {
+        runId: DEFAULT_RUN_ID,
+        requestId: DEFAULT_REQUEST_ID,
+        error: 'plan_input_response must come from the pending request owner socket',
+      },
+    },
+  ]);
+  assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:other']);
+}
+
+function testInvalidResponseFromNewSocketDoesNotRebindPendingSocket(): void {
+  const harness = createHarness();
+  const pending = getDefaultPendingPlanInput<{
+    ws: object;
+    detachedAt?: number;
+    detachTimer?: ReturnType<typeof setTimeout>;
+  }>(harness);
+  const detachTimer = setTimeout(() => undefined, 60000);
+  detachTimer.unref?.();
+  pending.detachedAt = Date.now();
+  pending.detachTimer = detachTimer;
+
+  harness.server.handlePlanInputResponse(harness.otherSocket, {
+    runId: DEFAULT_RUN_ID,
+    requestId: harness.request.requestId,
+    answers: [{ id: 'mode', selectedIndex: 9 }],
+  });
+
+  assert.equal(pending.ws, harness.ownerSocket);
+  assert.equal(pending.detachTimer, detachTimer);
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
+  assert.equal(harness.resolvedAnswers, null);
+  assert.equal(harness.rejectedError, null);
+  assert.deepEqual(harness.emitted, [
+    {
+      ws: harness.otherSocket,
+      type: 'plan_input_error',
+      data: {
+        runId: DEFAULT_RUN_ID,
+        context: harness.context,
+        requestId: DEFAULT_REQUEST_ID,
+        error: 'answers[0] must select an option or provide freeText',
+      },
+    },
+  ]);
+  assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:other', 'meta:update']);
+  assert.equal(
+    (harness.metaUpdates[0]?.patch.pendingPlanInput as { lastError?: string }).lastError,
+    'answers[0] must select an option or provide freeText'
+  );
+}
+
+function testObserveOnlyPlanInputResponseIsRejected(): void {
+  const harness = createHarness();
+  harness.server.isObserveOnlyActiveRun = () => true;
+
+  harness.server.handlePlanInputResponse(harness.ownerSocket, {
+    runId: DEFAULT_RUN_ID,
+    requestId: harness.request.requestId,
+    answers: [
+      { id: 'notes', freeText: 'CLI plan can be approved from Web' },
+      { id: 'mode', selectedLabel: 'Safe' },
+    ],
+  });
+
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
+  assert.equal(harness.rejectedError, null);
+  assert.equal(harness.resolvedAnswers, null);
+  assert.deepEqual(harness.emitted, [
+    {
+      ws: harness.ownerSocket,
+      type: 'plan_input_error',
+      data: {
+        runId: DEFAULT_RUN_ID,
+        context: harness.context,
+        requestId: DEFAULT_REQUEST_ID,
+        error: 'observe_only',
+      },
+    },
+  ]);
+  assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:owner']);
+  assert.deepEqual(harness.metaUpdates, []);
 }
 
 function testRequestIdMismatchDoesNotResolvePendingRequest(): void {
   const harness = createHarness();
   harness.server.handlePlanInputResponse(harness.ownerSocket, {
-    runId: 'run-1',
+    runId: DEFAULT_RUN_ID,
     requestId: 'wrong-request',
     answers: [],
   });
@@ -231,11 +375,11 @@ function testRequestIdMismatchDoesNotResolvePendingRequest(): void {
     {
       ws: harness.ownerSocket,
       type: 'plan_input_error',
-      data: { runId: 'run-1', error: 'requestId mismatch for plan_input_response' },
+      data: { runId: DEFAULT_RUN_ID, error: 'requestId mismatch for plan_input_response' },
     },
   ]);
   assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:owner']);
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), true);
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
   assert.equal(harness.resolvedAnswers, null);
   assert.equal(harness.rejectedError, null);
 }
@@ -243,13 +387,13 @@ function testRequestIdMismatchDoesNotResolvePendingRequest(): void {
 function testResolvePlanInputResponseTargetReturnsTrimmedTransportContext(): void {
   const harness = createHarness();
   const target = harness.server.resolvePlanInputResponseTarget(harness.ownerSocket, {
-    runId: '  run-1  ',
-    requestId: '  req-1  ',
+    runId: `  ${DEFAULT_RUN_ID}  `,
+    requestId: `  ${DEFAULT_REQUEST_ID}  `,
   });
 
   assert.ok(target);
-  assert.equal(target.runId, 'run-1');
-  assert.equal(target.requestId, 'req-1');
+  assert.equal(target.runId, DEFAULT_RUN_ID);
+  assert.equal(target.requestId, DEFAULT_REQUEST_ID);
   assert.equal(target.pending.ws, harness.ownerSocket);
   assert.deepEqual(target.pending.context, harness.context);
   assert.deepEqual(harness.emitted, []);
@@ -259,7 +403,7 @@ function testResolvePlanInputResponseTargetReturnsTrimmedTransportContext(): voi
 function testNormalizationFailureIncludesRequestIdAndKeepsPending(): void {
   const harness = createHarness();
   harness.server.handlePlanInputResponse(harness.ownerSocket, {
-    runId: 'run-1',
+    runId: DEFAULT_RUN_ID,
     requestId: harness.request.requestId,
   });
 
@@ -268,14 +412,15 @@ function testNormalizationFailureIncludesRequestIdAndKeepsPending(): void {
       ws: harness.ownerSocket,
       type: 'plan_input_error',
       data: {
-        runId: 'run-1',
+        runId: DEFAULT_RUN_ID,
+        context: harness.context,
         requestId: harness.request.requestId,
         error: 'answers must be an array',
       },
     },
   ]);
   assert.deepEqual(harness.lifecycle, ['emit:plan_input_error:owner', 'meta:update']);
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), true);
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
   assert.equal(harness.resolvedAnswers, null);
   assert.equal(harness.rejectedError, null);
   assert.equal(
@@ -287,7 +432,7 @@ function testNormalizationFailureIncludesRequestIdAndKeepsPending(): void {
 function testResolvePlanInputResponseAnswersEmitsRequestBoundErrorAndKeepsPending(): void {
   const harness = createHarness();
   const target = harness.server.resolvePlanInputResponseTarget(harness.ownerSocket, {
-    runId: 'run-1',
+    runId: DEFAULT_RUN_ID,
     requestId: harness.request.requestId,
   });
 
@@ -295,14 +440,14 @@ function testResolvePlanInputResponseAnswersEmitsRequestBoundErrorAndKeepsPendin
   const answers = harness.server.resolvePlanInputResponseAnswers(
     harness.ownerSocket,
     {
-      runId: 'run-1',
+      runId: DEFAULT_RUN_ID,
       requestId: harness.request.requestId,
     },
     target
   );
 
   assert.equal(answers, null);
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), true);
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
   assert.equal(harness.resolvedAnswers, null);
   assert.equal(harness.rejectedError, null);
   assert.deepEqual(harness.emitted, [
@@ -310,7 +455,8 @@ function testResolvePlanInputResponseAnswersEmitsRequestBoundErrorAndKeepsPendin
       ws: harness.ownerSocket,
       type: 'plan_input_error',
       data: {
-        runId: 'run-1',
+        runId: DEFAULT_RUN_ID,
+        context: harness.context,
         requestId: harness.request.requestId,
         error: 'answers must be an array',
       },
@@ -322,7 +468,7 @@ function testResolvePlanInputResponseAnswersEmitsRequestBoundErrorAndKeepsPendin
 function testResolvePlanInputResponseAnswersReturnsCanonicalOrderedAnswers(): void {
   const harness = createHarness();
   const target = harness.server.resolvePlanInputResponseTarget(harness.ownerSocket, {
-    runId: 'run-1',
+    runId: DEFAULT_RUN_ID,
     requestId: harness.request.requestId,
   });
 
@@ -330,7 +476,7 @@ function testResolvePlanInputResponseAnswersReturnsCanonicalOrderedAnswers(): vo
   const answers = harness.server.resolvePlanInputResponseAnswers(
     harness.ownerSocket,
     {
-      runId: 'run-1',
+      runId: DEFAULT_RUN_ID,
       requestId: harness.request.requestId,
       answers: [
         { id: 'notes', freeText: 'Ship after regression' },
@@ -354,7 +500,7 @@ function testResolvePlanInputResponseAnswersReturnsCanonicalOrderedAnswers(): vo
       freeText: 'Ship after regression',
     },
   ]);
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), true);
+  assert.equal(hasDefaultPendingPlanInput(harness), true);
   assert.deepEqual(harness.emitted, []);
   assert.deepEqual(harness.lifecycle, []);
 }
@@ -362,7 +508,7 @@ function testResolvePlanInputResponseAnswersReturnsCanonicalOrderedAnswers(): vo
 function testCompletePlanInputResponseDeletesResolvesAndEmitsResolved(): void {
   const harness = createHarness();
   const target = harness.server.resolvePlanInputResponseTarget(harness.ownerSocket, {
-    runId: 'run-1',
+    runId: DEFAULT_RUN_ID,
     requestId: harness.request.requestId,
   });
 
@@ -382,7 +528,7 @@ function testCompletePlanInputResponseDeletesResolvesAndEmitsResolved(): void {
     },
   ]);
 
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), false);
+  assert.equal(hasDefaultPendingPlanInput(harness), false);
   assert.equal(harness.rejectedError, null);
   assert.deepEqual(harness.resolvedAnswers, [
     {
@@ -403,23 +549,22 @@ function testCompletePlanInputResponseDeletesResolvesAndEmitsResolved(): void {
       ws: harness.ownerSocket,
       type: 'plan_input_resolved',
       data: {
-        runId: 'run-1',
+        runId: DEFAULT_RUN_ID,
         context: harness.context,
-        requestId: 'req-1',
+        requestId: DEFAULT_REQUEST_ID,
       },
     },
   ]);
-  assert.deepEqual(harness.lifecycle, ['delete:run-1', 'meta:update', 'resolve', 'emit:plan_input_resolved:owner']);
+  assert.deepEqual(harness.lifecycle, [`delete:${DEFAULT_RUN_ID}`, 'meta:update', 'resolve', 'emit:plan_input_resolved:owner']);
   assert.equal(harness.metaUpdates.length, 1);
   assert.equal(harness.metaUpdates[0]?.patch.pendingPlanInput, undefined);
 }
 
 async function testRequestUserInputAndPlanInputResponseSharePendingLifecycle(): Promise<void> {
-  const emitted: EmittedMessage[] = [];
   const lifecycle: string[] = [];
   const metaUpdates: Array<{ context: ContextRef; patch: Record<string, unknown> }> = [];
   let metaState: Record<string, unknown> = {};
-  const ownerSocket = { socket: 'owner', readyState: WebSocket.OPEN };
+  const ownerSocket = createOpenSocket('owner');
   const context: ContextRef = {
     scope: 'session',
     namespace: 'sess-flow',
@@ -445,12 +590,12 @@ async function testRequestUserInputAndPlanInputResponseSharePendingLifecycle(): 
     ],
   };
 
-  const server = Object.create(WebServer.prototype) as any;
-  server.pendingPlanInputByRunId = new RecordingPendingPlanInputMap(lifecycle);
-  server.emitToClient = (ws: object, message: Omit<EmittedMessage, 'ws'>) => {
-    lifecycle.push(`emit:${message.type}:${ws === ownerSocket ? 'owner' : 'other'}`);
-    emitted.push({ ws, ...message });
-  };
+  const server = createWebServerDouble();
+  replacePendingPlanInputs(server, new RecordingMap<string, any>(lifecycle));
+  const { emitted } = attachEmitCapture(server, {
+    lifecycle,
+    labelForSocket: (ws) => (ws === ownerSocket ? 'owner' : 'other'),
+  });
   server.getContextNamespaceMetaSafe = () => metaState;
   server.updateContextNamespaceMetaSafe = (nextContext: ContextRef, patch: Record<string, unknown>) => {
     lifecycle.push('meta:update');
@@ -460,6 +605,7 @@ async function testRequestUserInputAndPlanInputResponseSharePendingLifecycle(): 
       ...patch,
     };
   };
+  server.isObserveOnlyActiveRun = () => false;
 
   const answerPromise = server
     .requestUserInputFromSocket(ownerSocket, context, 'run-flow', request, (nextRequest: PlanInputRequest) => {
@@ -470,7 +616,7 @@ async function testRequestUserInputAndPlanInputResponseSharePendingLifecycle(): 
       return answers;
     });
 
-  assert.equal(server.pendingPlanInputByRunId.has('run-flow'), true);
+  assert.equal(getPendingPlanInputs(server).has('run-flow'), true);
 
   server.handlePlanInputResponse(ownerSocket, {
     runId: 'run-flow',
@@ -496,7 +642,7 @@ async function testRequestUserInputAndPlanInputResponseSharePendingLifecycle(): 
       freeText: 'Shared pending contract',
     },
   ]);
-  assert.equal(server.pendingPlanInputByRunId.has('run-flow'), false);
+  assert.equal(getPendingPlanInputs(server).has('run-flow'), false);
   assert.deepEqual(emitted, [
     {
       ws: ownerSocket,
@@ -526,8 +672,8 @@ async function testRequestUserInputAndPlanInputResponseSharePendingLifecycle(): 
 function testSuccessResolvesAnswersDeletesPendingAndEmitsResolved(): void {
   const harness = createHarness();
   harness.server.handlePlanInputResponse(harness.ownerSocket, {
-    runId: '  run-1  ',
-    requestId: '  req-1  ',
+    runId: `  ${DEFAULT_RUN_ID}  `,
+    requestId: `  ${DEFAULT_REQUEST_ID}  `,
     answers: [
       { id: 'notes', freeText: 'Ship after regression' },
       { id: 'mode', selectedLabel: 'Safe' },
@@ -549,28 +695,28 @@ function testSuccessResolvesAnswersDeletesPendingAndEmitsResolved(): void {
     },
   ]);
   assert.equal(harness.rejectedError, null);
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), false);
+  assert.equal(hasDefaultPendingPlanInput(harness), false);
   assert.deepEqual(harness.emitted, [
     {
       ws: harness.ownerSocket,
       type: 'plan_input_resolved',
       data: {
-        runId: 'run-1',
+        runId: DEFAULT_RUN_ID,
         context: harness.context,
-        requestId: 'req-1',
+        requestId: DEFAULT_REQUEST_ID,
       },
     },
   ]);
-  assert.deepEqual(harness.lifecycle, ['delete:run-1', 'meta:update', 'resolve', 'emit:plan_input_resolved:owner']);
+  assert.deepEqual(harness.lifecycle, [`delete:${DEFAULT_RUN_ID}`, 'meta:update', 'resolve', 'emit:plan_input_resolved:owner']);
   assert.equal(harness.metaUpdates.length, 1);
   assert.equal(harness.metaUpdates[0]?.patch.pendingPlanInput, undefined);
 }
 
 function testRejectPendingPlanInputDeletesRejectsAndEmitsError(): void {
   const harness = createHarness();
-  harness.server.rejectPendingPlanInputByRunId('run-1', 'run_canceled');
+  harness.server.rejectPendingPlanInputByRunId(DEFAULT_RUN_ID, 'run_canceled');
 
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), false);
+  assert.equal(hasDefaultPendingPlanInput(harness), false);
   assert.equal(harness.resolvedAnswers, null);
   assert.equal(harness.rejectedError?.message, 'run_canceled');
   assert.deepEqual(harness.emitted, [
@@ -578,14 +724,14 @@ function testRejectPendingPlanInputDeletesRejectsAndEmitsError(): void {
       ws: harness.ownerSocket,
       type: 'plan_input_error',
       data: {
-        runId: 'run-1',
+        runId: DEFAULT_RUN_ID,
         context: harness.context,
         requestId: harness.request.requestId,
         error: 'run_canceled',
       },
     },
   ]);
-  assert.deepEqual(harness.lifecycle, ['delete:run-1', 'meta:update', 'reject', 'emit:plan_input_error:owner']);
+  assert.deepEqual(harness.lifecycle, [`delete:${DEFAULT_RUN_ID}`, 'meta:update', 'reject', 'emit:plan_input_error:owner']);
   assert.equal(harness.metaUpdates.length, 1);
   assert.equal(harness.metaUpdates[0]?.patch.pendingPlanInput, undefined);
 }
@@ -594,6 +740,10 @@ async function runAll(): Promise<void> {
   testMissingRunIdEmitsTransportError();
   testUnknownRunIdEmitsTransportError();
   testResponseFromNewSocketRebindsAndResolvesPendingRequest();
+  testResponseFromSecondLiveSocketIsRejectedWithoutRebinding();
+  testResponseFromSecondSocketIsRejectedWhenOwnerClosedButNotDetached();
+  testInvalidResponseFromNewSocketDoesNotRebindPendingSocket();
+  testObserveOnlyPlanInputResponseIsRejected();
   testRequestIdMismatchDoesNotResolvePendingRequest();
   testResolvePlanInputResponseTargetReturnsTrimmedTransportContext();
   testNormalizationFailureIncludesRequestIdAndKeepsPending();

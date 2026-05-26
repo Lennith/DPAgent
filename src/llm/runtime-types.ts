@@ -1,12 +1,15 @@
 import type {
   APIProvider,
+  ContextUsageEstimate,
   ContextWindowTrimOptions,
   LLMResponse,
   Message,
+  PreparedMessagesResult,
   PreparedMessagesSnapshot,
   ResolvedLlmRuntimeConfig,
   ToolSchema,
 } from '../types.js';
+import type { PreparedInputUsageSnapshot } from '../runtime/context-window-budget.js';
 
 export interface StreamCallbacks {
   onText?: (text: string) => void;
@@ -29,13 +32,20 @@ export interface LLMRequestOptions {
   maxTokens?: number;
   trimOptions?: ContextWindowTrimOptions;
   snapshotStage?: PreparedMessagesSnapshot['stage'];
+  signal?: AbortSignal;
+}
+
+export interface PreparedProviderPayload {
+  messages: Message[];
+  systemPrompt?: string;
+  preparation: PreparedMessagesResult;
 }
 
 export type LLMStreamEvent =
   | { type: 'text'; data: string }
   | { type: 'thinking'; data: string }
-  | { type: 'tool_start'; data: { id: string; name: string } }
-  | { type: 'tool_input'; data: string }
+  | { type: 'tool_start'; data: { id: string; name: string; index?: number } }
+  | { type: 'tool_input'; data: ({ id: string; index?: number } | { id?: string; index: number }) & { chunk: string } }
   | { type: 'complete'; data: LLMResponse };
 
 export interface LLMRuntime {
@@ -59,4 +69,23 @@ export interface LLMRuntime {
     systemPrompt?: string,
     options?: LLMRequestOptions
   ): Promise<LLMResponse>;
+  generatePreparedWithCallbacks(
+    messages: Message[],
+    callbacks: StreamCallbacks,
+    tools?: ToolSchema[],
+    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ): Promise<LLMResponse>;
+  estimatePreparedInputUsage?(
+    messages: Message[],
+    tools?: ToolSchema[],
+    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ): ContextUsageEstimate;
+  capturePreparedInputUsageSnapshot?(
+    messages: Message[],
+    tools?: ToolSchema[],
+    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ): PreparedInputUsageSnapshot;
 }

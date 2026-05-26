@@ -1,7 +1,7 @@
 import { createAgent } from '../src/index.js';
 import type { AgentCallback, MCPServerConfig } from '../src/types.js';
 
-const API_KEY = 'sk-cp-6VmqjCaCEtLrtmM1B2qAlObOAa_3XVf6fzqgwpk_oleR87SzhFT6ViXmPcGJyWI2nzGbQNFRkxsI-itPbLoSGU5dSwQJHI0CO1SdNqylAz2KZZbcHz82CSE';
+const API_KEY = process.env.MINIMAX_INTEGRATION_API_KEY ?? 'YOUR_MINIMAX_API_KEY';
 
 const MCP_SERVER_CONFIG: MCPServerConfig = {
   name: 'MiniMax-Coding-Plan',

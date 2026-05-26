@@ -15,7 +15,6 @@ import type {
   Message,
   ReplayCheckpointSnapshot,
   ReplayCutoffKind,
-  RunTerminalCode,
   SideEffectLedgerEntry,
   ToolResult,
   ToolResultArtifactRef,
@@ -23,7 +22,7 @@ import type {
 } from '../types.js';
 import { ContextEventStore } from './ContextEventStore.js';
 import { InterruptedTurnStore } from './InterruptedTurnStore.js';
-import { ContextProjector } from './ContextProjector.js';
+import { ContextProjector, type TimestampedConversationMessage } from './ContextProjector.js';
 import {
   buildPendingOverlay,
   createContextInspectState,
@@ -32,143 +31,50 @@ import {
 } from './context-inspection.js';
 import { ContextIntegrityHelper } from './ContextIntegrityHelper.js';
 import { ContextTransactionCoordinator } from './ContextTransactionCoordinator.js';
+import { ReplayCheckpointCoordinator } from './ReplayCheckpointCoordinator.js';
 import { buildToolProtocolFrames } from '../llm/tool-protocol.js';
+import {
+  ARTIFACT_READ_MAX_SCAN_BYTES,
+  TOOL_RESULT_PAYLOAD_MARKERS,
+  buildReadToolResultArtifactContent,
+  buildStoredToolResultContent,
+  redactToolCallMessagesForCheckpoint,
+  resolveArtifactReadLineLimit,
+  resolveArtifactReadMaxChars,
+  resolveToolResultArtifactPreviewChars,
+  resolveToolResultArtifactThreshold,
+} from '../runtime/tool-result-payload-policy.js';
+import type {
+  BeginTurnInput,
+  BeginTurnResult,
+  CommitTurnInput,
+  CommitTurnResult,
+  ContextCheckpoint,
+  ContextCheckpointResult,
+  ContextTransaction,
+  ContextValidationResult,
+  ContextVersionChain,
+  FinalizeInterruptedTurnInput,
+  LoadForTurnResult,
+  PendingTurn,
+  ToolResultArtifactMaterialization,
+  TurnPromptState,
+} from './context-manager-contracts.js';
 
-interface PendingTurn {
-  turnId: string;
-  ref: ContextRef;
-  startedAt: string;
-  prompt: string;
-  rawUserPrompt: string;
-  historyUserPrompt: string;
-  effectivePrompt: string;
-  promptRef?: string;
-  promptInjected: boolean;
-  workspaceDir?: string;
-  bufferedEvents: ContextEvent[];
-  eventSequenceBase: number; // REQ-0005: Base sequence number for continuity tracking
-  draftId?: string;
-  runId?: string;
-  runFamilyId?: string;
-  maxSteps?: number;
-}
-
-export interface ContextCheckpoint {
-  checkpointId: string;
-  turnId: string;
-  ref: ContextRef;
-  createdAt: string;
-  hash: string;
-  eventCount: number;
-  semanticEventCount: number;
-  messageCount: number;
-}
-
-export interface ContextCheckpointResult {
-  checkpoint: ContextCheckpoint;
-  projection: ContextProjection;
-}
-
-export interface ContextValidationResult {
-  valid: boolean;
-  checkpointId: string;
-  expectedHash: string;
-  actualHash: string;
-  eventCountMatch: boolean;
-  rollbackPerformed: boolean;
-}
-
-export interface LoadForTurnResult {
-  context: ContextRef;
-  projection: ContextProjection;
-  systemSegment: string;
-  meta?: ContextNamespaceMeta;
-}
-
-export interface BeginTurnResult {
-  turnId: string;
-  context: ContextRef;
-  startedAt: string;
-}
-
-export interface BeginTurnInput {
-  rawUserPrompt?: string;
-  historyUserPrompt?: string;
-  effectivePrompt?: string;
-  promptRef?: string;
-  promptInjected?: boolean;
-  draftId?: string;
-  runId?: string;
-  runFamilyId?: string;
-  maxSteps?: number;
-}
-
-export interface CommitTurnInput {
-  messages: Message[];
-  rawUserPrompt?: string;
-  historyUserPrompt?: string;
-  effectivePrompt?: string;
-  promptRef?: string;
-  promptInjected?: boolean;
-  finalOutputText?: string;
-  finishReason?: string;
-  usage?: TokenUsage;
-}
-
-interface TurnPromptState {
-  rawUserPrompt: string;
-  historyUserPrompt: string;
-  effectivePrompt: string;
-  promptRef?: string;
-  promptInjected: boolean;
-}
-
-export interface CommitTurnResult {
-  turnId: string;
-  context: ContextRef;
-  contextVersion: number;
-  summary: string;
-}
-
-export interface ToolResultArtifactMaterialization {
-  content: string;
-  artifact?: ToolResultArtifactRef;
-}
-
-export interface FinalizeInterruptedTurnInput {
-  terminalCode: Exclude<RunTerminalCode, 'completed'>;
-  maxSteps: number;
-  lastSafeStep: number;
-  errorSummary?: string;
-  previewMessages: Message[];
-  sideEffectLedger: SideEffectLedgerEntry[];
-  resumable: boolean;
-  resumeToken?: string;
-}
-
-export interface ContextVersionChain {
-  contextRef: ContextRef;
-  previousVersion: number;
-  currentVersion: number;
-  gapSize: number;
-  turnId: string;
-  isValid: boolean;
-  jumpDetected: boolean;
-  jumpSize: number;
-}
-
-/**
- * REQ-0009: Atomic context-write transaction with version stamping.
- * Ensures context writes are atomic and versioned for integrity.
- */
-export interface ContextTransaction {
-  transactionId: string;
-  ref: ContextRef;
-  versionStamp: number;
-  events: ContextEvent[];
-  committed: boolean;
-  createdAt: string;
-}
+export type {
+  BeginTurnInput,
+  BeginTurnResult,
+  CommitTurnInput,
+  CommitTurnResult,
+  ContextCheckpoint,
+  ContextCheckpointResult,
+  ContextTransaction,
+  ContextValidationResult,
+  ContextVersionChain,
+  FinalizeInterruptedTurnInput,
+  LoadForTurnResult,
+  ToolResultArtifactMaterialization,
+} from './context-manager-contracts.js';
 
 export class ContextManager {
   private readonly eventStore: ContextEventStore;
@@ -177,11 +83,16 @@ export class ContextManager {
   private readonly interruptedTurnStore: InterruptedTurnStore;
   private readonly integrityHelper: ContextIntegrityHelper;
   private readonly transactionCoordinator: ContextTransactionCoordinator;
+  private readonly replayCheckpointCoordinator: ReplayCheckpointCoordinator;
 
   constructor(eventStore: ContextEventStore, projector?: ContextProjector) {
     this.eventStore = eventStore;
     this.projector = projector ?? new ContextProjector();
     this.interruptedTurnStore = new InterruptedTurnStore(this.eventStore);
+    this.replayCheckpointCoordinator = new ReplayCheckpointCoordinator({
+      interruptedTurnStore: this.interruptedTurnStore,
+      getPendingTurn: (turnId) => this.pendingTurns.get(turnId),
+    });
     this.integrityHelper = new ContextIntegrityHelper({
       eventStore: this.eventStore,
       projector: this.projector,
@@ -202,6 +113,11 @@ export class ContextManager {
 
   getEventStore(): ContextEventStore {
     return this.eventStore;
+  }
+
+  hasPendingTurn(turnId: string | null | undefined): boolean {
+    const normalized = String(turnId ?? '').trim();
+    return normalized.length > 0 && this.pendingTurns.has(normalized);
   }
 
   loadForTurn(ref: ContextRef): LoadForTurnResult {
@@ -364,6 +280,7 @@ export class ContextManager {
     if (!pending) {
       throw new Error(`Unknown pending turn: ${turnId}`);
     }
+    this.flushReplayCheckpoints(turnId);
     return this.commitPendingTurn(pending, turnId, input);
   }
 
@@ -372,23 +289,9 @@ export class ContextManager {
     if (!pending?.draftId || !pending.runId || !pending.runFamilyId || typeof pending.maxSteps !== 'number') {
       return false;
     }
-    const replaySafeMessages = this
-      .trimMessagesToReplaySafeBoundary(this.cloneMessages(input.messages))
-      .map((message) =>
-        message.role === 'assistant'
-          ? {
-              ...message,
-              thinking: undefined,
-              thinkingSignature: undefined,
-              metadata: message.metadata
-                ? {
-                    ...message.metadata,
-                    thinkingComplete: false,
-                  }
-                : undefined,
-            }
-          : message
-      );
+    const replaySafeMessages = redactToolCallMessagesForCheckpoint(
+      this.trimMessagesToReplaySafeBoundary(this.cloneMessages(input.messages))
+    );
     const checkpoint: ReplayCheckpointSnapshot = {
       observedAt: input.observedAt,
       step: Math.max(0, Math.floor(input.step)),
@@ -396,7 +299,7 @@ export class ContextManager {
       bufferedEventCount: pending.bufferedEvents.length,
     };
     const currentDraft = this.interruptedTurnStore.loadDraft(pending.ref);
-    const baseDraft: DraftTurnRecord = currentDraft ?? {
+    const existingDraft: DraftTurnRecord = currentDraft ?? {
       draftId: pending.draftId,
       context: pending.ref,
       turnId,
@@ -408,15 +311,27 @@ export class ContextManager {
       maxSteps: pending.maxSteps,
       baselineEventCount: pending.eventSequenceBase,
     };
-    this.interruptedTurnStore.saveDraft(pending.ref, {
-      ...baseDraft,
+    const nextDraft: DraftTurnRecord = {
+      ...existingDraft,
       turnId,
       runId: pending.runId,
       runFamilyId: pending.runFamilyId,
       maxSteps: pending.maxSteps,
       updatedAt: input.observedAt,
-      checkpoint,
-    });
+    };
+    const baseDraft: Omit<DraftTurnRecord, 'checkpoint'> = {
+      draftId: nextDraft.draftId,
+      context: nextDraft.context,
+      turnId: nextDraft.turnId,
+      runId: nextDraft.runId,
+      runFamilyId: nextDraft.runFamilyId,
+      workspaceDir: nextDraft.workspaceDir,
+      createdAt: nextDraft.createdAt,
+      updatedAt: nextDraft.updatedAt,
+      maxSteps: nextDraft.maxSteps,
+      baselineEventCount: nextDraft.baselineEventCount,
+    };
+    this.replayCheckpointCoordinator.enqueue(turnId, pending.ref, baseDraft, checkpoint);
     return true;
   }
 
@@ -425,6 +340,7 @@ export class ContextManager {
     if (!pending) {
       throw new Error(`Unknown pending turn: ${turnId}`);
     }
+    this.flushReplayCheckpoints(turnId);
     const draft = this.interruptedTurnStore.loadDraft(pending.ref);
     const checkpoint = draft?.turnId === turnId ? draft.checkpoint : undefined;
     const checkpointBufferedEventCount = checkpoint?.bufferedEventCount ?? 1;
@@ -489,14 +405,12 @@ export class ContextManager {
       workspaceDir: draft?.workspaceDir ?? pending.workspaceDir,
       terminalCode: input.terminalCode,
       replayCutoffKind: replayCutoffKind === 'checkpoint' ? 'checkpoint' : 'none',
-      resumable: input.resumable,
-      resumeToken: input.resumable ? input.resumeToken : undefined,
       lastSafeStep: Math.max(0, Math.floor(input.lastSafeStep)),
       maxSteps: Math.max(0, Math.floor(input.maxSteps)),
       errorSummary: input.errorSummary?.trim() || undefined,
       createdAt,
       updatedAt: createdAt,
-      previewMessages: this.cloneMessages(input.previewMessages),
+      previewMessages: redactToolCallMessagesForCheckpoint(this.cloneMessages(input.previewMessages)),
       sideEffectLedger: input.sideEffectLedger.map((entry) => ({
         ...entry,
         args: entry.args ? { ...entry.args } : undefined,
@@ -516,35 +430,13 @@ export class ContextManager {
   }
 
   getDraftRecord(ref: ContextRef): DraftTurnRecord | undefined {
-    return this.interruptedTurnStore.loadDraft(this.normalizeRef(ref));
+    const normalized = this.normalizeRef(ref);
+    this.replayCheckpointCoordinator.flushForRef(normalized);
+    return this.interruptedTurnStore.loadDraft(normalized);
   }
 
-  dismissInterruptedArtifact(ref: ContextRef): InterruptedArtifact | undefined {
-    const normalized = this.normalizeRef(ref);
-    const artifact = this.interruptedTurnStore.loadArtifact(normalized);
-    if (!artifact) {
-      return undefined;
-    }
-    const dismissed = {
-      ...artifact,
-      updatedAt: new Date().toISOString(),
-      dismissedAt: new Date().toISOString(),
-      resumable: false,
-      resumeToken: undefined,
-    };
-    return this.interruptedTurnStore.saveArtifact(normalized, dismissed);
-  }
-
-  updateInterruptedArtifact(
-    ref: ContextRef,
-    updater: (artifact: InterruptedArtifact) => InterruptedArtifact
-  ): InterruptedArtifact | undefined {
-    const normalized = this.normalizeRef(ref);
-    const artifact = this.interruptedTurnStore.loadArtifact(normalized);
-    if (!artifact) {
-      return undefined;
-    }
-    return this.interruptedTurnStore.saveArtifact(normalized, updater(artifact));
+  flushReplayCheckpoints(turnId?: string): void {
+    this.replayCheckpointCoordinator.flush(turnId);
   }
 
   clearInterruptedArtifact(ref: ContextRef): void {
@@ -572,6 +464,7 @@ export class ContextManager {
     if (!pending) {
       return false;
     }
+    this.replayCheckpointCoordinator.drop(turnId);
     this.pendingTurns.delete(turnId);
     this.interruptedTurnStore.clearDraft(pending.ref);
     return true;
@@ -604,6 +497,7 @@ export class ContextManager {
       compressedHistoryContext: meta?.compressedHistoryContext,
       autoLoopConfig: meta?.autoLoopConfig,
       agentInjectionState: meta?.agentInjectionState,
+      planningState: meta?.planningState,
       automationRun: meta?.automationRun,
       projection,
     };
@@ -693,10 +587,19 @@ export class ContextManager {
   ): Message[] {
     const normalized = this.normalizeRef(ref);
     const events = this.eventStore.readEvents(normalized.scope, normalized.namespace);
-    return this.applyLegacyToolResultArtifacts(
-      normalized,
-      this.projector.toConversationMessages(events, options)
-    );
+    return this.projector.toConversationMessages(events, options);
+  }
+
+  getConversationMessagesWithTimestamps(
+    ref: ContextRef,
+    options?: {
+      preserveAgentProfileRefs?: boolean;
+      includeInterruptedCheckpoints?: boolean;
+    }
+  ): TimestampedConversationMessage[] {
+    const normalized = this.normalizeRef(ref);
+    const events = this.eventStore.readEvents(normalized.scope, normalized.namespace);
+    return this.projector.toConversationMessagesWithTimestamps(events, options);
   }
 
   materializeToolResultArtifact(
@@ -709,7 +612,7 @@ export class ContextManager {
       previewChars?: number;
     }
   ): ToolResultArtifactMaterialization {
-    const thresholdChars = Math.max(1000, Math.floor(input.thresholdChars ?? 50000));
+    const thresholdChars = resolveToolResultArtifactThreshold(input.thresholdChars);
     if (input.content.length <= thresholdChars) {
       return { content: input.content };
     }
@@ -728,7 +631,7 @@ export class ContextManager {
     fs.writeFileSync(artifactPath, input.content, { encoding: 'utf-8', flag: 'wx' });
     this.assertSafeArtifactFilePath(artifactPath, artifactRoot);
 
-    const previewChars = Math.max(200, Math.min(12000, Math.floor(input.previewChars ?? 3000)));
+    const previewChars = resolveToolResultArtifactPreviewChars(input.previewChars);
     const preview = input.content.slice(0, previewChars);
     const artifact: ToolResultArtifactRef = {
       artifactId,
@@ -741,7 +644,7 @@ export class ContextManager {
     };
     return {
       artifact,
-      content: this.buildToolResultArtifactContent(artifact, preview),
+      content: buildStoredToolResultContent(artifact, preview),
     };
   }
 
@@ -774,16 +677,21 @@ export class ContextManager {
       return { success: false, content: '', error: error instanceof Error ? error.message : String(error) };
     }
     const offset = Math.max(0, Math.floor(input.offset ?? 0));
-    const limit = Math.max(1, Math.min(400, Math.floor(input.limit ?? 200)));
-    const maxChars = Math.max(1000, Math.min(24000, Math.floor(input.maxChars ?? 12000)));
-    const maxScanBytes = 8 * 1024 * 1024;
+    const limit = resolveArtifactReadLineLimit(input.limit);
+    const maxChars = resolveArtifactReadMaxChars(input.maxChars);
+    const maxScanBytes = ARTIFACT_READ_MAX_SCAN_BYTES;
     try {
       const content = this.readTextLineWindow(artifactPath, offset, limit, maxChars, maxScanBytes);
       return {
         success: true,
-        content:
-          `[TOOL_RESULT_ARTIFACT artifact_id=${artifactId} offset=${offset} limit=${limit} max_chars=${maxChars} max_scan_bytes=${maxScanBytes}]\n` +
+        content: buildReadToolResultArtifactContent({
+          artifactId,
+          offset,
+          limit,
+          maxChars,
+          maxScanBytes,
           content,
+        }),
       };
     } catch (error) {
       return {
@@ -916,9 +824,14 @@ export class ContextManager {
     ];
     this.eventStore.appendEvents(pending.ref.scope, pending.ref.namespace, allEvents, {
       workspaceDir: pending.workspaceDir,
+      expectedEventCount: pending.eventSequenceBase,
     });
+    if (structuredEvents.some((event) => event.type === 'context_compaction')) {
+      this.clearDerivedCompressedHistoryContext(pending.ref);
+    }
 
     if (options?.keepPendingTurn !== true) {
+      this.replayCheckpointCoordinator.drop(turnId);
       this.pendingTurns.delete(turnId);
       this.interruptedTurnStore.clearDraft(pending.ref);
     }
@@ -1053,10 +966,10 @@ export class ContextManager {
         out += (out.length > 0 ? '\n' : '') + carry;
       }
       if (out.length > maxChars) {
-        return `${out.slice(0, maxChars)}\n[TOOL_RESULT_ARTIFACT_TRUNCATED max_chars=${maxChars}]`;
+        return `${out.slice(0, maxChars)}\n[${TOOL_RESULT_PAYLOAD_MARKERS.artifactTruncated} max_chars=${maxChars}]`;
       }
       if (position >= maxScanBytes && emitted < limit) {
-        const suffix = `[TOOL_RESULT_ARTIFACT_SCAN_LIMIT_REACHED max_scan_bytes=${maxScanBytes} next_offset=${offset + emitted}]`;
+        const suffix = `[${TOOL_RESULT_PAYLOAD_MARKERS.artifactScanLimitReached} max_scan_bytes=${maxScanBytes} next_offset=${offset + emitted}]`;
         return out.length > 0 ? `${out}\n${suffix}` : suffix;
       }
       return out;
@@ -1206,102 +1119,6 @@ export class ContextManager {
         return '';
       })
       .join('\n');
-  }
-
-  private applyLegacyToolResultArtifacts(ref: ContextRef, messages: Message[]): Message[] {
-    return messages.map((message) => {
-      if (message.role !== 'tool') {
-        return message;
-      }
-      if (message.metadata?.toolResultArtifact) {
-        return message;
-      }
-      const toolName = String(message.name ?? '').trim();
-      const normalizedToolName = toolName.toLowerCase();
-      if (normalizedToolName === 'read_tool_result') {
-        return message;
-      }
-      const content = this.messageText(message.content);
-      const thresholdChars = normalizedToolName === 'read_file' ? 24000 : 50000;
-      if (content.length <= thresholdChars) {
-        return message;
-      }
-      try {
-        const artifact = this.materializeLegacyToolResultArtifact(ref, {
-          toolCallId: message.toolCallId ?? '',
-          toolName: toolName || '(unknown)',
-          content,
-        });
-        return {
-          ...message,
-          content: this.buildToolResultArtifactContent(artifact, content.slice(0, artifact.previewChars)),
-          metadata: {
-            ...(message.metadata ?? {}),
-            toolResultArtifact: artifact,
-          },
-        };
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        return {
-          ...message,
-          content: this.buildInlineToolResultBudgetContent(content, thresholdChars, errorMessage),
-        };
-      }
-    });
-  }
-
-  private buildInlineToolResultBudgetContent(content: string, maxChars: number, reason: string): string {
-    const header = `[TOOL_RESULT_INLINE_BUDGET_APPLIED original_chars=${content.length} kept_chars=${maxChars} artifact_error=${JSON.stringify(
-      reason
-    )}]`;
-    const bodyBudget = Math.max(0, maxChars - header.length - 1);
-    return bodyBudget > 0 ? `${header}\n${content.slice(0, bodyBudget)}` : header.slice(0, maxChars);
-  }
-
-  private materializeLegacyToolResultArtifact(
-    ref: ContextRef,
-    input: { toolCallId: string; toolName: string; content: string }
-  ): ToolResultArtifactRef {
-    const normalized = this.normalizeRef(ref);
-    const namespacePath = path.resolve(this.eventStore.getNamespacePath(normalized));
-    const contentHash = crypto
-      .createHash('sha256')
-      .update(`${input.toolCallId}\n${input.toolName}\n${input.content}`)
-      .digest('hex');
-    const safeToolCallId = this.sanitizeArtifactToken(input.toolCallId || 'legacy-tool-result');
-    const artifactId = this.sanitizeArtifactToken(`legacy-${safeToolCallId.slice(0, 48)}-${contentHash.slice(0, 24)}`);
-    const relativePath = path.join('tool-results', `${artifactId}.txt`);
-    const artifactRoot = this.ensureToolResultArtifactRoot(namespacePath);
-    const artifactPath = path.resolve(namespacePath, relativePath);
-    if (!this.isPathWithinDir(artifactPath, namespacePath)) {
-      throw new Error('Legacy tool result artifact path is outside the current context namespace.');
-    }
-    this.assertSafeArtifactFilePath(artifactPath, artifactRoot);
-    if (!fs.existsSync(artifactPath)) {
-      fs.writeFileSync(artifactPath, input.content, { encoding: 'utf-8', flag: 'wx' });
-    }
-    this.assertSafeArtifactFilePath(artifactPath, artifactRoot);
-    const stat = fs.statSync(artifactPath);
-    const previewChars = Math.min(3000, input.content.length);
-    return {
-      artifactId,
-      toolCallId: input.toolCallId,
-      toolName: input.toolName,
-      relativePath: relativePath.replace(/\\/g, '/'),
-      originalChars: input.content.length,
-      previewChars,
-      createdAt: stat.birthtime.toISOString(),
-    };
-  }
-
-  private buildToolResultArtifactContent(artifact: ToolResultArtifactRef, preview: string): string {
-    return [
-      `[TOOL_RESULT_STORED tool=${artifact.toolName || '(unknown)'} tool_call_id=${artifact.toolCallId || '(unknown)'} artifact_id=${artifact.artifactId} original_chars=${artifact.originalChars} preview_chars=${artifact.previewChars}]`,
-      'Use read_tool_result with artifact_id, offset, and limit when the full output is needed.',
-      '',
-      'Preview:',
-      preview,
-    ].join('\n');
   }
 
   private normalizeTurnText(value: string | undefined): string {

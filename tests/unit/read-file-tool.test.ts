@@ -12,19 +12,19 @@ function writeLines(filePath: string, count: number, lineFactory: (index: number
   fs.writeFileSync(filePath, Array.from({ length: count }, (_value, index) => lineFactory(index)).join('\n'), 'utf8');
 }
 
-async function testDefaultLimitReturnsFirstTwoHundredLines(): Promise<void> {
+async function testDefaultLimitReturnsFirstFourHundredLines(): Promise<void> {
   const workspaceDir = createWorkspace('default-limit');
   try {
     const filePath = path.join(workspaceDir, 'large.txt');
-    writeLines(filePath, 250);
+    writeLines(filePath, 450);
     const tool = new ReadFileTool({ workspaceDir });
 
     const result = await tool.execute({ path: 'large.txt' });
 
     assert.equal(result.success, true);
-    assert.match(result.content, /\[READ_FILE_DEFAULT_LIMIT_APPLIED limit=200\]/);
-    assert.match(result.content, /line-199/);
-    assert.doesNotMatch(result.content, /line-200/);
+    assert.match(result.content, /\[READ_FILE_DEFAULT_LIMIT_APPLIED limit=400\]/);
+    assert.match(result.content, /line-399/);
+    assert.doesNotMatch(result.content, /line-400/);
   } finally {
     fs.rmSync(workspaceDir, { recursive: true, force: true });
   }
@@ -82,7 +82,7 @@ async function testScanBytesAreCapped(): Promise<void> {
 }
 
 async function runAll(): Promise<void> {
-  await testDefaultLimitReturnsFirstTwoHundredLines();
+  await testDefaultLimitReturnsFirstFourHundredLines();
   await testRequestedLimitIsCappedAtTwoThousandLines();
   await testOutputCharsAreCapped();
   await testScanBytesAreCapped();

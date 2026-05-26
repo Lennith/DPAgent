@@ -1,3 +1,10 @@
+import { redactToolCallArgumentsForCheckpoint } from '../../../../runtime/tool-result-payload-policy.js';
+
+const MAX_TOOL_EVENT_DETAIL_STRING_CHARS = 2000;
+const MAX_TOOL_EVENT_DETAIL_JSON_CHARS = 6000;
+const MAX_TOOL_EVENT_DETAIL_ARRAY_ITEMS = 20;
+const MAX_TOOL_EVENT_DETAIL_OBJECT_KEYS = 40;
+
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -30,6 +37,39 @@ function toDisplayText(value: unknown): string {
     }
   }
   return '';
+}
+
+function toDetailValue(value: unknown): unknown {
+  if (typeof value === 'string' && value.length > MAX_TOOL_EVENT_DETAIL_STRING_CHARS) {
+    return `${value.slice(0, MAX_TOOL_EVENT_DETAIL_STRING_CHARS)}...(truncated ${value.length} chars)`;
+  }
+  if (Array.isArray(value)) {
+    const items = value.slice(0, MAX_TOOL_EVENT_DETAIL_ARRAY_ITEMS).map((item) => toDetailValue(item));
+    if (value.length > MAX_TOOL_EVENT_DETAIL_ARRAY_ITEMS) {
+      items.push(`...(truncated ${value.length - MAX_TOOL_EVENT_DETAIL_ARRAY_ITEMS} items)`);
+    }
+    return items;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    const entries = Object.entries(value as Record<string, unknown>);
+    for (const [key, item] of entries.slice(0, MAX_TOOL_EVENT_DETAIL_OBJECT_KEYS)) {
+      out[key] = toDetailValue(item);
+    }
+    if (entries.length > MAX_TOOL_EVENT_DETAIL_OBJECT_KEYS) {
+      out.__truncated_keys = entries.length - MAX_TOOL_EVENT_DETAIL_OBJECT_KEYS;
+    }
+    return out;
+  }
+  return value;
+}
+
+function detailJsonForToolCall(name: string, args: Record<string, unknown>): string {
+  const detail = JSON.stringify(toDetailValue(redactToolCallArgumentsForCheckpoint(name, args)), null, 2);
+  if (detail.length <= MAX_TOOL_EVENT_DETAIL_JSON_CHARS) {
+    return detail;
+  }
+  return `${detail.slice(0, MAX_TOOL_EVENT_DETAIL_JSON_CHARS)}\n...(truncated ${detail.length} chars)`;
 }
 
 function parseJsonRecord(text: string): Record<string, unknown> | null {
@@ -90,7 +130,7 @@ export function summarizeToolCall(name: string, args: Record<string, unknown>): 
     return {
       title: action ? `Memory ${action}` : 'Memory operation',
       subtitle: buildSecondary(args, ['id', 'title', 'scope', 'query']) || 'Durable memory mutation or lookup.',
-      detailJson: JSON.stringify(args, null, 2),
+      detailJson: detailJsonForToolCall(normalizedName, args),
     };
   }
 
@@ -98,7 +138,7 @@ export function summarizeToolCall(name: string, args: Record<string, unknown>): 
     return {
       title: action ? `Session search ${action}` : 'Session search',
       subtitle: buildSecondary(args, ['query', 'keywords', 'question']) || 'Search prior session context.',
-      detailJson: JSON.stringify(args, null, 2),
+      detailJson: detailJsonForToolCall(normalizedName, args),
     };
   }
 
@@ -108,7 +148,7 @@ export function summarizeToolCall(name: string, args: Record<string, unknown>): 
       subtitle:
         buildSecondary(args, ['key', 'namespace', 'scope']) ||
         'Inspect or patch current structured or runtime context state.',
-      detailJson: JSON.stringify(args, null, 2),
+      detailJson: detailJsonForToolCall(normalizedName, args),
     };
   }
 
@@ -126,13 +166,13 @@ export function summarizeToolCall(name: string, args: Record<string, unknown>): 
           items.length > 0
             ? `${items.length} planned item${items.length === 1 ? '' : 's'}${firstWork ? ` - ${firstWork}` : ''}`
             : 'Replace the current todo plan.',
-        detailJson: JSON.stringify(args, null, 2),
+        detailJson: detailJsonForToolCall(normalizedName, args),
       };
     }
     return {
       title: action ? `Todo ${action}` : 'Todo operation',
       subtitle: buildSecondary(args, ['work', 'detection_standard', 'id', 'status', 'scope']) || 'Manage agent task state.',
-      detailJson: JSON.stringify(args, null, 2),
+      detailJson: detailJsonForToolCall(normalizedName, args),
     };
   }
 
@@ -140,7 +180,15 @@ export function summarizeToolCall(name: string, args: Record<string, unknown>): 
     return {
       title: humanizeToolName(normalizedName),
       subtitle: buildSecondary(args, ['path', 'filePath']) || 'File operation',
-      detailJson: JSON.stringify(args, null, 2),
+      detailJson: detailJsonForToolCall(normalizedName, args),
+    };
+  }
+
+  if (normalizedName === 'send_file_to_user') {
+    return {
+      title: 'Send file to user',
+      subtitle: buildSecondary(args, ['path', 'filename']) || 'Create a user download link',
+      detailJson: detailJsonForToolCall(normalizedName, args),
     };
   }
 
@@ -148,7 +196,7 @@ export function summarizeToolCall(name: string, args: Record<string, unknown>): 
     return {
       title: 'Shell execute',
       subtitle: buildSecondary(args, ['command']) || 'Shell command execution',
-      detailJson: JSON.stringify(args, null, 2),
+      detailJson: detailJsonForToolCall(normalizedName, args),
     };
   }
 
@@ -156,14 +204,14 @@ export function summarizeToolCall(name: string, args: Record<string, unknown>): 
     return {
       title: 'Web search',
       subtitle: buildSecondary(args, ['query', 'q']) || 'Search the web',
-      detailJson: JSON.stringify(args, null, 2),
+      detailJson: detailJsonForToolCall(normalizedName, args),
     };
   }
 
   return {
     title: humanizeToolName(normalizedName),
     subtitle: buildSecondary(args, ['path', 'command', 'query', 'title', 'id']) || 'Tool call details available.',
-    detailJson: JSON.stringify(args, null, 2),
+    detailJson: detailJsonForToolCall(normalizedName, args),
   };
 }
 
@@ -235,6 +283,13 @@ export function summarizeToolResult(
             : itemCount !== undefined
             ? `${itemCount} todo item${itemCount === 1 ? '' : 's'} returned.`
             : toDisplayText(parsed.removed ?? parsed.item ?? parsed.success) || 'Todo tool completed.',
+        detailText,
+      };
+    }
+    if (normalizedName === 'send_file_to_user') {
+      return {
+        title: `Send file ${result.success ? 'succeeded' : 'failed'}`,
+        subtitle: toDisplayText(parsed.displayPath ?? parsed.filename ?? parsed.href) || 'Download link created.',
         detailText,
       };
     }

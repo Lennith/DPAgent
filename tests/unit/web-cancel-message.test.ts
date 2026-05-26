@@ -1,41 +1,83 @@
 import * as assert from 'node:assert/strict';
-import { WebSocket } from 'ws';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import { autoLoopManager } from '../../src/auto-loop/index.js';
 import type { ContextRef } from '../../src/types.js';
-
-interface EmittedMessage {
-  ws: object;
-  type: string;
-  data: unknown;
-}
+import {
+  attachEmitCapture,
+  createOpenSocket,
+  createWebServerDouble,
+  type CapturedWebMessage,
+} from './helpers/web-server-harness.js';
 
 interface CancelHarness {
   server: any;
   openSocket: { readyState: number; socket: string };
-  emitted: EmittedMessage[];
+  emitted: CapturedWebMessage[];
   lifecycle: string[];
+}
+
+function makeCancelSummary(mainRunCount: number, subagentCount = 0): {
+  mainRunCount: number;
+  subagentCount: number;
+  totalCount: number;
+} {
+  return {
+    mainRunCount,
+    subagentCount,
+    totalCount: mainRunCount + subagentCount,
+  };
+}
+
+function contextLabel(context: ContextRef): string {
+  return `${context.scope}:${context.namespace}`;
+}
+
+function stubAutoLoopStopped(
+  harness: CancelHarness,
+  methodName: 'stopAutoLoopForContext' | 'pausePlanExecutionAutoLoopForContext',
+  totalRounds: number,
+  reason = 'User stopped auto loop'
+): void {
+  harness.server[methodName] = (nextContext: ContextRef, ws: object) => {
+    harness.lifecycle.push(`${methodName}:${contextLabel(nextContext)}`);
+    harness.server.emitToClient(ws, {
+      type: 'auto_loop_stopped',
+      data: {
+        context: nextContext,
+        reason,
+        totalRounds,
+      },
+    });
+  };
 }
 
 function createHarness(
   activeEntries?: ReadonlyArray<readonly [string, ContextRef]>
 ): CancelHarness {
-  const server = Object.create(WebServer.prototype) as any;
-  const emitted: EmittedMessage[] = [];
+  const server = createWebServerDouble();
   const lifecycle: string[] = [];
+  const { emitted } = attachEmitCapture(server, { lifecycle });
 
   server.activeRunContexts = new Map(activeEntries ?? []);
-  server.emitToClient = (ws: object, message: Omit<EmittedMessage, 'ws'>) => {
-    lifecycle.push(`emit:${message.type}`);
-    emitted.push({ ws, ...message });
-  };
+  server.activeRunStatesByContext = new Map(
+    (activeEntries ?? []).map(([runId, context]) => [
+      contextLabel(context),
+      {
+        runId,
+        context,
+        startedAt: '2026-05-03T00:00:00.000Z',
+        owner: 'web',
+        origin: 'web',
+        interactionState: { mode: 'normal', owner: 'web' },
+      },
+    ])
+  );
   server.refreshGlobalAgentCatalog = () => {
     lifecycle.push('refresh');
   };
 
   return {
     server,
-    openSocket: { readyState: WebSocket.OPEN, socket: 'open' },
+    openSocket: createOpenSocket('open'),
     emitted,
     lifecycle,
   };
@@ -106,24 +148,14 @@ async function testHandleCancelMessageCancelsScopedSessionAndStopsAutoLoopBefore
 
   harness.server.agent = {
     cancelContext: (nextContext: ContextRef) => {
-      harness.lifecycle.push(`agent.cancelContext:${nextContext.scope}:${nextContext.namespace}`);
+      harness.lifecycle.push(`agent.cancelContext:${contextLabel(nextContext)}`);
       return 2;
     },
   };
   harness.server.rejectPendingPlanInputByContext = (nextContext: ContextRef, reason: string) => {
-    harness.lifecycle.push(`rejectByContext:${nextContext.scope}:${nextContext.namespace}:${reason}`);
+    harness.lifecycle.push(`rejectByContext:${contextLabel(nextContext)}:${reason}`);
   };
-  harness.server.stopAutoLoopForContext = (nextContext: ContextRef, ws: object) => {
-    harness.lifecycle.push(`stopAutoLoopForContext:${nextContext.scope}:${nextContext.namespace}`);
-    harness.server.emitToClient(ws, {
-      type: 'auto_loop_stopped',
-      data: {
-        context: nextContext,
-        reason: 'User stopped auto loop',
-        totalRounds: 4,
-      },
-    });
-  };
+  stubAutoLoopStopped(harness, 'stopAutoLoopForContext', 4);
 
   harness.server.handleCancelMessage(harness.openSocket, {
     sessionId: 'sess-1',
@@ -154,9 +186,108 @@ async function testHandleCancelMessageCancelsScopedSessionAndStopsAutoLoopBefore
         runId: null,
         context,
         canceledCount: 2,
+        cancelSummary: makeCancelSummary(2),
       },
     },
   ]);
+}
+
+async function testHandleCancelMessageRejectsCliOwnedRunAsObserveOnly(): Promise<void> {
+  const context: ContextRef = { scope: 'session', namespace: 'sess-cli' };
+  const harness = createHarness([['run-cli', context]]);
+  harness.server.activeRunStatesByContext.set(contextLabel(context), {
+    runId: 'run-cli',
+    context,
+    startedAt: '2026-05-03T00:00:00.000Z',
+    owner: 'cli',
+    origin: 'cli',
+    interactionState: { mode: 'observe_only', reason: 'cli_active_run', owner: 'cli' },
+  });
+  harness.server.agent = {
+    cancelContext: () => {
+      throw new Error('CLI-owned run must not be canceled from Web');
+    },
+  };
+
+  harness.server.handleCancelMessage(harness.openSocket, {
+    runId: 'run-cli',
+    context,
+  });
+
+  assert.deepEqual(harness.lifecycle, ['emit:cancel_ack']);
+  assert.equal(harness.emitted[0]?.type, 'cancel_ack');
+  const payload = harness.emitted[0]?.data as Record<string, unknown>;
+  assert.equal(payload.error, 'observe_only');
+  assert.deepEqual(payload.interactionState, { mode: 'observe_only', reason: 'cli_active_run', owner: 'cli' });
+  assert.equal((payload.activeRun as Record<string, unknown>).owner, 'cli');
+}
+
+async function testHandleCancelMessagePausesPlanExecutionWithoutDisablingTodoLoop(): Promise<void> {
+  const context: ContextRef = { scope: 'session', namespace: 'sess-plan-exec' };
+  const harness = createHarness([['run-plan', context]]);
+
+  harness.server.agent = {
+    cancelContext: (nextContext: ContextRef) => {
+      harness.lifecycle.push(`agent.cancelContext:${contextLabel(nextContext)}`);
+      return 1;
+    },
+  };
+  harness.server.getContextNamespaceMetaSafe = () => ({
+    planningState: {
+      state: 'plan_executing',
+      activeExecutionPlanId: 'plan-1',
+      updatedAt: '2026-05-01T00:00:00.000Z',
+    },
+    autoLoopConfig: {
+      enabled: true,
+      mode: 'todo',
+      ralphEnabled: false,
+      pendingPlanConfirmation: false,
+      pausedByUser: false,
+    },
+  });
+  harness.server.getSessionTodoProtocolState = () => ({
+    items: [{ id: 'todo-1', status: 'in_progress' }],
+    unfinishedItems: [{ id: 'todo-1', status: 'in_progress' }],
+    activeItem: { id: 'todo-1', status: 'in_progress' },
+    blockedItem: null,
+    pendingItems: [],
+    completedItems: [],
+    hasUnfinished: true,
+    allCompleted: false,
+  });
+  harness.server.rejectPendingPlanInputByContext = (nextContext: ContextRef, reason: string) => {
+    harness.lifecycle.push(`rejectByContext:${contextLabel(nextContext)}:${reason}`);
+  };
+  stubAutoLoopStopped(harness, 'pausePlanExecutionAutoLoopForContext', 2, 'Plan execution paused for user input');
+  harness.server.stopAutoLoopForContext = () => {
+    throw new Error('plan execution cancel must not persist pausedByUser through stopAutoLoopForContext');
+  };
+
+  harness.server.handleCancelMessage(harness.openSocket, {
+    runId: 'run-plan',
+    context,
+  });
+
+  assert.deepEqual(harness.lifecycle, [
+    'agent.cancelContext:session:sess-plan-exec',
+    'rejectByContext:session:sess-plan-exec:run_canceled',
+    'pausePlanExecutionAutoLoopForContext:session:sess-plan-exec',
+    'emit:auto_loop_stopped',
+    'emit:cancel_ack',
+    'refresh',
+  ]);
+  assert.equal((harness.emitted[0]?.data as { reason?: string }).reason, 'Plan execution paused for user input');
+  assert.deepEqual(harness.emitted[1], {
+    ws: harness.openSocket,
+    type: 'cancel_ack',
+    data: {
+      runId: 'run-plan',
+      context,
+      canceledCount: 1,
+      cancelSummary: makeCancelSummary(1),
+    },
+  });
 }
 
 async function testHandleCancelMessagePrefersExplicitContextOverRunIdLookup(): Promise<void> {
@@ -166,24 +297,14 @@ async function testHandleCancelMessagePrefersExplicitContextOverRunIdLookup(): P
 
   harness.server.agent = {
     cancelContext: (nextContext: ContextRef) => {
-      harness.lifecycle.push(`agent.cancelContext:${nextContext.scope}:${nextContext.namespace}`);
+      harness.lifecycle.push(`agent.cancelContext:${contextLabel(nextContext)}`);
       return 3;
     },
   };
   harness.server.rejectPendingPlanInputByContext = (nextContext: ContextRef, reason: string) => {
-    harness.lifecycle.push(`rejectByContext:${nextContext.scope}:${nextContext.namespace}:${reason}`);
+    harness.lifecycle.push(`rejectByContext:${contextLabel(nextContext)}:${reason}`);
   };
-  harness.server.stopAutoLoopForContext = (nextContext: ContextRef, ws: object) => {
-    harness.lifecycle.push(`stopAutoLoopForContext:${nextContext.scope}:${nextContext.namespace}`);
-    harness.server.emitToClient(ws, {
-      type: 'auto_loop_stopped',
-      data: {
-        context: nextContext,
-        reason: 'User stopped auto loop',
-        totalRounds: 5,
-      },
-    });
-  };
+  stubAutoLoopStopped(harness, 'stopAutoLoopForContext', 5);
 
   harness.server.handleCancelMessage(harness.openSocket, {
     runId: 'run-1',
@@ -215,6 +336,7 @@ async function testHandleCancelMessagePrefersExplicitContextOverRunIdLookup(): P
         runId: null,
         context: explicitContext,
         canceledCount: 3,
+        cancelSummary: makeCancelSummary(3),
       },
     },
   ]);
@@ -229,7 +351,7 @@ async function testHandleCancelMessageTreatsMalformedExplicitContextAsAuthoritat
       harness.lifecycle.push('agent.cancel');
     },
     cancelContext: (nextContext: ContextRef) => {
-      harness.lifecycle.push(`agent.cancelContext:${nextContext.scope}:${nextContext.namespace}`);
+      harness.lifecycle.push(`agent.cancelContext:${contextLabel(nextContext)}`);
       return 1;
     },
   };
@@ -237,7 +359,7 @@ async function testHandleCancelMessageTreatsMalformedExplicitContextAsAuthoritat
     harness.lifecycle.push(`rejectByRunId:${runId}:${reason}`);
   };
   harness.server.rejectPendingPlanInputByContext = (nextContext: ContextRef, reason: string) => {
-    harness.lifecycle.push(`rejectByContext:${nextContext.scope}:${nextContext.namespace}:${reason}`);
+    harness.lifecycle.push(`rejectByContext:${contextLabel(nextContext)}:${reason}`);
   };
 
   harness.server.handleCancelMessage(harness.openSocket, {
@@ -255,25 +377,15 @@ async function testHandleCancelMessageKeepsRunIdWhenExplicitContextMatchesRunTar
   const harness = createHarness([['run-1', context]]);
 
   harness.server.agent = {
-    cancelContext: (nextContext: ContextRef) => {
-      harness.lifecycle.push(`agent.cancelContext:${nextContext.scope}:${nextContext.namespace}`);
-      return 6;
+    cancelContextWithSummary: (nextContext: ContextRef) => {
+      harness.lifecycle.push(`agent.cancelContextWithSummary:${contextLabel(nextContext)}`);
+      return makeCancelSummary(6, 2);
     },
   };
   harness.server.rejectPendingPlanInputByContext = (nextContext: ContextRef, reason: string) => {
-    harness.lifecycle.push(`rejectByContext:${nextContext.scope}:${nextContext.namespace}:${reason}`);
+    harness.lifecycle.push(`rejectByContext:${contextLabel(nextContext)}:${reason}`);
   };
-  harness.server.stopAutoLoopForContext = (nextContext: ContextRef, ws: object) => {
-    harness.lifecycle.push(`stopAutoLoopForContext:${nextContext.scope}:${nextContext.namespace}`);
-    harness.server.emitToClient(ws, {
-      type: 'auto_loop_stopped',
-      data: {
-        context: nextContext,
-        reason: 'User stopped auto loop',
-        totalRounds: 6,
-      },
-    });
-  };
+  stubAutoLoopStopped(harness, 'stopAutoLoopForContext', 6);
 
   harness.server.handleCancelMessage(harness.openSocket, {
     runId: 'run-1',
@@ -281,7 +393,7 @@ async function testHandleCancelMessageKeepsRunIdWhenExplicitContextMatchesRunTar
   });
 
   assert.deepEqual(harness.lifecycle, [
-    'agent.cancelContext:session:sess-shared',
+    'agent.cancelContextWithSummary:session:sess-shared',
     'rejectByContext:session:sess-shared:run_canceled',
     'stopAutoLoopForContext:session:sess-shared',
     'emit:auto_loop_stopped',
@@ -305,6 +417,7 @@ async function testHandleCancelMessageKeepsRunIdWhenExplicitContextMatchesRunTar
         runId: 'run-1',
         context,
         canceledCount: 6,
+        cancelSummary: makeCancelSummary(6, 2),
       },
     },
   ]);
@@ -318,12 +431,12 @@ async function testHandleCancelMessageScopedWithoutControllerStillEmitsOnlyCance
   try {
     harness.server.agent = {
       cancelContext: (nextContext: ContextRef) => {
-        harness.lifecycle.push(`agent.cancelContext:${nextContext.scope}:${nextContext.namespace}`);
+        harness.lifecycle.push(`agent.cancelContext:${contextLabel(nextContext)}`);
         return 4;
       },
     };
     harness.server.rejectPendingPlanInputByContext = (nextContext: ContextRef, reason: string) => {
-      harness.lifecycle.push(`rejectByContext:${nextContext.scope}:${nextContext.namespace}:${reason}`);
+      harness.lifecycle.push(`rejectByContext:${contextLabel(nextContext)}:${reason}`);
     };
     (autoLoopManager as any).get = (key: string) => {
       harness.lifecycle.push(`autoLoopManager.get:${key}`);
@@ -349,6 +462,7 @@ async function testHandleCancelMessageScopedWithoutControllerStillEmitsOnlyCance
           runId: null,
           context,
           canceledCount: 4,
+          cancelSummary: makeCancelSummary(4),
         },
       },
     ]);
@@ -400,24 +514,14 @@ async function testHandleWSMessageCancelRunsFullScopedChainFromRunId(): Promise<
 
   harness.server.agent = {
     cancelContext: (nextContext: ContextRef) => {
-      harness.lifecycle.push(`agent.cancelContext:${nextContext.scope}:${nextContext.namespace}`);
+      harness.lifecycle.push(`agent.cancelContext:${contextLabel(nextContext)}`);
       return 1;
     },
   };
   harness.server.rejectPendingPlanInputByContext = (nextContext: ContextRef, reason: string) => {
-    harness.lifecycle.push(`rejectByContext:${nextContext.scope}:${nextContext.namespace}:${reason}`);
+    harness.lifecycle.push(`rejectByContext:${contextLabel(nextContext)}:${reason}`);
   };
-  harness.server.stopAutoLoopForContext = (nextContext: ContextRef, ws: object) => {
-    harness.lifecycle.push(`stopAutoLoopForContext:${nextContext.scope}:${nextContext.namespace}`);
-    harness.server.emitToClient(ws, {
-      type: 'auto_loop_stopped',
-      data: {
-        context: nextContext,
-        reason: 'User stopped auto loop',
-        totalRounds: 2,
-      },
-    });
-  };
+  stubAutoLoopStopped(harness, 'stopAutoLoopForContext', 2);
 
   await harness.server.handleWSMessage(harness.openSocket, {
     type: 'cancel',
@@ -451,6 +555,7 @@ async function testHandleWSMessageCancelRunsFullScopedChainFromRunId(): Promise<
         runId: 'run-1',
         context,
         canceledCount: 1,
+        cancelSummary: makeCancelSummary(1),
       },
     },
   ]);
@@ -460,6 +565,8 @@ async function runAll(): Promise<void> {
   await testHandleWSMessageCancelDelegatesToDedicatedHelper();
   await testHandleCancelMessageCancelsAllWhenNoContextResolves();
   await testHandleCancelMessageCancelsScopedSessionAndStopsAutoLoopBeforeAck();
+  await testHandleCancelMessageRejectsCliOwnedRunAsObserveOnly();
+  await testHandleCancelMessagePausesPlanExecutionWithoutDisablingTodoLoop();
   await testHandleCancelMessagePrefersExplicitContextOverRunIdLookup();
   await testHandleCancelMessageTreatsMalformedExplicitContextAsAuthoritativeNoOp();
   await testHandleCancelMessageKeepsRunIdWhenExplicitContextMatchesRunTarget();

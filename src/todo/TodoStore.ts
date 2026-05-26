@@ -3,9 +3,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 export type TodoScope = 'session' | 'workspace' | 'user';
-export type TodoStatus = 'pending' | 'in_progress' | 'blocked' | 'completed';
+export type TodoStatus = 'pending' | 'in_progress' | 'blocked' | 'completed' | 'dismissed';
 export type TodoPriority = 'low' | 'medium' | 'high';
-type TodoWritableStatus = Exclude<TodoStatus, 'completed'>;
+type TodoWritableStatus = Exclude<TodoStatus, 'completed' | 'dismissed'>;
 
 export interface TodoItem {
   id: string;
@@ -14,12 +14,12 @@ export interface TodoItem {
   namespaceLabel: string;
   work: string;
   detectionStandard: string;
-  title: string;
-  details?: string;
   status: TodoStatus;
   priority: TodoPriority;
   tags: string[];
   sourceSessionId?: string;
+  planId?: string;
+  planStepId?: string;
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -35,6 +35,7 @@ export interface TodoProtocolState {
   blockedItem: TodoItem | null;
   pendingItems: TodoItem[];
   completedItems: TodoItem[];
+  dismissedItems: TodoItem[];
   hasUnfinished: boolean;
   allCompleted: boolean;
 }
@@ -52,6 +53,8 @@ interface TodoDraftItemInput {
   priority?: TodoPriority;
   tags?: string[];
   sourceSessionId?: string;
+  planId?: string;
+  planStepId?: string;
   status?: TodoWritableStatus;
   blockedReason?: string;
 }
@@ -87,6 +90,15 @@ function compactPromptText(value: string, maxChars: number): string {
   return truncate(String(value ?? '').replace(/\s+/g, ' ').trim(), maxChars);
 }
 
+function normalizePlanBindingToken(value: string | undefined): string | undefined {
+  const normalized = String(value ?? '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-zA-Z0-9._:-]/g, '')
+    .slice(0, 80);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeEvidence(value: string[] | undefined): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -110,7 +122,8 @@ function isTodoStatus(value: unknown): value is TodoStatus {
     value === 'pending' ||
     value === 'in_progress' ||
     value === 'blocked' ||
-    value === 'completed'
+    value === 'completed' ||
+    value === 'dismissed'
   );
 }
 
@@ -128,12 +141,12 @@ function isCompleted(item: TodoItem): boolean {
   return item.status === 'completed' && !!item.completionTaskId && Array.isArray(item.evidence) && item.evidence.length > 0;
 }
 
-function legacyTitle(item: Pick<TodoItem, 'work'>): string {
-  return item.work;
+function isDismissed(item: TodoItem): boolean {
+  return item.status === 'dismissed';
 }
 
-function legacyDetails(item: Pick<TodoItem, 'detectionStandard'>): string {
-  return item.detectionStandard;
+function isTerminal(item: TodoItem): boolean {
+  return isCompleted(item) || isDismissed(item);
 }
 
 export class TodoStore {
@@ -182,7 +195,7 @@ export class TodoStore {
     const target = this.resolveTarget(input);
     const bucket = this.loadBucket(target.scope, target.namespace, target.namespaceLabel);
     return this.sortItems(
-      bucket.items.filter((item) => (input.includeCompleted === true ? true : !isCompleted(item)))
+      bucket.items.filter((item) => (input.includeCompleted === true ? true : !isTerminal(item)))
     );
   }
 
@@ -192,7 +205,9 @@ export class TodoStore {
     const blockedItem = items.find((item) => item.status === 'blocked') ?? null;
     const pendingItems = items.filter((item) => item.status === 'pending');
     const completedItems = items.filter((item) => isCompleted(item));
-    const unfinishedItems = items.filter((item) => !isCompleted(item));
+    const dismissedItems = items.filter((item) => isDismissed(item));
+    const unfinishedItems = items.filter((item) => !isTerminal(item));
+    const actionableItems = items.filter((item) => !isDismissed(item));
     return {
       items,
       unfinishedItems,
@@ -200,8 +215,9 @@ export class TodoStore {
       blockedItem,
       pendingItems,
       completedItems,
+      dismissedItems,
       hasUnfinished: unfinishedItems.length > 0,
-      allCompleted: items.length > 0 && unfinishedItems.length === 0,
+      allCompleted: actionableItems.length > 0 && actionableItems.every((item) => isCompleted(item)),
     };
   }
 
@@ -214,12 +230,15 @@ export class TodoStore {
     priority?: TodoPriority;
     tags?: string[];
     sourceSessionId?: string;
+    planId?: string;
+    planStepId?: string;
   }): TodoItem {
     const target = this.resolveTarget(input);
     const bucket = this.loadBucket(target.scope, target.namespace, target.namespaceLabel);
     if (bucket.items.length >= 128) {
       throw new Error('todo capacity reached; clear completed todos or replan before adding another todo');
     }
+    this.assertUnfinishedPlanBindingAllowed(bucket.items, input.planId);
     const now = nowIso();
     const todo = this.createDraftTodoItem(target, {
       work: input.work,
@@ -227,6 +246,8 @@ export class TodoStore {
       priority: input.priority,
       tags: input.tags,
       sourceSessionId: input.sourceSessionId,
+      planId: input.planId,
+      planStepId: input.planStepId,
       status: 'pending',
     }, now);
     bucket.items = [todo, ...bucket.items].slice(0, 128);
@@ -245,16 +266,19 @@ export class TodoStore {
       tags?: string[];
       status?: TodoStatus;
       blockedReason?: string;
+      planStepId?: string;
     }>;
     sourceSessionId?: string;
+    planId?: string;
   }): TodoItem[] {
     const target = this.resolveTarget(input);
     const bucket = this.loadBucket(target.scope, target.namespace, target.namespaceLabel);
     const now = nowIso();
     const completedRows = bucket.items.filter((item) => item.status === 'completed');
     const completedArchive = completedRows.filter((item) => isCompleted(item));
+    const dismissedArchive = bucket.items.filter((item) => isDismissed(item));
     const incompleteCompletedRows = completedRows.filter((item) => !isCompleted(item));
-    const unfinishedItems = bucket.items.filter((item) => item.status !== 'completed');
+    const unfinishedItems = bucket.items.filter((item) => !isTerminal(item));
     if (incompleteCompletedRows.length > 0) {
       throw new Error('plan_set cannot rewrite completed todos that are missing completion evidence; repair them with set_status first');
     }
@@ -265,6 +289,9 @@ export class TodoStore {
       if (item.status === 'completed') {
         throw new Error('plan_set does not accept completed todos');
       }
+      if (item.status === 'dismissed') {
+        throw new Error('plan_set does not accept dismissed todos');
+      }
       return this.createDraftTodoItem(
         target,
         {
@@ -273,6 +300,8 @@ export class TodoStore {
           priority: item.priority,
           tags: item.tags,
           sourceSessionId: input.sourceSessionId,
+          planId: input.planId,
+          planStepId: item.planStepId,
           status: normalizeWritableStatus(item.status),
           blockedReason: item.blockedReason,
         },
@@ -286,10 +315,10 @@ export class TodoStore {
     if (nextItems.length === 0 && unfinishedItems.length > 0) {
       throw new Error('plan_set cannot clear unfinished todos');
     }
-    if (nextItems.length + completedArchive.length > 128) {
-      throw new Error('plan_set cannot evict completed history; clear completed todos before expanding the remaining plan');
+    if (nextItems.length + completedArchive.length + dismissedArchive.length > 128) {
+      throw new Error('plan_set cannot evict terminal history; clear completed todos before expanding the remaining plan');
     }
-    bucket.items = [...nextItems, ...completedArchive];
+    bucket.items = [...nextItems, ...completedArchive, ...dismissedArchive];
     this.saveBucket(bucket);
     return this.sortItems(nextItems);
   }
@@ -334,11 +363,17 @@ export class TodoStore {
     if (existing.status === 'completed' && isCompleted(existing) && (mutatesPlanFields || mutatesStatusFields)) {
       throw new Error('completed todos are immutable once completion evidence is recorded');
     }
+    if (existing.status === 'dismissed' && (mutatesPlanFields || mutatesStatusFields)) {
+      throw new Error('dismissed todos are immutable; create a new todo if the work is needed again');
+    }
     if (mutatesPlanFields && (existing.status === 'completed' || nextStatus === 'completed')) {
       throw new Error('completed todos cannot change work, detectionStandard, priority, or tags');
     }
     if (existing.status === 'completed' && nextStatus !== 'completed') {
       throw new Error('completed todos cannot be reopened');
+    }
+    if (nextStatus === 'dismissed') {
+      throw new Error('use dismissTodo to dismiss blocked todos');
     }
     const work =
       input.work !== undefined
@@ -379,8 +414,6 @@ export class TodoStore {
       ...existing,
       work,
       detectionStandard,
-      title: legacyTitle({ work }),
-      details: legacyDetails({ detectionStandard }),
       priority: input.priority ?? existing.priority,
       status: nextStatus,
       tags:
@@ -421,6 +454,53 @@ export class TodoStore {
     }
     this.saveBucket(bucket);
     return true;
+  }
+
+  dismissTodo(id: string, input: { scope?: TodoScope; sessionId?: string; workspaceDir?: string }): TodoItem | null {
+    const target = this.resolveTarget(input);
+    const bucket = this.loadBucket(target.scope, target.namespace, target.namespaceLabel);
+    const existing = bucket.items.find((item) => item.id === id);
+    if (!existing) {
+      return null;
+    }
+    if (existing.status === 'completed' && isCompleted(existing)) {
+      throw new Error('completed todos cannot be dismissed');
+    }
+    if (existing.status === 'dismissed') {
+      return existing;
+    }
+    if (existing.status !== 'blocked') {
+      throw new Error('only blocked todos can be dismissed');
+    }
+    const next: TodoItem = {
+      ...existing,
+      status: 'dismissed',
+      updatedAt: nowIso(),
+    };
+    bucket.items = bucket.items.map((item) => (item.id === id ? next : item));
+    this.saveBucket(bucket);
+    return next;
+  }
+
+  resumeTodo(id: string, input: { scope?: TodoScope; sessionId?: string; workspaceDir?: string }): TodoItem | null {
+    const target = this.resolveTarget(input);
+    const bucket = this.loadBucket(target.scope, target.namespace, target.namespaceLabel);
+    const existing = bucket.items.find((item) => item.id === id);
+    if (!existing) {
+      return null;
+    }
+    if (existing.status !== 'blocked') {
+      throw new Error('only blocked todos can be resumed');
+    }
+    const next: TodoItem = {
+      ...existing,
+      status: 'pending',
+      updatedAt: nowIso(),
+      blockedReason: undefined,
+    };
+    bucket.items = bucket.items.map((item) => (item.id === id ? next : item));
+    this.saveBucket(bucket);
+    return next;
   }
 
   clearCompletedTodos(input: { scope?: TodoScope; sessionId?: string; workspaceDir?: string }): number {
@@ -468,6 +548,10 @@ export class TodoStore {
         `- blocked task_id=${state.blockedItem.id} work="${compactPromptText(state.blockedItem.work, 120)}" reason="${compactPromptText(state.blockedItem.blockedReason ?? '', 140)}"`
       );
     }
+    const activePlanId = state.unfinishedItems.find((item) => item.planId)?.planId;
+    if (activePlanId) {
+      lines.push(`- approved_plan_id=${activePlanId}; align every action and completion evidence with this approved plan.`);
+    }
 
     for (const item of [...state.pendingItems, ...state.completedItems.slice(0, 2)].slice(0, 6)) {
       if (isCompleted(item)) {
@@ -477,7 +561,7 @@ export class TodoStore {
         continue;
       }
       lines.push(
-        `- pending task_id=${item.id} work="${compactPromptText(item.work, 120)}" detection_standard="${compactPromptText(item.detectionStandard, 140)}"`
+        `- pending task_id=${item.id}${item.planStepId ? ` plan_step_id=${item.planStepId}` : ''} work="${compactPromptText(item.work, 120)}" detection_standard="${compactPromptText(item.detectionStandard, 140)}"`
       );
     }
 
@@ -493,9 +577,23 @@ export class TodoStore {
         if (right.status === 'blocked') return 1;
         if (left.status === 'pending') return -1;
         if (right.status === 'pending') return 1;
+        if (left.status === 'completed') return -1;
+        if (right.status === 'completed') return 1;
       }
       return right.updatedAt.localeCompare(left.updatedAt);
     });
+  }
+
+  private assertUnfinishedPlanBindingAllowed(existingItems: TodoItem[], nextPlanId: string | undefined): void {
+    const unfinishedPlanIds = new Set(
+      existingItems
+        .filter((item) => !isTerminal(item))
+        .map((item) => item.planId ?? '')
+    );
+    unfinishedPlanIds.add(normalizePlanBindingToken(nextPlanId) ?? '');
+    if (unfinishedPlanIds.size > 1) {
+      throw new Error('unfinished todos cannot mix active-plan todos and unbound todos');
+    }
   }
 
   private createDraftTodoItem(
@@ -526,12 +624,12 @@ export class TodoStore {
       namespaceLabel: target.namespaceLabel,
       work,
       detectionStandard,
-      title: legacyTitle({ work }),
-      details: legacyDetails({ detectionStandard }),
       status,
       priority: input.priority ?? 'medium',
       tags: normalizeTodoTags(work, detectionStandard, input.tags),
       sourceSessionId: input.sourceSessionId,
+      planId: normalizePlanBindingToken(input.planId),
+      planStepId: normalizePlanBindingToken(input.planStepId),
       createdAt: timestamp,
       updatedAt: timestamp,
       blockedReason,
@@ -593,9 +691,9 @@ export class TodoStore {
   }
 
   private normalizeItem(scope: TodoScope, namespace: string, namespaceLabel: string, raw: unknown): TodoItem {
-    const item = (raw ?? {}) as Partial<TodoItem> & { title?: string; details?: string };
-    const work = truncate(String(item.work ?? item.title ?? '').trim() || 'Untitled task', 160);
-    const detectionStandard = truncate(String(item.detectionStandard ?? item.details ?? '').trim() || 'Verify the requested outcome is complete.', 220);
+    const item = (raw ?? {}) as Partial<TodoItem>;
+    const work = truncate(String(item.work ?? '').trim() || 'Untitled task', 160);
+    const detectionStandard = truncate(String(item.detectionStandard ?? '').trim() || 'Verify the requested outcome is complete.', 220);
     const evidence = normalizeEvidence(item.evidence);
     return {
       id: String(item.id ?? `todo-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`),
@@ -604,8 +702,6 @@ export class TodoStore {
       namespaceLabel,
       work,
       detectionStandard,
-      title: legacyTitle({ work }),
-      details: legacyDetails({ detectionStandard }),
       status:
         isTodoStatus(item.status)
           ? item.status
@@ -615,6 +711,8 @@ export class TodoStore {
         ? item.tags.map((entry) => String(entry ?? '').trim()).filter((entry) => entry.length > 0).slice(0, 12)
         : [],
       sourceSessionId: item.sourceSessionId ? String(item.sourceSessionId) : undefined,
+      planId: normalizePlanBindingToken(item.planId),
+      planStepId: normalizePlanBindingToken(item.planStepId),
       createdAt: String(item.createdAt ?? nowIso()),
       updatedAt: String(item.updatedAt ?? item.createdAt ?? nowIso()),
       completedAt: item.completedAt ? String(item.completedAt) : undefined,

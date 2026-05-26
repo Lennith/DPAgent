@@ -1,5 +1,5 @@
 import type { ToolSchema, ToolResult } from '../types.js';
-import { Tool } from './Tool.js';
+import { Tool, type ToolExecuteOptions } from './Tool.js';
 
 export class ToolRegistry {
   private tools: Map<string, Tool> = new Map();
@@ -28,14 +28,21 @@ export class ToolRegistry {
     return this.getAll().map(tool => tool.toSchema());
   }
 
-  async execute(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  async execute(name: string, args: Record<string, unknown>, options: ToolExecuteOptions = {}): Promise<ToolResult> {
+    if (options.signal?.aborted) {
+      return { success: false, content: '', error: 'Tool execution cancelled' };
+    }
     const tool = this.tools.get(name);
     if (!tool) {
       return { success: false, content: '', error: `Unknown tool: ${name}` };
     }
     
     try {
-      return await tool.execute(args);
+      const result = await tool.execute(args, options);
+      if (options.signal?.aborted) {
+        return { success: false, content: '', error: 'Tool execution cancelled' };
+      }
+      return result;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       return { success: false, content: '', error: `Tool execution failed: ${errorMessage}` };

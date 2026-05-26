@@ -1,5 +1,7 @@
 # Dependencies
 node_modules/
+.venv-asr/
+__pycache__/
 
 # Build output
 dist/
@@ -26,7 +28,7 @@ coverage/
 # workspace/
 
 # Session data
-workspace/minimax-session/
+workspace/dpagent-session/
 contexts/
 sessions/
 /runtime/
@@ -43,9 +45,43 @@ ux-workspace/skill-list.yaml
 # Reference project
 Mini-Agent-Reference/
 
+# Refactor work reports
+slim_refactor/
+
 # Temp files
 *.tmp
 *.temp
 
+# Android client build output
+android-client/.gradle/
+android-client/**/build/
+android-client/signing/*.jks
+android-client/signing/*.keystore
+android-client/signing/*.properties
+!android-client/signing/*.example.properties
+
 # Local release credentials
+release-toolcall-profiles.dev.json
 release-toolcall-profiles.local.json
+
+# History artifacts (large binary files, not for publish)
+doc/history/*/
+doc/history/*.mp4
+doc/history/**/*.mp4
+doc/history/*.mov
+doc/history/**/*.mov
+doc/history/*.mp3
+doc/history/**/*.mp3
+doc/history/*.wav
+doc/history/**/*.wav
+doc/history/*.pdf
+doc/history/**/*.pdf
+doc/history/*.zip
+doc/history/**/*.zip
+doc/history/*.7z
+doc/history/**/*.7z
+doc/history/*.xlsx
+doc/history/**/*.xlsx
+doc/history/*.txt
+doc/history/**/*.txt
+src.zip

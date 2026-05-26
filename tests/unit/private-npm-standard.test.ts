@@ -6,22 +6,30 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const {
+  buildPublishArgs,
   createPublishPlan,
   fetchResponseOrFail,
   getInternalPublishConfig,
+  isPrereleaseVersion,
   resolveSmokeRuntimeConfigFromSources,
+  validatePublishTagForVersion,
   validatePackFileList,
   validateCleanGitWorktree,
+  validateReleaseE2EGateEvidence,
   validateReleaseToolcallGateEvidence,
 } = require('../../scripts/private-npm-standard.js') as {
-  createPublishPlan: (mode: 'preflight' | 'publish') => {
+  buildPublishArgs: (publishTarget: string, registry: string, publishTag?: string) => string[];
+  createPublishPlan: (mode: 'preflight' | 'publish', publishTag?: string) => {
     verifyReleaseEvidence: boolean;
     buildBeforePublish: boolean;
     dryRunPack: boolean;
     packagedSmoke: boolean;
     registrySmoke: boolean;
     publish: boolean;
+    publishTag?: string;
   };
+  isPrereleaseVersion: (version: string) => boolean;
+  validatePublishTagForVersion: (pkg: { version: string }, publishTag?: string) => void;
   fetchResponseOrFail: (url: string, options?: { timeoutMs?: number; retryDelayMs?: number }) => Promise<Response>;
   getInternalPublishConfig: (pkg: Record<string, unknown>) => {
     registry: string;
@@ -29,6 +37,12 @@ const {
       command: string;
       timeoutMs: number;
       successPattern: string;
+    };
+    releaseE2EGate: {
+      outputRoot: string;
+      aggregateFile: string;
+      markdownFile: string;
+      requiredCases: string[];
     };
   };
   resolveSmokeRuntimeConfigFromSources: (sources: {
@@ -67,6 +81,20 @@ const {
     manualReviewPath: string;
     currentCommitSha: string;
   };
+  validateReleaseE2EGateEvidence: (
+    rootDir: string,
+    cfg: {
+      outputRoot: string;
+      aggregateFile: string;
+      markdownFile: string;
+      requiredCases: string[];
+    },
+    options?: { currentCommitSha?: string }
+  ) => {
+    aggregatePath: string;
+    markdownPath: string;
+    currentCommitSha: string;
+  };
   validatePackFileList: (
     packResult: { files?: Array<{ path?: string }> },
     cfg: {
@@ -85,16 +113,28 @@ function createConfig() {
     aggregateFile: 'release-toolcall-context-gate.json',
     markdownFile: 'release-toolcall-context-gate.md',
     manualReviewFile: 'release-toolcall-context-manual-review.json',
-    requiredRuns: 3,
-    requiredRoundsPerRun: 20,
+    requiredRuns: 2,
+    requiredRoundsPerRun: 10,
     requiredModel: 'multi-profile',
-    requiredProfiles: ['kimi', 'deepseek', 'minimax'],
+    requiredProfiles: ['deepseek', 'minimax'],
     requiredProfileModels: {
-      kimi: 'Kimi-k2.6',
       deepseek: 'deepseek-v4-flash',
       minimax: 'MiniMax-M2.7-highspeed',
     },
     minimumPassRate: 0.9,
+  };
+}
+
+function createE2EConfig() {
+  return {
+    outputRoot: 'logs/release-gate-e2e',
+    aggregateFile: 'release-e2e-gate.json',
+    markdownFile: 'release-e2e-gate.md',
+    requiredCases: [
+      'e2e:release-plan-mode-lifecycle',
+      'e2e:release-plan-mode-ux',
+      'e2e:release-cli-long-session',
+    ],
   };
 }
 
@@ -119,28 +159,14 @@ function createAggregate(overrides: Record<string, unknown> = {}) {
     runs: [
       {
         index: 1,
-        profile: 'kimi',
-        profileId: 'kimi-profile',
-        profileName: 'Kimi',
-        sessionId: 'sess-run-01',
-        provider: 'anthropic',
-        model: 'Kimi-k2.6',
-        passCount: 20,
-        failCount: 0,
-        accuracy: 1,
-        failureFlagCounts: {},
-        thresholdPassed: true,
-      },
-      {
-        index: 2,
         profile: 'deepseek',
         profileId: 'deepseek-profile',
         profileName: 'DeepSeek',
         sessionId: 'sess-run-02',
         provider: 'anthropic',
         model: 'deepseek-v4-flash',
-        passCount: 18,
-        failCount: 2,
+        passCount: 9,
+        failCount: 1,
         accuracy: 0.9,
         failureFlagCounts: {
           tools_missing: 1,
@@ -148,25 +174,25 @@ function createAggregate(overrides: Record<string, unknown> = {}) {
         thresholdPassed: true,
       },
       {
-        index: 3,
+        index: 2,
         profile: 'minimax',
         profileId: 'minimax-profile',
         profileName: 'MiniMax',
         sessionId: 'sess-run-03',
         provider: 'anthropic',
         model: 'MiniMax-M2.7-highspeed',
-        passCount: 20,
+        passCount: 10,
         failCount: 0,
         accuracy: 1,
         failureFlagCounts: {},
         thresholdPassed: true,
       },
     ],
-    requiredRuns: 3,
-    roundsPerRun: 20,
+    requiredRuns: 2,
+    roundsPerRun: 10,
     minPassRate: 0.9,
     model: 'multi-profile',
-    requiredProfiles: ['kimi', 'deepseek', 'minimax'],
+    requiredProfiles: ['deepseek', 'minimax'],
     gatePassed: true,
     manualReviewRequired: true,
     manualReview: {
@@ -174,7 +200,7 @@ function createAggregate(overrides: Record<string, unknown> = {}) {
       aggregateFile: 'release-toolcall-context-gate.json',
       templateFile: 'release-toolcall-context-manual-review.json',
       generatedAt: '2026-04-24T08:00:00.000Z',
-      reviewedRunSessionIds: ['sess-run-01', 'sess-run-02', 'sess-run-03'],
+      reviewedRunSessionIds: ['sess-run-02', 'sess-run-03'],
     },
     ...overrides,
   };
@@ -188,16 +214,16 @@ function createReview(overrides: Record<string, unknown> = {}) {
     reviewedCommitSha: CURRENT_COMMIT_SHA,
     reviewer: 'reviewer@example.com',
     reviewedAt: '2026-04-24T08:10:00.000Z',
-    reviewedRunSessionIds: ['sess-run-01', 'sess-run-02', 'sess-run-03'],
-    reviewedRequiredRuns: 3,
-    reviewedRoundsPerRun: 20,
+    reviewedRunSessionIds: ['sess-run-02', 'sess-run-03'],
+    reviewedRequiredRuns: 2,
+    reviewedRoundsPerRun: 10,
     reviewedModel: 'multi-profile',
-    reviewedProfiles: ['kimi', 'deepseek', 'minimax'],
+    reviewedProfiles: ['deepseek', 'minimax'],
     checklist: {
       runMetricsChecked: true,
       failureFlagsChecked: true,
       fieldMismatchesChecked: true,
-      toolCallContinuityChecked: true,
+      historyConsistencyChecked: true,
       cascadeFailuresChecked: true,
       completionMarkerRepairsChecked: true,
       materiallyCorrect: true,
@@ -206,7 +232,7 @@ function createReview(overrides: Record<string, unknown> = {}) {
     },
     conclusion: 'approved',
     issuesFound: [],
-    notes: 'Reviewed both runs and approved.',
+    notes: 'Reviewed release runs and approved.',
     ...overrides,
   };
 }
@@ -239,14 +265,55 @@ function testPassesWhenGitWorktreeIsClean(): void {
   assert.deepEqual(dirtyEntries, []);
 }
 
-function testPublishPlanRebuildsBeforePublishingButSkipsSourceGateRetest(): void {
+function testPublishPlanRunsLocalSmokeBeforePublishing(): void {
   const plan = createPublishPlan('publish');
   assert.equal(plan.verifyReleaseEvidence, true);
   assert.equal(plan.buildBeforePublish, true);
   assert.equal(plan.dryRunPack, false);
-  assert.equal(plan.packagedSmoke, false);
+  assert.equal(plan.packagedSmoke, true);
   assert.equal(plan.registrySmoke, true);
   assert.equal(plan.publish, true);
+  assert.equal(plan.publishTag, undefined);
+}
+
+function testPreflightPlanDoesNotRunInstallSmokeOrPublish(): void {
+  const plan = createPublishPlan('preflight');
+  assert.equal(plan.verifyReleaseEvidence, true);
+  assert.equal(plan.buildBeforePublish, true);
+  assert.equal(plan.dryRunPack, false);
+  assert.equal(plan.packagedSmoke, false);
+  assert.equal(plan.registrySmoke, false);
+  assert.equal(plan.publish, false);
+}
+
+function testBetaPublishPlanCarriesDistTag(): void {
+  const plan = createPublishPlan('publish', 'beta');
+  assert.equal(plan.publish, true);
+  assert.equal(plan.registrySmoke, true);
+  assert.equal(plan.publishTag, 'beta');
+  assert.deepEqual(buildPublishArgs('pkg.tgz', 'http://registry.test', 'beta'), [
+    'publish',
+    'pkg.tgz',
+    '--registry',
+    'http://registry.test',
+    '--tag',
+    'beta',
+  ]);
+}
+
+function testPrereleasePublishRequiresExplicitNonLatestTag(): void {
+  assert.equal(isPrereleaseVersion('1.0.53-beta.0'), true);
+  assert.equal(isPrereleaseVersion('1.0.53'), false);
+  assertThrowsMessage(
+    () => validatePublishTagForVersion({ version: '1.0.53-beta.0' }),
+    /requires an explicit non-latest dist-tag/i
+  );
+  assertThrowsMessage(
+    () => validatePublishTagForVersion({ version: '1.0.53-beta.0' }, 'latest'),
+    /requires an explicit non-latest dist-tag/i
+  );
+  validatePublishTagForVersion({ version: '1.0.53-beta.0' }, 'beta');
+  validatePublishTagForVersion({ version: '1.0.53' });
 }
 
 function testPackAuditUsesSingleRealPackResult(): void {
@@ -284,22 +351,42 @@ function testPublishConfigParsesUserSmoke(): void {
   const cfg = getInternalPublishConfig({
     internalPublish: {
       registry: 'http://registry.test',
-      requiredReadmeInitCommand: 'npx minimax-agent',
+      requiredReadmeInitCommand: 'npx dpagent',
       userSmoke: {
-        command: 'npx minimax-agent --no-open',
+        command: 'npx dpagent --no-open',
         timeoutMs: 120000,
         successPattern: 'Starting web server at http://localhost:{PORT}',
       },
       requiredPackPaths: ['dist/', 'README.md'],
       forbiddenPackPaths: ['logs/', '.env'],
       releaseToolcallGate: createConfig(),
+      releaseE2EGate: createE2EConfig(),
     },
   });
   assert.deepEqual(cfg.userSmoke, {
-    command: 'npx minimax-agent --no-open',
+    command: 'npx dpagent --no-open',
     timeoutMs: 120000,
     successPattern: 'Starting web server at http://localhost:{PORT}',
   });
+  assert.deepEqual(cfg.releaseE2EGate.requiredCases, createE2EConfig().requiredCases);
+}
+
+function createE2EAggregate(overrides: Record<string, unknown> = {}) {
+  const requiredCases = createE2EConfig().requiredCases;
+  return {
+    generatedAt: '2026-05-03T08:00:00.000Z',
+    sourceCommitSha: CURRENT_COMMIT_SHA,
+    requiredCases,
+    cases: requiredCases.map((id, index) => ({
+      id,
+      command: `tsx tests/e2e/release-case-${index + 1}.e2e.ts`,
+      status: 'passed',
+      durationMs: 1200 + index,
+      exitCode: 0,
+    })),
+    gatePassed: true,
+    ...overrides,
+  };
 }
 
 function testFailsWhenManualReviewArtifactIsMissing(): void {
@@ -348,7 +435,7 @@ function testFailsWhenManualReviewArtifactIsStale(): void {
       path.join(cfg.outputRoot, cfg.manualReviewFile),
       createReview({
         aggregateGeneratedAt: '2026-04-24T07:59:59.000Z',
-        reviewedRunSessionIds: ['sess-run-01', 'sess-run-99'],
+        reviewedRunSessionIds: ['sess-run-02', 'sess-run-99'],
       })
     );
     assertThrowsMessage(
@@ -375,7 +462,7 @@ function testFailsWhenManualReviewRejectsRelease(): void {
           runMetricsChecked: true,
           failureFlagsChecked: true,
           fieldMismatchesChecked: true,
-          toolCallContinuityChecked: true,
+          historyConsistencyChecked: true,
           cascadeFailuresChecked: true,
           completionMarkerRepairsChecked: true,
           materiallyCorrect: true,
@@ -402,7 +489,7 @@ function testFailsWhenAggregateContractDoesNotMatchMaintainedGate(): void {
       path.join(cfg.outputRoot, cfg.aggregateFile),
       createAggregate({
         requiredRuns: 1,
-        roundsPerRun: 20,
+        roundsPerRun: 10,
         model: 'MiniMax-M2.7',
         minPassRate: 0.8,
       })
@@ -412,6 +499,35 @@ function testFailsWhenAggregateContractDoesNotMatchMaintainedGate(): void {
     assertThrowsMessage(
       () => validateReleaseToolcallGateEvidence(rootDir, cfg, { currentCommitSha: CURRENT_COMMIT_SHA }),
       /requiredRuns mismatch|roundsPerRun mismatch|model mismatch|minPassRate mismatch/i
+    );
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+function testFailsWhenAggregateRunMetricsDoNotRepresentRequiredRounds(): void {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'private-npm-standard-run-metrics-'));
+  try {
+    const cfg = createConfig();
+    const aggregate = createAggregate({
+      runs: createAggregate().runs.map((run) =>
+        run.profile === 'deepseek'
+          ? {
+              ...run,
+              passCount: 9,
+              failCount: 0,
+              accuracy: 1,
+              thresholdPassed: true,
+            }
+          : run
+      ),
+    });
+    writeJson(rootDir, path.join(cfg.outputRoot, cfg.aggregateFile), aggregate);
+    writeText(rootDir, path.join(cfg.outputRoot, cfg.markdownFile), '# aggregate');
+    writeJson(rootDir, path.join(cfg.outputRoot, cfg.manualReviewFile), createReview());
+    assertThrowsMessage(
+      () => validateReleaseToolcallGateEvidence(rootDir, cfg, { currentCommitSha: CURRENT_COMMIT_SHA }),
+      /round count mismatch|accuracy mismatch/i
     );
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
@@ -532,7 +648,7 @@ function testPassesWhenReleaseOnlyReviewReusesSourceGate(): void {
           scope: 'release-process-only',
           previousReviewedCommitSha: previousCommitSha,
           currentCommitSha: CURRENT_COMMIT_SHA,
-          diffScope: ['scripts/private-npm-standard.js', 'docs/private-npm-publish.md'],
+          diffScope: ['scripts/private-npm-standard.js', 'doc/playbook/internal-npm-publish.md'],
           skippedCommands: ['npm run release:source-gate'],
           rationale: 'Only release workflow handling changed; runtime, UI, and LLM logic were not changed.',
         },
@@ -617,6 +733,53 @@ function testPassesWithoutGerritChangeUrl(): void {
   }
 }
 
+function testPassesWhenReleaseE2EEvidenceMatchesMaintainedGate(): void {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'private-npm-standard-e2e-ok-'));
+  try {
+    const cfg = createE2EConfig();
+    writeJson(rootDir, path.join(cfg.outputRoot, cfg.aggregateFile), createE2EAggregate());
+    writeText(rootDir, path.join(cfg.outputRoot, cfg.markdownFile), '# release e2e');
+    const result = validateReleaseE2EGateEvidence(rootDir, cfg, {
+      currentCommitSha: CURRENT_COMMIT_SHA,
+    });
+    assert.match(result.aggregatePath, /release-e2e-gate\.json/i);
+    assert.match(result.markdownPath, /release-e2e-gate\.md/i);
+    assert.equal(result.currentCommitSha, CURRENT_COMMIT_SHA);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+function testFailsWhenReleaseE2EEvidenceIsMissingOrFailed(): void {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'private-npm-standard-e2e-fail-'));
+  try {
+    const cfg = createE2EConfig();
+    writeJson(
+      rootDir,
+      path.join(cfg.outputRoot, cfg.aggregateFile),
+      createE2EAggregate({
+        sourceCommitSha: 'stale-e2e-sha',
+        gatePassed: false,
+        cases: [
+          {
+            id: cfg.requiredCases[0],
+            command: 'tsx tests/e2e/release-plan-mode-lifecycle.e2e.ts',
+            status: 'failed',
+            durationMs: 10,
+            exitCode: 1,
+          },
+        ],
+      })
+    );
+    assertThrowsMessage(
+      () => validateReleaseE2EGateEvidence(rootDir, cfg, { currentCommitSha: CURRENT_COMMIT_SHA }),
+      /markdown report is missing|did not pass|sourceCommitSha does not match|case ids mismatch/i
+    );
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 function testSmokeRuntimeConfigCarriesEndpointAndModel(): void {
   const runtime = resolveSmokeRuntimeConfigFromSources({
     env: {
@@ -670,7 +833,10 @@ async function testSmokeFetchRetriesTransientReadinessFailures(): Promise<void> 
 async function runAll(): Promise<void> {
   testFailsWhenGitWorktreeIsDirty();
   testPassesWhenGitWorktreeIsClean();
-  testPublishPlanRebuildsBeforePublishingButSkipsSourceGateRetest();
+  testPublishPlanRunsLocalSmokeBeforePublishing();
+  testPreflightPlanDoesNotRunInstallSmokeOrPublish();
+  testBetaPublishPlanCarriesDistTag();
+  testPrereleasePublishRequiresExplicitNonLatestTag();
   testPackAuditUsesSingleRealPackResult();
   testPackAuditBlocksForbiddenFiles();
   testPublishConfigParsesUserSmoke();
@@ -679,6 +845,7 @@ async function runAll(): Promise<void> {
   testFailsWhenManualReviewArtifactIsStale();
   testFailsWhenManualReviewRejectsRelease();
   testFailsWhenAggregateContractDoesNotMatchMaintainedGate();
+  testFailsWhenAggregateRunMetricsDoNotRepresentRequiredRounds();
   testFailsWhenProfileModelEvidenceDoesNotMatchMaintainedGate();
   testFailsWhenRunProfilesDoNotMatchMaintainedGate();
   testFailsWhenMarkdownArtifactIsMissing();
@@ -687,6 +854,8 @@ async function runAll(): Promise<void> {
   testFailsWhenReleaseOnlyReuseEvidenceIsIncomplete();
   testPassesWhenManualReviewMatchesAggregate();
   testPassesWithoutGerritChangeUrl();
+  testPassesWhenReleaseE2EEvidenceMatchesMaintainedGate();
+  testFailsWhenReleaseE2EEvidenceIsMissingOrFailed();
   testSmokeRuntimeConfigCarriesEndpointAndModel();
   await testSmokeFetchRetriesTransientReadinessFailures();
   console.log('private-npm-standard tests passed');

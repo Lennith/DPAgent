@@ -4,7 +4,7 @@ import type { AutomationStore } from './AutomationStore.js';
 
 interface AutomationSchedulerDeps {
   store: AutomationStore;
-  executeJob: (job: AutomationJob, triggerAt: string) => Promise<void>;
+  executeJob: (job: AutomationJob, triggerAt: string, options?: { claimedRunRecord?: AutomationRunRecord }) => Promise<void>;
   logger: {
     warn: (message: string) => void;
   };
@@ -13,10 +13,6 @@ interface AutomationSchedulerDeps {
 interface AutomationSchedulerOptions {
   intervalMs?: number;
   staleThresholdMs?: number;
-}
-
-function createRunId(): string {
-  return `run-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
 export class AutomationScheduler {
@@ -28,7 +24,7 @@ export class AutomationScheduler {
 
   constructor(deps: AutomationSchedulerDeps, options?: AutomationSchedulerOptions) {
     this.deps = deps;
-    this.intervalMs = Math.max(1_000, Math.trunc(options?.intervalMs ?? 60_000));
+    this.intervalMs = Math.max(1_000, Math.trunc(options?.intervalMs ?? 1_000));
     this.staleThresholdMs = Math.max(1_000, Math.trunc(options?.staleThresholdMs ?? 90_000));
   }
 
@@ -56,7 +52,7 @@ export class AutomationScheduler {
 
   async runTick(now = new Date()): Promise<void> {
     const nowMs = now.getTime();
-    const jobs = this.deps.store.listJobs().filter((item) => item.enabled);
+    const jobs = this.deps.store.listJobs().filter((item) => item.enabled && !item.systemTask);
     for (const job of jobs) {
       try {
         this.processDueJob(job, now, nowMs);
@@ -95,27 +91,30 @@ export class AutomationScheduler {
 
     const triggerAt = new Date(nextRunMs).toISOString();
     const nextRunAt = computeNextRunAt(job.schedule, job.timezone, now);
-    this.deps.store.updateJob(job.id, { nextRunAt });
-
     if (this.runningJobIds.has(job.id)) {
-      const skippedRecord: AutomationRunRecord = {
-        id: createRunId(),
+      this.deps.store.claimRun({
         jobId: job.id,
-        sessionId: '',
-        status: 'skipped',
         triggerAt,
-        startedAt: now.toISOString(),
-        completedAt: now.toISOString(),
-        skippedReason: 'overlap_running',
-        resultSummary: 'Skipped because a previous run is still active.',
-      };
-      this.deps.store.appendRun(job.id, skippedRecord);
+        nextRunAt,
+        triggerSource: 'schedule',
+        now,
+      });
+      return;
+    }
+    const claimed = this.deps.store.claimRun({
+      jobId: job.id,
+      triggerAt,
+      nextRunAt,
+      triggerSource: 'schedule',
+      now,
+    });
+    if (!claimed.claimed) {
       return;
     }
 
     this.runningJobIds.add(job.id);
     void this.deps
-      .executeJob(job, triggerAt)
+      .executeJob(claimed.job, triggerAt, { claimedRunRecord: claimed.record })
       .catch((error) => {
         this.deps.logger.warn(`[Automation] run failed: job=${job.id} error=${String(error)}`);
       })

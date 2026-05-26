@@ -2,62 +2,75 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import {
   clearComposerInput,
+  clearComposerInputIfUnchanged,
   COMPOSER_DRAFT_KEY,
   getComposerInput,
   removeComposerInput,
+  resolveComposerInputKey,
   setComposerInput,
   type ComposerInputBySession,
 } from '../composer-input-state.js';
 import { evaluateRuntimeWatchdog } from '../runtime-watchdog.js';
 import { normalizeMcpStatus, type MCPStatusView } from '../mcp-status.js';
-import type { Message, ToolResult } from './useAgent.js';
+import type { Message } from '../chat-types.js';
 import type { WSMessage } from './useWebSocket.js';
+import { isContextEventVersionConflictError } from '../../../shared/context-version-conflict.js';
+import {
+  projectSessionContextUtilization,
+  projectSessionMessages,
+} from '../chat-message-projection.js';
+import {
+  deleteSession as deleteSessionRequest,
+  exitPlanDraft,
+  exitPlanExecution,
+  fetchMcpStatusPayload,
+  fetchSessionDetail,
+  fetchSessionList,
+  patchSessionLlmSelection,
+  renameSession,
+} from '../session-rest-api.js';
 import type {
-  ActiveRunView,
   ChatStartedEvent,
   ContextRef,
   ContextUtilizationMap,
   InterruptedArtifactView,
   LlmProfilesConfigView,
   MessageMap,
-  PendingPlanInputSessionItem,
   PlanInputAnswerPayload,
   PlanInputRequestPayload,
   RunLlmRuntimeView,
+  RunningInputQueueItemView,
   RuntimeCompressionStatus,
   RunTerminalStateView,
   RuntimeMap,
-  SessionDetail,
   SessionInfo,
   SessionLlmSelectionPatch,
   SessionLlmSelectionView,
+  SessionPlanningState,
 } from '../app-shell-types.js';
 import {
   addIgnoredRunId,
-  appendLiveTextDelta,
+  buildRuntimeInteractionLockDiagnostic,
   closeStreamingThinking,
   contextUtilizationFromPrecompressPayload,
   createClientSessionId,
   createMessageId,
   createPendingRunRuntimeState,
   createRuntimeState,
+  createRunErrorTranscriptMessage,
   deriveSessionNameFromPrompt,
   finalizeRuntimeAfterComplete,
+  finalizeRuntimeAfterRecoverableConflictError,
   finishRuntimeHydrationAfterLoadFailure,
-  getSessionSortTimestamp,
-  inferToolResultSuccess,
   isRuntimeInteractionLocked,
   isRuntimeLlmSelectionLocked,
   observeRunEvent,
-  restorePendingPlanInputPayload,
+  removeRunningInputQueueItem,
   shouldApplyCancelAck,
   shouldApplyContextPrecompressEvent,
   shouldApplyRunEvent,
   shouldApplyRunTerminalEvent,
-  upsertToolCallState,
   toSessionId,
-  truncateLiveSummary,
-  upsertRunStatusEvent,
   upsertSessionToFront,
 } from '../app-shell-types.js';
 import {
@@ -65,6 +78,59 @@ import {
   createNextSessionLlmSelectionUpdatedAt,
   resolveSessionLlmSelectionView,
 } from '../llm-session-state.js';
+import {
+  loadLastSessionIdFromStorage,
+  saveLastSessionIdToStorage,
+} from '../last-session-storage.js';
+import {
+  clearReconnectSendRetryTimeouts,
+  scheduleReconnectSendRetry,
+} from '../websocket-reconnect-send.js';
+import {
+  normalizeThinkingDeltaForDisplay,
+  normalizeTextDeltaForDisplay,
+} from '../display-delta-normalization.js';
+import {
+  clearPlanModeIntentState,
+  resolveCurrentMessages,
+  resolveCurrentPlanModeIntent,
+  resolveCurrentPlanningState,
+  resolveCurrentRuntime,
+  resolvePendingPlanInputSessionIds,
+  resolvePendingPlanInputSessions,
+  resolveRunningSessionIds,
+  setPlanModeIntentState,
+  timestampFromServerCreatedAt,
+} from './session-controller-view-state.js';
+import {
+  clearFetchedPlanningState,
+  hydrateRuntimeFromSessionDetail,
+  hydrateSessionListRuntimeMap,
+  mergeFetchedSessionsWithLocalDrafts,
+} from './session-controller-hydration.js';
+import {
+  buildCancelRunMessage,
+  buildChatMessage,
+  buildPlanInputResponseMessage,
+  buildRunningInputCancelMessage,
+  buildRunningInputEnqueueMessage,
+  buildRunningInputInsertMessage,
+  createRunningInputClientRequestId,
+} from './session-controller-message-builders.js';
+import {
+  applyAssistantMessageDeltaRuntimeEvent,
+  applyMemoryTriggerRuntimeEvent,
+  applySkillTriggerRuntimeEvent,
+  applyStepRuntimeEvent,
+  applyThinkingRuntimeEvent,
+  applyToolCallRuntimeEvent,
+  applyToolResultRuntimeEvent,
+} from './session-controller-runtime-events.js';
+
+export {
+  normalizeThinkingDeltaForDisplay,
+  normalizeTextDeltaForDisplay,
+} from '../display-delta-normalization.js';
 
 interface UseAppSessionControllerOptions {
   currentSessionId: string | null;
@@ -84,50 +150,6 @@ interface UseAppSessionControllerOptions {
   }) => string;
   t: (key: string, vars?: Record<string, string | number>) => string;
   onRefreshGovernance: (sessionId: string | null) => void | Promise<void>;
-}
-
-const LAST_SESSION_STORAGE_KEY = 'minimax-ui-last-session-id';
-
-function loadLastSessionIdFromStorage(): string | null {
-  try {
-    if (typeof localStorage === 'undefined') {
-      return null;
-    }
-    const stored = String(localStorage.getItem(LAST_SESSION_STORAGE_KEY) ?? '').trim();
-    return stored.length > 0 ? stored : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveLastSessionIdToStorage(sessionId: string | null): void {
-  try {
-    if (typeof localStorage === 'undefined') {
-      return;
-    }
-    const normalized = String(sessionId ?? '').trim();
-    if (!normalized) {
-      localStorage.removeItem(LAST_SESSION_STORAGE_KEY);
-      return;
-    }
-    localStorage.setItem(LAST_SESSION_STORAGE_KEY, normalized);
-  } catch {
-    // Ignore storage failures in restricted environments.
-  }
-}
-
-export function normalizeThinkingDeltaForDisplay(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length === 0) {
-    return null;
-  }
-  return value;
-}
-
-export function normalizeTextDeltaForDisplay(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length === 0) {
-    return null;
-  }
-  return value;
 }
 
 export function useAppSessionController({
@@ -154,6 +176,14 @@ export function useAppSessionController({
   const [sessionLlmSelectionBySession, setSessionLlmSelectionBySession] = useState<
     Record<string, SessionLlmSelectionView>
   >({});
+  const [optimisticPlanningStateBySession, setOptimisticPlanningStateBySession] = useState<
+    Record<string, SessionPlanningState>
+  >({});
+  const [planModeIntentBySession, setPlanModeIntentBySession] = useState<Record<string, boolean>>({});
+  const [runningInputAckBySession, setRunningInputAckBySession] = useState<Record<string, string>>({});
+  const [runningInputEditRestoreBySession, setRunningInputEditRestoreBySession] = useState<
+    Record<string, { id: string; fileReferences?: string[] }>
+  >({});
 
   const runtimeBySessionRef = useRef<RuntimeMap>({});
   const messagesBySessionRef = useRef<MessageMap>({});
@@ -161,6 +191,11 @@ export function useAppSessionController({
   const currentSessionIdRef = useRef<string | null>(null);
   const llmSelectionSeqRef = useRef<Record<string, number>>({});
   const reconnectRetryTimeoutsRef = useRef<Set<number>>(new Set());
+  const composerRevisionBySessionRef = useRef<Record<string, number>>({});
+  const lastInteractionLockDiagnosticRef = useRef<string | null>(null);
+  const pendingRunningInputRequestBySessionRef = useRef<
+    Record<string, { clientRequestId: string; prompt: string; composerRevision: number }>
+  >({});
   const hasAttemptedSessionRestoreRef = useRef(false);
 
   const activeComposerInput = useMemo(
@@ -170,6 +205,8 @@ export function useAppSessionController({
 
   const setActiveComposerInput = useCallback(
     (value: string) => {
+      const key = resolveComposerInputKey(currentSessionId);
+      composerRevisionBySessionRef.current[key] = (composerRevisionBySessionRef.current[key] ?? 0) + 1;
       setComposerInputBySession((prev) => setComposerInput(prev, currentSessionId, value));
     },
     [currentSessionId]
@@ -183,38 +220,32 @@ export function useAppSessionController({
     setComposerInputBySession((prev) => removeComposerInput(prev, sessionId));
   }, []);
 
+  const clearPlanModeIntentForSession = useCallback((sessionId: string | null | undefined) => {
+    setPlanModeIntentBySession((prev) => clearPlanModeIntentState(prev, sessionId));
+  }, []);
+
   const sendWithReconnectRetry = useCallback(
     (message: WSMessage, onFinalFailure: () => void): void => {
-      if (send(message)) {
-        return;
-      }
-      connect();
-      const timeoutId = window.setTimeout(() => {
-        reconnectRetryTimeoutsRef.current.delete(timeoutId);
-        if (!send(message)) {
-          onFinalFailure();
-        }
-      }, 350);
-      reconnectRetryTimeoutsRef.current.add(timeoutId);
+      scheduleReconnectSendRetry({
+        message,
+        send,
+        connect,
+        retryTimeouts: reconnectRetryTimeoutsRef.current,
+        onFinalFailure,
+      });
     },
     [connect, send]
   );
 
   useEffect(() => {
     return () => {
-      reconnectRetryTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
-      reconnectRetryTimeoutsRef.current.clear();
+      clearReconnectSendRetryTimeouts(reconnectRetryTimeoutsRef.current);
     };
   }, []);
 
   const fetchSessions = useCallback(async () => {
     try {
-      const response = await fetch('/api/sessions');
-      const data = (await response.json()) as { sessions: SessionInfo[] };
-      const fetchedSessions = (data.sessions || []).map((session) => ({
-        ...session,
-        isLocalDraft: false,
-      }));
+      const fetchedSessions = await fetchSessionList();
       setSessionLlmSelectionBySession((prev) => {
         const next = { ...prev };
         for (const session of fetchedSessions) {
@@ -222,19 +253,40 @@ export function useAppSessionController({
         }
         return next;
       });
-      setSessions((prev) => {
-        const fetchedIds = new Set(fetchedSessions.map((session) => session.id));
-        const retainedDrafts = prev.filter((session) => {
-          if (!session.isLocalDraft || fetchedIds.has(session.id)) {
-            return false;
-          }
-          const hasLocalMessages = (messagesBySessionRef.current[session.id] ?? []).length > 0;
-          const isRunning = runtimeBySessionRef.current[session.id]?.isRunning === true;
-          return hasLocalMessages || isRunning || currentSessionIdRef.current === session.id;
+      setRuntimeBySession((prev) => {
+        const hydrated = hydrateSessionListRuntimeMap({
+          runtimeBySession: prev,
+          sessions: fetchedSessions,
         });
-        const merged = [...fetchedSessions, ...retainedDrafts];
-        merged.sort((left, right) => getSessionSortTimestamp(right) - getSessionSortTimestamp(left));
-        return merged;
+        for (const runtime of hydrated.staleRuns) {
+          console.warn('[App] Self-healing stale running state after session list hydration:', {
+            sessionId: runtime.sessionId,
+            runId: runtime.runId,
+            isRunning: runtime.isRunning,
+            hydrating: runtime.hydrating,
+            lastActivityAt: runtime.lastActivityAt ? new Date(runtime.lastActivityAt).toISOString() : undefined,
+          });
+        }
+        return hydrated.runtimeBySession;
+      });
+      setSessions((prev) => {
+        return mergeFetchedSessionsWithLocalDrafts({
+          previousSessions: prev,
+          fetchedSessions,
+          hasLocalMessages: (sessionId) => (messagesBySessionRef.current[sessionId] ?? []).length > 0,
+          isSessionRunning: (sessionId) => runtimeBySessionRef.current[sessionId]?.isRunning === true,
+          currentSessionId: currentSessionIdRef.current,
+        });
+      });
+      setOptimisticPlanningStateBySession((prev) => {
+        return clearFetchedPlanningState(prev, fetchedSessions, (session) => Boolean(session.planningState?.state));
+      });
+      setPlanModeIntentBySession((prev) => {
+        return clearFetchedPlanningState(
+          prev,
+          fetchedSessions,
+          (session) => Boolean(session.planningState?.state && session.planningState.state !== 'normal')
+        );
       });
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
@@ -243,12 +295,7 @@ export function useAppSessionController({
 
   const fetchMcpStatus = useCallback(async () => {
     try {
-      const response = await fetch('/api/mcp/status');
-      if (!response.ok) {
-        throw new Error(`status=${response.status}`);
-      }
-      const data = await response.json();
-      setMcpStatus(normalizeMcpStatus(data));
+      setMcpStatus(normalizeMcpStatus(await fetchMcpStatusPayload()));
     } catch (error) {
       console.error('Failed to fetch MCP status:', error);
     }
@@ -292,6 +339,9 @@ export function useAppSessionController({
       if (currentSessionId && isRuntimeLlmSelectionLocked(runtimeBySession[currentSessionId])) {
         return;
       }
+      if (currentSessionId && runtimeBySession[currentSessionId]?.interactionState.mode === 'observe_only') {
+        return;
+      }
       const sessionKey = currentSessionId ?? COMPOSER_DRAFT_KEY;
       const previousSelection = resolveSessionLlmSelectionView(
         llmProfiles,
@@ -314,25 +364,7 @@ export function useAppSessionController({
       const nextSeq = (llmSelectionSeqRef.current[currentSessionId] ?? 0) + 1;
       llmSelectionSeqRef.current[currentSessionId] = nextSeq;
 
-      void fetch(`/api/sessions/${currentSessionId}/llm-selection`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(nextSelection),
-      })
-        .then(async (response) => {
-          const payload = (await response.json().catch(() => ({}))) as {
-            error?: string;
-            llmSelection?: SessionLlmSelectionView;
-          };
-          if (!response.ok) {
-            throw Object.assign(new Error(payload.error || `status=${response.status}`), {
-              llmSelection: payload.llmSelection,
-            });
-          }
-          return payload;
-        })
+      void patchSessionLlmSelection(currentSessionId, nextSelection)
         .then((payload) => {
           if (llmSelectionSeqRef.current[currentSessionId] !== nextSeq) {
             return;
@@ -420,11 +452,29 @@ export function useAppSessionController({
   const appendMessage = useCallback((sessionId: string, message: Message) => {
     setMessagesBySession((prev) => ({
       ...prev,
-      [sessionId]: [...(prev[sessionId] ?? []), message],
+      [sessionId]: [
+        ...(prev[sessionId] ?? []).filter((item) => item.id !== message.id),
+        message,
+      ],
     }));
   }, []);
 
-  const upsertLocalDraftSession = useCallback((sessionId: string, prompt: string, currentWorkspaceDir: string) => {
+  const upsertRuntimeErrorMessage = useCallback((sessionId: string, runId: string, errorText: string) => {
+    const message = createRunErrorTranscriptMessage({
+      runId,
+      message: errorText,
+      timestamp: Date.now(),
+    });
+    setMessagesBySession((prev) => {
+      const existing = prev[sessionId] ?? [];
+      return {
+        ...prev,
+        [sessionId]: [...existing.filter((item) => item.id !== message.id), message],
+      };
+    });
+  }, []);
+
+  const upsertLocalDraftSession = useCallback((sessionId: string, prompt: string, currentWorkspaceDir: string, planningState: SessionPlanningState) => {
     const now = new Date().toISOString();
     const derivedName = deriveSessionNameFromPrompt(prompt, sessionId);
     setSessions((prev) => {
@@ -436,6 +486,8 @@ export function useAppSessionController({
           workspaceDir: currentWorkspaceDir,
           createdAt: now,
           updatedAt: now,
+          planningState: planningState !== 'normal' ? { state: planningState, updatedAt: now } : undefined,
+          origin: 'web',
           isLocalDraft: true,
         });
       }
@@ -445,6 +497,7 @@ export function useAppSessionController({
         workspaceDir: existing.workspaceDir?.trim().length ? existing.workspaceDir : currentWorkspaceDir,
         createdAt: existing.createdAt ?? now,
         updatedAt: now,
+        planningState: planningState !== 'normal' ? { state: planningState, updatedAt: now } : existing.planningState,
       };
       return upsertSessionToFront(prev, next);
     });
@@ -453,12 +506,7 @@ export function useAppSessionController({
   const loadSessionMessages = useCallback(
     async (sessionId: string) => {
       try {
-        const response = await fetch(`/api/sessions/${sessionId}`);
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(payload?.error || response.statusText || `Failed to load session ${sessionId}`);
-        }
-        const session = (await response.json()) as SessionDetail;
+        const session = await fetchSessionDetail(sessionId);
         setSessionLlmSelectionBySession((prev) => ({
           ...prev,
           [sessionId]: resolveSessionLlmSelectionView(llmProfiles, session.llmSelection),
@@ -466,125 +514,34 @@ export function useAppSessionController({
         if (session.workspaceDir && currentSessionIdRef.current === sessionId) {
           setWorkspaceDir(session.workspaceDir);
         }
-        setContextUtilization((prev) => ({
-          ...prev,
-          [sessionId]: session.contextUtilization
-            ? {
-                ratio: session.contextUtilization.ratio ?? 0,
-                usedChars: session.contextUtilization.usedChars ?? 0,
-                limitChars: session.contextUtilization.limitChars ?? 230000,
-                isWarning: session.contextUtilization.isWarning === true,
-                initializing: false,
-              }
-            : {
-                ratio: 0,
-                usedChars: 0,
-                limitChars: 230000,
-                isWarning: false,
-                initializing: true,
-              },
-        }));
-        const sourceMessages = session.messages ?? [];
-        const loadedMessages: Message[] = [];
-        let renderedIndex = 0;
-
-        for (const msg of sourceMessages) {
-          if (msg.role === 'user' || msg.role === 'assistant') {
-            loadedMessages.push({
-              id: createMessageId(`msg-${sessionId}-${renderedIndex}`),
-              role: msg.role,
-              content: msg.content,
-              timestamp: Date.now() - (sourceMessages.length - renderedIndex) * 1000,
-              thinking: msg.thinking,
-              metadata: msg.metadata,
-              toolCalls: msg.toolCalls?.map((toolCall) => ({
-                name: toolCall.function.name,
-                args: toolCall.function.arguments,
-              })),
-              toolResults: [],
-            });
-            renderedIndex += 1;
-            continue;
-          }
-
-          if (msg.role === 'tool') {
-            const lastMessage = loadedMessages[loadedMessages.length - 1];
-            if (lastMessage?.role === 'assistant') {
-              lastMessage.toolResults = [
-                ...(lastMessage.toolResults ?? []),
-                {
-                  name: msg.name || 'tool',
-                  result: {
-                    success: inferToolResultSuccess(msg.content),
-                    content: msg.content,
-                  },
-                },
-              ];
-            }
+        if (session.planningState?.state) {
+          setOptimisticPlanningStateBySession((prev) => {
+            const next = { ...prev };
+            delete next[sessionId];
+            return next;
+          });
+          if (session.planningState.state !== 'normal') {
+            clearPlanModeIntentForSession(sessionId);
           }
         }
+        setContextUtilization((prev) => ({
+          ...prev,
+          [sessionId]: projectSessionContextUtilization(session),
+        }));
+        const loadedMessages = projectSessionMessages(sessionId, session);
 
         setMessagesBySession((prev) => ({
           ...prev,
           [sessionId]: loadedMessages,
         }));
-        const activeRun = (session.activeRun ?? null) as ActiveRunView | null;
-        const pendingResume = session.pendingResume === true;
-        const interruptedArtifact = (session.interruptedArtifact ?? null) as InterruptedArtifactView | null;
-        const restoredPendingPlanInput = restorePendingPlanInputPayload(sessionId, session.pendingPlanInput ?? null);
-        const requestedAtMs = Date.parse(String(session.pendingPlanInput?.requestedAt ?? ''));
-        const activeRunStartedAtMs = Date.parse(String(activeRun?.startedAt ?? ''));
         setRuntimeBySession((prev) => {
-          const current = prev[sessionId] ?? createRuntimeState();
-          const sameArtifact = Boolean(
-            current.interruptedArtifact?.artifactId &&
-              interruptedArtifact?.artifactId &&
-              current.interruptedArtifact.artifactId === interruptedArtifact.artifactId
-          );
-          const keepResumePending =
-            (pendingResume && !interruptedArtifact?.dismissedAt) ||
-            (current.resumePending &&
-              restoredPendingPlanInput === null &&
-              activeRun === null &&
-              sameArtifact &&
-              !interruptedArtifact?.dismissedAt);
-          const keepDismissPending =
-            current.dismissPending &&
-            restoredPendingPlanInput === null &&
-            activeRun === null &&
-            sameArtifact &&
-            !interruptedArtifact?.dismissedAt;
-          const startedAtMs =
-            restoredPendingPlanInput
-              ? Number.isFinite(requestedAtMs)
-                ? requestedAtMs
-                : Date.now()
-              : Number.isFinite(activeRunStartedAtMs)
-                ? activeRunStartedAtMs
-                : 0;
           return {
             ...prev,
-            [sessionId]: {
-              ...current,
-              hasHydrated: true,
-              hydrating: false,
-              runId: restoredPendingPlanInput?.runId ?? activeRun?.runId ?? null,
-              isRunning: restoredPendingPlanInput !== null || activeRun !== null,
-              resumePending: keepResumePending,
-              dismissPending: keepDismissPending,
-              runStartedAt: startedAtMs > 0 ? startedAtMs : 0,
-              lastActivityAt: current.lastActivityAt || (startedAtMs > 0 ? startedAtMs : Date.now()),
-              cancelInitiated: false,
-              cancelAcknowledged: false,
-              cancelRequestedAt: 0,
-              contextPrecompressActive: false,
-              compressionStatus: null,
-              pendingPlanInput: restoredPendingPlanInput,
-              pendingPlanInputError: session.pendingPlanInput?.lastError ?? null,
-              currentLlmRuntime: activeRun?.llmRuntime ?? null,
-              interruptedArtifact,
-              error: null,
-            },
+            [sessionId]: hydrateRuntimeFromSessionDetail({
+              sessionId,
+              session,
+              currentRuntime: prev[sessionId],
+            }),
           };
         });
       } catch (error) {
@@ -601,7 +558,7 @@ export function useAppSessionController({
         });
       }
     },
-    [llmProfiles, setWorkspaceDir]
+    [clearPlanModeIntentForSession, llmProfiles, setWorkspaceDir]
   );
 
   useEffect(() => {
@@ -643,8 +600,6 @@ export function useAppSessionController({
           hasHydrated: true,
           hydrating: false,
           isRunning: true,
-          resumePending: false,
-          dismissPending: false,
           cancelInitiated: false,
           cancelAcknowledged: false,
           cancelRequestedAt: 0,
@@ -658,12 +613,42 @@ export function useAppSessionController({
           toolCallsAccumulator: [],
           toolResultsAccumulator: [],
           error: null,
-          interruptedArtifact: runtime.interruptedArtifact,
+          interruptedArtifact: null,
           lastTerminalState: null,
           pendingPlanInput: null,
           pendingPlanInputError: null,
           currentLlmRuntime: payload.llmRuntime ?? null,
+          activeRunOwner: payload.owner ?? null,
+          interactionState: payload.interactionState ?? {
+            mode: payload.owner === 'cli' || payload.owner === 'automation' ? 'observe_only' : 'normal',
+            owner: payload.owner,
+          },
+          runningInputQueue: payload.runningInputQueue ?? runtime.runningInputQueue,
         }));
+        setSessions((prev) => {
+          const existing = prev.find((item) => item.id === sessionId);
+          const startedAt = payload.startedAt ?? new Date().toISOString();
+          return upsertSessionToFront(prev, {
+            ...(existing ?? {
+              id: sessionId,
+              name: sessionId,
+              createdAt: startedAt,
+            }),
+            updatedAt: startedAt,
+            origin: payload.origin ?? existing?.origin ?? 'web',
+            activeRun: {
+              runId: payload.runId,
+              context: payload.context,
+              startedAt,
+              owner: payload.owner,
+              origin: payload.origin,
+              interactionState: payload.interactionState,
+              llmRuntime: payload.llmRuntime,
+              runningInputQueue: payload.runningInputQueue,
+            },
+            interactionState: payload.interactionState ?? existing?.interactionState ?? { mode: 'normal' },
+          });
+        });
         setContextUtilization((prev) => ({
           ...prev,
           [sessionId]: prev[sessionId] ?? {
@@ -678,6 +663,77 @@ export function useAppSessionController({
     );
 
     unsubscribers.push(
+      subscribe('running_input_queue_updated', (data: unknown) => {
+        const payload = data as {
+          context?: ContextRef;
+          items?: RunningInputQueueItemView[];
+        };
+        const sessionId = toSessionId(payload.context);
+        if (!sessionId) {
+          return;
+        }
+        updateRuntime(sessionId, (runtime) => ({
+          ...runtime,
+          runningInputQueue: Array.isArray(payload.items) ? payload.items : [],
+        }));
+      })
+    );
+
+    unsubscribers.push(
+      subscribe('running_input_queued', (data: unknown) => {
+        const payload = data as {
+          context?: ContextRef;
+          item?: RunningInputQueueItemView;
+        };
+        const sessionId = toSessionId(payload.context ?? payload.item?.context);
+        const queuedPrompt = String(payload.item?.prompt ?? '').trim();
+        const clientRequestId = String(payload.item?.clientRequestId ?? '').trim();
+        const pending = sessionId ? pendingRunningInputRequestBySessionRef.current[sessionId] : undefined;
+        const currentRevision = sessionId
+          ? (composerRevisionBySessionRef.current[resolveComposerInputKey(sessionId)] ?? 0)
+          : 0;
+        if (
+          !sessionId ||
+          !queuedPrompt ||
+          !clientRequestId ||
+          !pending ||
+          pending.clientRequestId !== clientRequestId ||
+          pending.composerRevision !== currentRevision
+        ) {
+          return;
+        }
+        delete pendingRunningInputRequestBySessionRef.current[sessionId];
+        setRunningInputAckBySession((prev) => ({
+          ...prev,
+          [sessionId]: clientRequestId,
+        }));
+        setComposerInputBySession((prev) => {
+          return clearComposerInputIfUnchanged(prev, sessionId, queuedPrompt);
+        });
+      })
+    );
+
+    unsubscribers.push(
+      subscribe('running_input_error', (data: unknown) => {
+        const payload = data as {
+          context?: ContextRef;
+          error?: string;
+        };
+        const sessionId = toSessionId(payload.context);
+        if (!sessionId) {
+          return;
+        }
+        const error = typeof payload.error === 'string' && payload.error.trim().length > 0
+          ? payload.error.trim()
+          : 'running_input_error';
+        updateRuntime(sessionId, (runtime) => ({
+          ...runtime,
+          error: t('runningInput.error', { error }),
+        }));
+      })
+    );
+
+    unsubscribers.push(
       subscribe('step', (data: unknown) => {
         const payload = data as { runId?: string; context?: ContextRef; step?: number; maxSteps?: number };
         const sessionId = toSessionId(payload.context);
@@ -686,35 +742,29 @@ export function useAppSessionController({
         }
         const runId = payload.runId;
         updateRuntime(sessionId, (runtime) => {
-          if (!shouldApplyRunEvent(runtime, runId)) {
-            return runtime;
-          }
           const now = Date.now();
-          const nextRuntime = observeRunEvent(runtime, runId, now);
           const currentStep = typeof payload.step === 'number' ? payload.step : runtime.currentStep;
           const maxSteps = typeof payload.maxSteps === 'number' ? payload.maxSteps : runtime.maxSteps;
-          const model = nextRuntime.currentLlmRuntime?.model;
-          return {
-            ...nextRuntime,
-            currentStep,
-            maxSteps,
-            liveEvents: upsertRunStatusEvent(nextRuntime.liveEvents, {
-              title:
-                currentStep > 0 && maxSteps > 0
-                  ? t('app.running.stepStatus', { current: currentStep, max: maxSteps })
-                  : t('app.running.processing'),
-              summary: model ? t('app.running.modelStatus', { model }) : undefined,
-              timestamp: now,
-              createEventId: () => createMessageId('live-run-status'),
-            }),
-          };
+          return applyStepRuntimeEvent({
+            runtime,
+            runId,
+            step: payload.step,
+            maxSteps: payload.maxSteps,
+            now,
+            processingTitle: t('app.running.processing'),
+            stepTitle: t('app.running.stepStatus', { current: currentStep, max: maxSteps }),
+            modelTitle: runtime.currentLlmRuntime?.model
+              ? t('app.running.modelStatus', { model: runtime.currentLlmRuntime.model })
+              : undefined,
+            createEventId: () => createMessageId('live-run-status'),
+          });
         });
       })
     );
 
     unsubscribers.push(
       subscribe('thinking', (data: unknown) => {
-        const payload = data as { runId?: string; context?: ContextRef; thinking?: string };
+        const payload = data as { runId?: string; context?: ContextRef; thinking?: string; createdAt?: string };
         const sessionId = toSessionId(payload.context);
         const thinkingText = normalizeThinkingDeltaForDisplay(payload.thinking);
         if (!sessionId || typeof payload.runId !== 'string' || thinkingText === null) {
@@ -723,36 +773,14 @@ export function useAppSessionController({
         const runId = payload.runId;
 
         updateRuntime(sessionId, (runtime) => {
-          if (!shouldApplyRunEvent(runtime, runId)) {
-            return runtime;
-          }
-          const now = Date.now();
-          const nextRuntime = observeRunEvent(runtime, runId, now);
-          const events = [...nextRuntime.liveEvents];
-          const last = events[events.length - 1];
-
-          if (last && last.type === 'thinking') {
-            events[events.length - 1] = {
-              ...last,
-              thinking: `${last.thinking ?? ''}${thinkingText}`,
-              isStreaming: true,
-              timestamp: now,
-            };
-          } else {
-            events.push({
-              id: createMessageId('live-thinking'),
-              type: 'thinking',
-              thinking: thinkingText,
-              isStreaming: true,
-              timestamp: now,
-            });
-          }
-
-          return {
-            ...nextRuntime,
-            lastActivityAt: now,
-            liveEvents: events,
-          };
+          const now = timestampFromServerCreatedAt(payload.createdAt);
+          return applyThinkingRuntimeEvent({
+            runtime,
+            runId,
+            thinking: thinkingText,
+            timestamp: now,
+            createEventId: () => createMessageId('live-thinking'),
+          });
         });
       })
     );
@@ -765,6 +793,7 @@ export function useAppSessionController({
           name?: string;
           args?: Record<string, unknown>;
           toolCallId?: string;
+          createdAt?: string;
         };
         const sessionId = toSessionId(payload.context);
         if (!sessionId || typeof payload.runId !== 'string' || typeof payload.name !== 'string') {
@@ -776,28 +805,16 @@ export function useAppSessionController({
         const runId = payload.runId;
 
         updateRuntime(sessionId, (runtime) => {
-          if (!shouldApplyRunEvent(runtime, runId)) {
-            return runtime;
-          }
-          const timestamp = Date.now();
-          const nextRuntime = observeRunEvent(runtime, runId, timestamp);
-          const { liveEvents, toolCallsAccumulator } = upsertToolCallState(
-            closeStreamingThinking(nextRuntime.liveEvents),
-            nextRuntime.toolCallsAccumulator,
-            {
-              toolCallId,
-              name,
-              args,
-              timestamp,
-              createEventId: () => createMessageId('live-tool-call'),
-            }
-          );
-
-          return {
-            ...nextRuntime,
-            liveEvents,
-            toolCallsAccumulator,
-          };
+          const timestamp = timestampFromServerCreatedAt(payload.createdAt);
+          return applyToolCallRuntimeEvent({
+            runtime,
+            runId,
+            name,
+            args,
+            toolCallId,
+            timestamp,
+            createEventId: () => createMessageId('live-tool-call'),
+          });
         });
       })
     );
@@ -809,6 +826,7 @@ export function useAppSessionController({
           context?: ContextRef;
           name?: string;
           result?: { success: boolean; content: string; error?: string };
+          createdAt?: string;
         };
         const sessionId = toSessionId(payload.context);
         if (!sessionId || typeof payload.runId !== 'string' || typeof payload.name !== 'string' || !payload.result) {
@@ -818,28 +836,15 @@ export function useAppSessionController({
         const result = payload.result;
         const runId = payload.runId;
         updateRuntime(sessionId, (runtime) => {
-          if (!shouldApplyRunEvent(runtime, runId)) {
-            return runtime;
-          }
-          const now = Date.now();
-          const nextRuntime = observeRunEvent(runtime, runId, now);
-          const nextEvents = closeStreamingThinking(nextRuntime.liveEvents);
-          const toolResult: ToolResult = {
-            name,
-            result,
-          };
-          nextEvents.push({
-            id: createMessageId('live-tool-result'),
-            type: 'tool_result',
+          const now = timestampFromServerCreatedAt(payload.createdAt);
+          return applyToolResultRuntimeEvent({
+            runtime,
+            runId,
             name,
             result,
             timestamp: now,
+            createEventId: () => createMessageId('live-tool-result'),
           });
-          return {
-            ...nextRuntime,
-            liveEvents: nextEvents,
-            toolResultsAccumulator: [...nextRuntime.toolResultsAccumulator, toolResult],
-          };
         });
 
         if (name === 'todo' && currentSessionIdRef.current === sessionId) {
@@ -856,6 +861,8 @@ export function useAppSessionController({
           role?: string;
           content?: string;
           llmRuntime?: RunLlmRuntimeView;
+          clientMessageId?: string;
+          createdAt?: string;
         };
         const sessionId = toSessionId(payload.context);
         const content = normalizeTextDeltaForDisplay(payload.content);
@@ -863,26 +870,26 @@ export function useAppSessionController({
           return;
         }
         const runId = payload.runId;
+        if (payload.role === 'user') {
+          appendMessage(sessionId, {
+            id: String(payload.clientMessageId ?? '').trim() || `user-msg-${runId}`,
+            role: 'user',
+            content,
+            timestamp: timestampFromServerCreatedAt(payload.createdAt),
+          });
+          return;
+        }
         updateRuntime(sessionId, (runtime) => {
-          if (!shouldApplyRunEvent(runtime, runId)) {
-            return runtime;
-          }
           if (payload.role === 'assistant' || !payload.role) {
-            const now = Date.now();
-            const nextRuntime = observeRunEvent(runtime, runId, now);
-            const llmRuntime = payload.llmRuntime ?? nextRuntime.currentLlmRuntime;
-            return {
-              ...nextRuntime,
-              currentLlmRuntime: llmRuntime ?? null,
-              liveEvents: appendLiveTextDelta(
-                nextRuntime.liveEvents,
-                content,
-                now,
-                () => createMessageId('live-text'),
-                llmRuntime
-              ),
-              contentAccumulator: nextRuntime.contentAccumulator + content,
-            };
+            const now = timestampFromServerCreatedAt(payload.createdAt);
+            return applyAssistantMessageDeltaRuntimeEvent({
+              runtime,
+              runId,
+              content,
+              timestamp: now,
+              llmRuntime: payload.llmRuntime,
+              createEventId: () => createMessageId('live-text'),
+            });
           }
           return runtime;
         });
@@ -899,30 +906,22 @@ export function useAppSessionController({
         };
         const sessionId = toSessionId(payload.context);
         const title = String(payload.title ?? '').trim();
-        const content = truncateLiveSummary(String(payload.content ?? ''));
-        if (!sessionId || typeof payload.runId !== 'string' || !title || !content) {
+        const content = String(payload.content ?? '');
+        if (!sessionId || typeof payload.runId !== 'string' || !title || !content.replace(/\s+/g, ' ').trim()) {
           return;
         }
         const runId = payload.runId;
         updateRuntime(sessionId, (runtime) => {
-          if (!shouldApplyRunEvent(runtime, runId)) {
-            return runtime;
-          }
           const now = Date.now();
-          const nextRuntime = observeRunEvent(runtime, runId, now);
-          return {
-            ...nextRuntime,
-            liveEvents: [
-              ...closeStreamingThinking(nextRuntime.liveEvents),
-              {
-                id: createMessageId('live-memory-trigger'),
-                type: 'memory_trigger',
-                title: 'Memory Trigger',
-                summary: `${title}: ${content}`,
-                timestamp: now,
-              },
-            ],
-          };
+          return applyMemoryTriggerRuntimeEvent({
+            runtime,
+            runId,
+            title,
+            content,
+            liveTitle: t('app.live.memoryTrigger'),
+            timestamp: now,
+            createEventId: () => createMessageId('live-memory-trigger'),
+          });
         });
       })
     );
@@ -943,28 +942,19 @@ export function useAppSessionController({
           return;
         }
         const runId = payload.runId;
-        const detail = truncateLiveSummary(
-          String(payload.detail ?? '').trim() || (payload.version ? `v${payload.version}` : '')
-        );
         updateRuntime(sessionId, (runtime) => {
-          if (!shouldApplyRunEvent(runtime, runId)) {
-            return runtime;
-          }
           const now = Date.now();
-          const nextRuntime = observeRunEvent(runtime, runId, now);
-          return {
-            ...nextRuntime,
-            liveEvents: [
-              ...closeStreamingThinking(nextRuntime.liveEvents),
-              {
-                id: createMessageId('live-skill-trigger'),
-                type: 'skill_trigger',
-                title: 'Skill Trigger',
-                summary: `${payload.action === 'update' ? 'update' : 'create'} ${name}${detail ? `: ${detail}` : ''}`,
-                timestamp: now,
-              },
-            ],
-          };
+          return applySkillTriggerRuntimeEvent({
+            runtime,
+            runId,
+            name,
+            action: payload.action,
+            detail: payload.detail,
+            version: payload.version,
+            liveTitle: t('app.live.skillTrigger'),
+            timestamp: now,
+            createEventId: () => createMessageId('live-skill-trigger'),
+          });
         });
       })
     );
@@ -976,6 +966,12 @@ export function useAppSessionController({
         if (!sessionId || typeof payload.runId !== 'string' || typeof payload.requestId !== 'string') {
           return;
         }
+        console.info('[PlanInput] requested', {
+          sessionId,
+          runId: payload.runId,
+          requestId: payload.requestId,
+          questionCount: Array.isArray(payload.questions) ? payload.questions.length : 0,
+        });
         updateRuntime(sessionId, (runtime) => {
           if (!shouldApplyRunEvent(runtime, payload.runId)) {
             return runtime;
@@ -1001,6 +997,11 @@ export function useAppSessionController({
         if (!sessionId || typeof payload.runId !== 'string') {
           return;
         }
+        console.info('[PlanInput] resolved', {
+          sessionId,
+          runId: payload.runId,
+          requestId: payload.requestId,
+        });
         updateRuntime(sessionId, (runtime) => {
           if (!runtime.pendingPlanInput && runtime.runId !== payload.runId) {
             return runtime;
@@ -1014,6 +1015,10 @@ export function useAppSessionController({
             pendingPlanInputError: null,
           };
         });
+        if (currentSessionIdRef.current === sessionId) {
+          void onRefreshGovernance(sessionId);
+        }
+        void fetchSessions();
       })
     );
 
@@ -1025,6 +1030,12 @@ export function useAppSessionController({
           return;
         }
         const error = typeof payload.error === 'string' && payload.error.trim().length > 0 ? payload.error : 'plan input error';
+        console.warn('[PlanInput] error', {
+          sessionId,
+          runId: payload.runId,
+          requestId: payload.requestId,
+          error,
+        });
         updateRuntime(sessionId, (runtime) => {
           if (runtime.pendingPlanInput && payload.requestId && runtime.pendingPlanInput.requestId !== payload.requestId) {
             return runtime;
@@ -1061,13 +1072,13 @@ export function useAppSessionController({
         if (!sessionId) {
           return;
         }
+        const errorText = typeof payload.error === 'string' ? payload.error : 'Unknown error';
+        const isRecoverableConflict =
+          typeof payload.runId === 'string' && isContextEventVersionConflictError(errorText);
         updateRuntime(sessionId, (runtime) => {
-          const errorText = typeof payload.error === 'string' ? payload.error : 'Unknown error';
           if (typeof payload.runId !== 'string') {
             return {
               ...runtime,
-              resumePending: false,
-              dismissPending: false,
               error: errorText,
             };
           }
@@ -1078,33 +1089,42 @@ export function useAppSessionController({
           if (runtime.runId !== payload.runId) {
             return runtime;
           }
+          if (isRecoverableConflict) {
+            return finalizeRuntimeAfterRecoverableConflictError(runtime, payload.runId, Date.now());
+          }
           const isCancelError = errorText.includes('cancel') || errorText.includes('abort') || errorText.includes('stopped');
           const nextRuntime = addIgnoredRunId(runtime, payload.runId);
+          if (!isCancelError) {
+            upsertRuntimeErrorMessage(sessionId, payload.runId, errorText);
+          }
           return {
             ...nextRuntime,
             runId: null,
             runStartedAt: 0,
             isRunning: false,
-            resumePending: false,
-            dismissPending: false,
-            cancelAcknowledged: runtime.cancelInitiated || isCancelError ? true : runtime.cancelAcknowledged,
+          cancelAcknowledged: runtime.cancelInitiated || isCancelError ? true : runtime.cancelAcknowledged,
             cancelInitiated: false,
             cancelRequestedAt: 0,
             contextPrecompressActive: false,
             compressionStatus: null,
             liveEvents: closeStreamingThinking(nextRuntime.liveEvents),
-            error: errorText,
+            error: null,
             pendingPlanInput: null,
             pendingPlanInputError: null,
             currentLlmRuntime: null,
+            activeRunOwner: null,
+            interactionState: { mode: 'normal' },
           };
         });
+        if (isRecoverableConflict && currentSessionIdRef.current === sessionId) {
+          void loadSessionMessages(sessionId);
+        }
       })
     );
 
     unsubscribers.push(
       subscribe('complete', (data: unknown) => {
-        const payload = data as { context?: ContextRef; runId?: string; content?: string; sessionId?: string };
+        const payload = data as { context?: ContextRef; runId?: string; content?: string; sessionId?: string; createdAt?: string };
         const sessionId = toSessionId(payload.context);
         if (!sessionId || typeof payload.runId !== 'string') {
           return;
@@ -1135,7 +1155,7 @@ export function useAppSessionController({
               id: createMessageId('assistant-msg'),
               role: 'assistant',
               content: finalContent,
-              timestamp: Date.now(),
+              timestamp: timestampFromServerCreatedAt(payload.createdAt),
               thinking: finalThinking || undefined,
               toolCalls: runtime.toolCallsAccumulator,
               toolResults: runtime.toolResultsAccumulator,
@@ -1148,7 +1168,7 @@ export function useAppSessionController({
                 : undefined,
             });
           }
-          const completedAt = Date.now();
+          const completedAt = timestampFromServerCreatedAt(payload.createdAt);
 
           return {
             ...prev,
@@ -1159,6 +1179,17 @@ export function useAppSessionController({
         if (!currentSessionIdRef.current && payload.sessionId) {
           setCurrentSessionId(payload.sessionId);
         }
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === sessionId
+              ? {
+                  ...session,
+                  activeRun: null,
+                  interactionState: { mode: 'normal' },
+                }
+              : session
+          )
+        );
         void onRefreshGovernance(sessionId);
         void fetchSessions();
       })
@@ -1182,37 +1213,45 @@ export function useAppSessionController({
           }
           const nextRuntime = addIgnoredRunId(runtime, payload.runId);
           const hasArtifact = payload.artifact !== undefined && payload.artifact !== null;
+          const shouldPreserveCancelledSnapshot = payload.terminalCode === 'cancelled';
           const errorText =
             payload.terminalCode === 'error' && !hasArtifact
               ? typeof payload.errorSummary === 'string' && payload.errorSummary.trim().length > 0
                 ? payload.errorSummary
                 : 'Run failed'
               : null;
+          const isRecoverableConflict = errorText ? isContextEventVersionConflictError(errorText) : false;
+          if (isRecoverableConflict) {
+            return finalizeRuntimeAfterRecoverableConflictError(runtime, payload.runId, Date.now());
+          }
+          if (errorText) {
+            upsertRuntimeErrorMessage(sessionId, payload.runId, errorText);
+          }
           return {
             ...nextRuntime,
             runId: null,
             runStartedAt: 0,
             lastActivityAt: Date.now(),
             isRunning: false,
-            resumePending: false,
-            dismissPending: false,
             cancelInitiated: false,
             cancelAcknowledged: payload.terminalCode === 'cancelled' ? true : runtime.cancelAcknowledged,
             cancelRequestedAt: 0,
             contextPrecompressActive: false,
             compressionStatus: null,
-            liveEvents: [],
-            contentAccumulator: '',
-            toolCallsAccumulator: [],
-            toolResultsAccumulator: [],
+            liveEvents: shouldPreserveCancelledSnapshot ? closeStreamingThinking(nextRuntime.liveEvents) : [],
+            contentAccumulator: shouldPreserveCancelledSnapshot ? nextRuntime.contentAccumulator : '',
+            toolCallsAccumulator: shouldPreserveCancelledSnapshot ? nextRuntime.toolCallsAccumulator : [],
+            toolResultsAccumulator: shouldPreserveCancelledSnapshot ? nextRuntime.toolResultsAccumulator : [],
             currentStep: typeof payload.lastSafeStep === 'number' ? payload.lastSafeStep : runtime.currentStep,
             maxSteps: typeof payload.maxSteps === 'number' ? payload.maxSteps : runtime.maxSteps,
-            error: errorText,
+            error: null,
             interruptedArtifact: payload.artifact ?? null,
             lastTerminalState: payload,
             pendingPlanInput: null,
             pendingPlanInputError: null,
             currentLlmRuntime: null,
+            activeRunOwner: null,
+            interactionState: { mode: 'normal' },
           };
         });
 
@@ -1220,30 +1259,18 @@ export function useAppSessionController({
           void loadSessionMessages(sessionId);
           void onRefreshGovernance(sessionId);
         }
+        setSessions((prev) =>
+          prev.map((session) =>
+            session.id === sessionId
+              ? {
+                  ...session,
+                  activeRun: null,
+                  interactionState: { mode: 'normal' },
+                }
+              : session
+          )
+        );
         void fetchSessions();
-      })
-    );
-
-    unsubscribers.push(
-      subscribe('interrupted_artifact_dismissed', (data: unknown) => {
-        const payload = data as {
-          context?: ContextRef;
-          artifact?: InterruptedArtifactView | null;
-        };
-        const sessionId = toSessionId(payload.context);
-        if (!sessionId || !payload.artifact) {
-          return;
-        }
-        updateRuntime(sessionId, (runtime) => ({
-          ...runtime,
-          lastActivityAt: Date.now(),
-          resumePending: false,
-          dismissPending: false,
-          interruptedArtifact: payload.artifact ?? runtime.interruptedArtifact,
-        }));
-        if (currentSessionIdRef.current === sessionId) {
-          void loadSessionMessages(sessionId);
-        }
       })
     );
 
@@ -1265,8 +1292,6 @@ export function useAppSessionController({
             runId: null,
             runStartedAt: 0,
             isRunning: false,
-            resumePending: false,
-            dismissPending: false,
             cancelInitiated: false,
             cancelAcknowledged: true,
             cancelRequestedAt: 0,
@@ -1276,6 +1301,8 @@ export function useAppSessionController({
             pendingPlanInput: null,
             pendingPlanInputError: null,
             currentLlmRuntime: null,
+            activeRunOwner: null,
+            interactionState: { mode: 'normal' },
           };
         });
       })
@@ -1287,16 +1314,28 @@ export function useAppSessionController({
           context?: ContextRef;
           ratio?: number;
           utilizationRatio?: number;
-          usedChars: number;
-          limitChars: number;
+          usedChars?: number;
+          limitChars?: number;
+          usedTokens?: number;
+          limitTokens?: number;
+          source?: 'provider_usage' | 'weighted_char_estimate' | 'calibrated_weighted_estimate';
+          anchorPromptTokens?: number;
+          deltaEstimatedTokens?: number;
         };
         const sessionId = toSessionId(payload.context);
+        const tokenRatio =
+          typeof payload.usedTokens === 'number' &&
+          typeof payload.limitTokens === 'number' &&
+          payload.limitTokens > 0
+            ? payload.usedTokens / payload.limitTokens
+            : null;
         const ratio =
-          typeof payload.ratio === 'number'
+          tokenRatio ??
+          (typeof payload.ratio === 'number'
             ? payload.ratio
             : typeof payload.utilizationRatio === 'number'
               ? payload.utilizationRatio
-              : null;
+              : null);
         if (!sessionId || ratio === null) {
           return;
         }
@@ -1314,8 +1353,13 @@ export function useAppSessionController({
             ...prev,
             [sessionId]: {
               ratio,
-              usedChars: payload.usedChars,
-              limitChars: payload.limitChars,
+              usedChars: typeof payload.usedChars === 'number' ? payload.usedChars : 0,
+              limitChars: typeof payload.limitChars === 'number' ? payload.limitChars : 230000,
+              usedTokens: payload.usedTokens,
+              limitTokens: payload.limitTokens,
+              source: payload.source,
+              anchorPromptTokens: payload.anchorPromptTokens,
+              deltaEstimatedTokens: payload.deltaEstimatedTokens,
               isWarning,
               initializing: false,
             },
@@ -1433,6 +1477,7 @@ export function useAppSessionController({
     subscribe,
     t,
     updateRuntime,
+    upsertRuntimeErrorMessage,
   ]);
 
   useEffect(() => {
@@ -1496,10 +1541,15 @@ export function useAppSessionController({
   }, [addToast, loadSessionMessages, t, updateRuntime]);
 
   const handleSend = useCallback(
-    (payload: { prompt: string; selectedAgentName?: string; usePlanMode?: boolean }) => {
+    (payload: {
+      prompt: string;
+      selectedAgentName?: string;
+      planningAction?: 'enter_drafting';
+      fileReferences?: string[];
+    }): boolean => {
       const trimmedPrompt = payload.prompt.trim();
       if (!trimmedPrompt) {
-        return;
+        return false;
       }
       setActiveView('chat');
 
@@ -1514,14 +1564,56 @@ export function useAppSessionController({
       );
 
       const currentRuntime = runtimeBySession[sessionId];
+      if (
+        currentRuntime?.isRunning &&
+        currentRuntime.interactionState.mode !== 'observe_only' &&
+        !isRuntimeLlmSelectionLocked(currentRuntime)
+      ) {
+        const clientRequestId = createRunningInputClientRequestId();
+        pendingRunningInputRequestBySessionRef.current[sessionId] = {
+          clientRequestId,
+          prompt: trimmedPrompt,
+          composerRevision: composerRevisionBySessionRef.current[resolveComposerInputKey(sessionId)] ?? 0,
+        };
+        const message = buildRunningInputEnqueueMessage({
+          sessionId,
+          prompt: trimmedPrompt,
+          clientRequestId,
+          selectedAgentName: payload.selectedAgentName,
+          fileReferences: payload.fileReferences,
+        });
+        const sent = send(message);
+        if (!sent) {
+          delete pendingRunningInputRequestBySessionRef.current[sessionId];
+          updateRuntime(sessionId, (runtime) => ({
+            ...runtime,
+            error: t('app.websocket.sendFailed'),
+          }));
+        }
+        return sent;
+      }
       if (isRuntimeInteractionLocked(currentRuntime)) {
-        return;
+        return false;
       }
 
-      upsertLocalDraftSession(sessionId, trimmedPrompt, workspaceDir);
+      const nextPlanningState: SessionPlanningState = payload.planningAction === 'enter_drafting' ? 'plan_drafting' : 'normal';
+      const clientMessageId = createMessageId('user-msg');
+      upsertLocalDraftSession(sessionId, trimmedPrompt, workspaceDir, nextPlanningState);
+      if (nextPlanningState !== 'normal') {
+        setOptimisticPlanningStateBySession((prev) => ({
+          ...prev,
+          [sessionId]: nextPlanningState,
+        }));
+      }
+      setPlanModeIntentBySession((prev) => {
+        const next = { ...prev };
+        delete next[sessionKey];
+        delete next[sessionId];
+        return next;
+      });
 
       appendMessage(sessionId, {
-        id: createMessageId('user-msg'),
+        id: clientMessageId,
         role: 'user',
         content: trimmedPrompt,
         timestamp: Date.now(),
@@ -1552,22 +1644,16 @@ export function useAppSessionController({
         });
       }
 
-      const context: ContextRef = {
-        scope: 'session',
-        namespace: sessionId,
-      };
-
-      const message: WSMessage = {
-        type: 'chat',
-        data: {
-          prompt: trimmedPrompt,
-          selectedAgentName: payload.selectedAgentName,
-          ...(payload.usePlanMode === true ? { usePlanMode: true } : {}),
-          ...(llmProfiles ? { llmSelection: effectiveLlmSelection } : {}),
-          workspaceDir,
-          context,
-        },
-      };
+      const message = buildChatMessage({
+        sessionId,
+        prompt: trimmedPrompt,
+        clientMessageId,
+        selectedAgentName: payload.selectedAgentName,
+        planningAction: payload.planningAction,
+        fileReferences: payload.fileReferences,
+        llmSelection: llmProfiles ? effectiveLlmSelection : undefined,
+        workspaceDir,
+      });
 
       sendWithReconnectRetry(message, () => {
         updateRuntime(sessionId, (runtime) => ({
@@ -1579,6 +1665,7 @@ export function useAppSessionController({
         }));
       });
       void fetchSessions();
+      return true;
     },
     [
       appendMessage,
@@ -1587,6 +1674,7 @@ export function useAppSessionController({
       fetchSessions,
       runtimeBySession,
       llmProfiles,
+      send,
       sendWithReconnectRetry,
       sessionLlmSelectionBySession,
       setActiveView,
@@ -1604,7 +1692,7 @@ export function useAppSessionController({
     }
     const runtime = runtimeBySession[currentSessionId];
     const cancelInFlight = runtime?.cancelInitiated && !runtime.cancelAcknowledged;
-    if (!runtime || cancelInFlight) {
+    if (!runtime || cancelInFlight || runtime.interactionState.mode === 'observe_only') {
       return;
     }
     const runId = runtime?.runId;
@@ -1614,31 +1702,20 @@ export function useAppSessionController({
       runId: null,
       runStartedAt: 0,
       isRunning: false,
-      resumePending: false,
       cancelInitiated: true,
       cancelAcknowledged: false,
       cancelRequestedAt: Date.now(),
       contextPrecompressActive: false,
       compressionStatus: null,
-      liveEvents: [],
-      contentAccumulator: '',
-      toolCallsAccumulator: [],
-      toolResultsAccumulator: [],
+      liveEvents: closeStreamingThinking(state.liveEvents),
       pendingPlanInput: null,
       pendingPlanInputError: null,
       currentLlmRuntime: null,
+      activeRunOwner: null,
+      interactionState: { mode: 'normal' },
     }));
 
-    const sent = send({
-      type: 'cancel',
-      data: {
-        runId,
-        context: {
-          scope: 'session',
-          namespace: currentSessionId,
-        },
-      },
-    });
+    const sent = send(buildCancelRunMessage(currentSessionId, runId));
     if (!sent) {
       updateRuntime(currentSessionId, (state) => ({
         ...state,
@@ -1650,85 +1727,162 @@ export function useAppSessionController({
     }
   }, [currentSessionId, runtimeBySession, send, t, updateRuntime]);
 
-  const handleResumeInterruptedRun = useCallback(() => {
-    if (!currentSessionId) {
-      return;
-    }
-    const runtime = runtimeBySession[currentSessionId];
-    const artifact = runtime?.interruptedArtifact;
-    if (
-      !artifact?.resumable ||
-      !artifact.artifactId ||
-      runtime?.isRunning ||
-      runtime?.resumePending ||
-      runtime?.dismissPending
-    ) {
-      return;
-    }
-    updateRuntime(currentSessionId, (state) => ({
-      ...state,
-      error: null,
-      lastActivityAt: Date.now(),
-      resumePending: true,
-      dismissPending: false,
-    }));
-    sendWithReconnectRetry(
-      {
-        type: 'resume_failed_turn',
-        data: {
-          context: {
-            scope: 'session',
-            namespace: currentSessionId,
-          },
-          sessionId: currentSessionId,
-          artifactId: artifact.artifactId,
-        },
-      },
-      () => {
+  const handleInsertRunningInput = useCallback(
+    (itemId: string) => {
+      if (!currentSessionId) {
+        return;
+      }
+      const runtime = runtimeBySession[currentSessionId];
+      if (!runtime?.runId || runtime.interactionState.mode === 'observe_only' || isRuntimeLlmSelectionLocked(runtime)) {
+        return;
+      }
+      const sent = send(buildRunningInputInsertMessage({
+        sessionId: currentSessionId,
+        runId: runtime.runId,
+        itemId,
+      }));
+      if (!sent) {
         updateRuntime(currentSessionId, (state) => ({
           ...state,
-          resumePending: false,
           error: t('app.websocket.sendFailed'),
         }));
       }
-    );
-  }, [currentSessionId, runtimeBySession, sendWithReconnectRetry, t, updateRuntime]);
+    },
+    [currentSessionId, runtimeBySession, send, t, updateRuntime]
+  );
 
-  const handleDismissInterruptedArtifact = useCallback(() => {
-    if (!currentSessionId) {
-      return;
-    }
-    const runtime = runtimeBySession[currentSessionId];
-    const artifact = runtime?.interruptedArtifact;
-    if (!artifact || runtime?.isRunning || runtime?.resumePending || runtime?.dismissPending) {
-      return;
-    }
-    updateRuntime(currentSessionId, (state) => ({
-      ...state,
-      error: null,
-      lastActivityAt: Date.now(),
-      dismissPending: true,
-    }));
-    sendWithReconnectRetry(
-      {
-        type: 'dismiss_interrupted_artifact',
-        data: {
-          context: {
-            scope: 'session',
-            namespace: currentSessionId,
-          },
-          sessionId: currentSessionId,
-        },
-      },
-      () => {
-        updateRuntime(currentSessionId, (state) => ({
+  const sendRunningInputCancel = useCallback(
+    (sessionId: string, itemId: string): boolean => {
+      const sent = send(buildRunningInputCancelMessage(sessionId, itemId));
+      if (!sent) {
+        updateRuntime(sessionId, (state) => ({
           ...state,
-          dismissPending: false,
           error: t('app.websocket.sendFailed'),
         }));
       }
-    );
-  }, [currentSessionId, runtimeBySession, sendWithReconnectRetry, t, updateRuntime]);
+      return sent;
+    },
+    [send, t, updateRuntime]
+  );
+
+  const handleCancelRunningInput = useCallback(
+    (itemId: string) => {
+      if (!currentSessionId) {
+        return;
+      }
+      const runtime = runtimeBySession[currentSessionId];
+      if (runtime?.interactionState.mode === 'observe_only') {
+        return;
+      }
+      if (sendRunningInputCancel(currentSessionId, itemId)) {
+        updateRuntime(currentSessionId, (state) => removeRunningInputQueueItem(state, itemId));
+      }
+    },
+    [currentSessionId, runtimeBySession, sendRunningInputCancel, updateRuntime]
+  );
+
+  const handleEditRunningInput = useCallback(
+    (item: RunningInputQueueItemView) => {
+      const sessionId = toSessionId(item.context) ?? currentSessionId;
+      if (!sessionId) {
+        return;
+      }
+      const runtime = runtimeBySession[sessionId];
+      if (runtime?.interactionState.mode === 'observe_only') {
+        return;
+      }
+      if (!sendRunningInputCancel(sessionId, item.id)) {
+        return;
+      }
+      const key = resolveComposerInputKey(sessionId);
+      composerRevisionBySessionRef.current[key] = (composerRevisionBySessionRef.current[key] ?? 0) + 1;
+      setComposerInputBySession((prev) => setComposerInput(prev, sessionId, item.prompt));
+      setRunningInputEditRestoreBySession((prev) => ({
+        ...prev,
+        [sessionId]: {
+          id: item.id,
+          ...(item.fileReferences && item.fileReferences.length > 0 ? { fileReferences: item.fileReferences } : {}),
+        },
+      }));
+      updateRuntime(sessionId, (state) => removeRunningInputQueueItem(state, item.id));
+    },
+    [currentSessionId, runtimeBySession, sendRunningInputCancel, updateRuntime]
+  );
+
+  const handleExitCurrentPlanExecution = useCallback(async () => {
+    if (!currentSessionId) {
+      return;
+    }
+    if (runtimeBySession[currentSessionId]?.interactionState.mode === 'observe_only') {
+      return;
+    }
+    if (!window.confirm(t('chatInput.planMode.exitExecutingConfirm'))) {
+      return;
+    }
+    try {
+      await exitPlanExecution(currentSessionId, 'normal', 'Plan execution completed from UI');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!window.confirm(t('chatInput.planMode.exitForceConfirm', { message }))) {
+        return;
+      }
+      try {
+        await exitPlanExecution(currentSessionId, 'force', 'Plan execution force-exited from UI');
+      } catch (forceError) {
+        addToast({
+          type: 'error',
+          message: t('chatInput.planMode.exitFailed', {
+            message: forceError instanceof Error ? forceError.message : String(forceError),
+          }),
+          autoDismiss: true,
+        });
+        return;
+      }
+    }
+    setOptimisticPlanningStateBySession((prev) => ({
+      ...prev,
+      [currentSessionId]: 'normal',
+    }));
+    addToast({
+      type: 'success',
+      message: t('chatInput.planMode.exitSucceeded'),
+      autoDismiss: true,
+    });
+    await fetchSessions();
+    await loadSessionMessages(currentSessionId);
+  }, [addToast, currentSessionId, fetchSessions, loadSessionMessages, runtimeBySession, t]);
+
+  const handleExitCurrentPlanDraft = useCallback(async () => {
+    const key = currentSessionId ?? COMPOSER_DRAFT_KEY;
+    if (!currentSessionId) {
+      setOptimisticPlanningStateBySession((prev) => ({
+        ...prev,
+        [key]: 'normal',
+      }));
+      return;
+    }
+    if (runtimeBySession[currentSessionId]?.interactionState.mode === 'observe_only') {
+      return;
+    }
+    try {
+      await exitPlanDraft(currentSessionId, 'Plan draft exited from UI');
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('chatInput.planMode.exitFailed', {
+          message: error instanceof Error ? error.message : String(error),
+        }),
+        autoDismiss: true,
+      });
+      return;
+    }
+    setOptimisticPlanningStateBySession((prev) => ({
+      ...prev,
+      [currentSessionId]: 'normal',
+    }));
+    await fetchSessions();
+    await loadSessionMessages(currentSessionId);
+  }, [addToast, currentSessionId, fetchSessions, loadSessionMessages, runtimeBySession, t]);
 
   const handleSubmitPlanInput = useCallback(
     (answers: PlanInputAnswerPayload[]) => {
@@ -1738,19 +1892,25 @@ export function useAppSessionController({
       const runtime = runtimeBySession[currentSessionId];
       const pending = runtime?.pendingPlanInput;
       const runId = runtime?.runId;
+      if (runtime?.interactionState.mode === 'observe_only') {
+        return;
+      }
       if (!pending || !runId) {
         return;
       }
-      const sent = send({
-        type: 'plan_input_response',
-        data: {
-          runId,
-          context: pending.context,
-          requestId: pending.requestId,
-          answers,
-        },
-      });
+      const sent = send(buildPlanInputResponseMessage({
+        runId,
+        context: pending.context,
+        requestId: pending.requestId,
+        answers,
+      }));
       if (!sent) {
+        console.warn('[PlanInput] submit failed: websocket not connected', {
+          sessionId: currentSessionId,
+          runId,
+          requestId: pending.requestId,
+          answerCount: answers.length,
+        });
         updateRuntime(currentSessionId, (state) => ({
           ...state,
           pendingPlanInputError: t('app.websocket.planInputFailed'),
@@ -1799,6 +1959,14 @@ export function useAppSessionController({
         return;
       }
       const target = sessions.find((item) => item.id === sessionId);
+      if (target?.interactionState?.mode === 'observe_only') {
+        addToast({
+          type: 'warning',
+          message: t('app.session.observeOnly'),
+          autoDismiss: true,
+        });
+        return;
+      }
       if (target?.isLocalDraft) {
         setSessions((prev) =>
           prev.map((item) =>
@@ -1808,23 +1976,14 @@ export function useAppSessionController({
         return;
       }
       try {
-        const response = await fetch(`/api/sessions/${sessionId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: normalizedName }),
-        });
-        if (!response.ok) {
-          const error = (await response.json().catch(() => ({ error: 'Unknown error' }))) as { error?: string };
-          alert(`${t('common.error')}: ${error.error || response.statusText}`);
-          return;
-        }
+        await renameSession(sessionId, normalizedName);
         await fetchSessions();
       } catch (error) {
         console.error('Failed to rename session:', error);
-        alert(t('common.error'));
+        alert(`${t('common.error')}: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
-    [fetchSessions, sessions, t]
+    [addToast, fetchSessions, sessions, t]
   );
 
   const handleDeleteSession = useCallback(
@@ -1832,8 +1991,17 @@ export function useAppSessionController({
       if (!window.confirm(t('app.deleteSession.confirm'))) {
         return;
       }
+      const target = sessions.find((item) => item.id === sessionId);
+      if (target?.interactionState?.mode === 'observe_only') {
+        addToast({
+          type: 'warning',
+          message: t('app.session.observeOnly'),
+          autoDismiss: true,
+        });
+        return;
+      }
       try {
-        await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+        await deleteSessionRequest(sessionId);
         removeComposerInputForSession(sessionId);
         if (currentSessionId === sessionId) {
           setCurrentSessionId(null);
@@ -1867,28 +2035,62 @@ export function useAppSessionController({
       clearComposerInputForSession,
       currentSessionId,
       fetchSessions,
+      addToast,
       onRefreshGovernance,
       removeComposerInputForSession,
       setCurrentSessionId,
+      sessions,
       t,
     ]
   );
 
-  const currentMessages = useMemo(() => {
-    if (!currentSessionId) {
-      return [];
-    }
-    return messagesBySession[currentSessionId] ?? [];
-  }, [currentSessionId, messagesBySession]);
+  const currentMessages = useMemo(
+    () => resolveCurrentMessages(currentSessionId, messagesBySession),
+    [currentSessionId, messagesBySession]
+  );
 
-  const currentRuntime = useMemo(() => {
-    if (!currentSessionId) {
-      return createRuntimeState();
-    }
-    return runtimeBySession[currentSessionId] ?? createRuntimeState();
-  }, [currentSessionId, runtimeBySession]);
+  const currentRuntime = useMemo(
+    () => resolveCurrentRuntime(currentSessionId, runtimeBySession),
+    [currentSessionId, runtimeBySession]
+  );
+  const currentPlanningState = useMemo<SessionPlanningState>(
+    () =>
+      resolveCurrentPlanningState({
+        currentSessionId,
+        optimisticPlanningStateBySession,
+        sessions,
+      }),
+    [currentSessionId, optimisticPlanningStateBySession, sessions]
+  );
+  const currentPlanModeIntent = useMemo(
+    () => resolveCurrentPlanModeIntent(currentSessionId, planModeIntentBySession),
+    [currentSessionId, planModeIntentBySession]
+  );
+  const setCurrentPlanModeIntent = useCallback(
+    (enabled: boolean) => {
+      setPlanModeIntentBySession((prev) =>
+        setPlanModeIntentState({ state: prev, sessionId: currentSessionId, enabled })
+      );
+    },
+    [currentSessionId]
+  );
+  const setCurrentPlanningState = useCallback(
+    (state: SessionPlanningState) => {
+      const key = currentSessionId ?? COMPOSER_DRAFT_KEY;
+      setOptimisticPlanningStateBySession((prev) => {
+        const next = { ...prev };
+        if (state === 'normal') {
+          delete next[key];
+        } else {
+          next[key] = state;
+        }
+        return next;
+      });
+    },
+    [currentSessionId]
+  );
   const currentInteractionLocked = useMemo(
-    () => isRuntimeInteractionLocked(currentRuntime),
+    () => isRuntimeInteractionLocked(currentRuntime) || currentRuntime.interactionState.mode === 'observe_only',
     [currentRuntime]
   );
   const currentCanceling = useMemo(
@@ -1896,34 +2098,40 @@ export function useAppSessionController({
     [currentRuntime]
   );
 
+  useEffect(() => {
+    if (!currentSessionId) {
+      lastInteractionLockDiagnosticRef.current = null;
+      return;
+    }
+    const diagnostic = buildRuntimeInteractionLockDiagnostic({
+      sessionId: currentSessionId,
+      runtime: currentRuntime,
+    });
+    if (!diagnostic) {
+      lastInteractionLockDiagnosticRef.current = null;
+      return;
+    }
+    const { lastActivityAt: _lastActivityAt, ...stableDiagnostic } = diagnostic;
+    const signature = JSON.stringify(stableDiagnostic);
+    if (signature === lastInteractionLockDiagnosticRef.current) {
+      return;
+    }
+    lastInteractionLockDiagnosticRef.current = signature;
+    console.warn('[App] Chat input locked:', diagnostic);
+  }, [currentSessionId, currentRuntime]);
+
   const runningSessionIds = useMemo(
-    () =>
-      Object.entries(runtimeBySession)
-        .filter(([, runtime]) => runtime.isRunning)
-        .map(([sessionId]) => sessionId),
+    () => resolveRunningSessionIds(runtimeBySession),
     [runtimeBySession]
   );
 
-  const pendingPlanInputSessions = useMemo<PendingPlanInputSessionItem[]>(() => {
-    const sessionNameById = new Map(sessions.map((session) => [session.id, session.name]));
-    const seen = new Set<string>();
-    const items: PendingPlanInputSessionItem[] = [];
-    for (const [sessionId, runtime] of Object.entries(runtimeBySession)) {
-      if (!runtime.pendingPlanInput || seen.has(sessionId)) {
-        continue;
-      }
-      seen.add(sessionId);
-      items.push({
-        sessionId,
-        sessionName: sessionNameById.get(sessionId) ?? sessionId,
-        requestId: runtime.pendingPlanInput.requestId,
-      });
-    }
-    return items;
-  }, [runtimeBySession, sessions]);
+  const pendingPlanInputSessions = useMemo(
+    () => resolvePendingPlanInputSessions(runtimeBySession, sessions),
+    [runtimeBySession, sessions]
+  );
 
   const pendingPlanInputSessionIds = useMemo(
-    () => pendingPlanInputSessions.map((item) => item.sessionId),
+    () => resolvePendingPlanInputSessionIds(pendingPlanInputSessions),
     [pendingPlanInputSessions]
   );
 
@@ -1946,9 +2154,12 @@ export function useAppSessionController({
     fetchMcpStatus,
     loadSessionMessages,
     handleSend,
+    handleInsertRunningInput,
+    handleEditRunningInput,
+    handleCancelRunningInput,
     handleCancelCurrentRun,
-    handleResumeInterruptedRun,
-    handleDismissInterruptedArtifact,
+    handleExitCurrentPlanDraft,
+    handleExitCurrentPlanExecution,
     handleSubmitPlanInput,
     handleSelectSession,
     handleOpenAutomationSession,
@@ -1956,6 +2167,12 @@ export function useAppSessionController({
     handleDeleteSession,
     currentMessages,
     currentRuntime,
+    currentPlanningState,
+    currentPlanModeIntent,
+    currentRunningInputAckId: currentSessionId ? runningInputAckBySession[currentSessionId] : undefined,
+    currentRunningInputEditRestore: currentSessionId ? runningInputEditRestoreBySession[currentSessionId] : undefined,
+    setCurrentPlanModeIntent,
+    setCurrentPlanningState,
     currentInteractionLocked,
     currentCanceling,
     currentLlmSelection,

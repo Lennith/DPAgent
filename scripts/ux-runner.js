@@ -291,23 +291,48 @@ async function fetchSettingsSnapshot(baseUrl) {
     throw new Error(`Failed to fetch settings snapshot: HTTP ${response.status}`);
   }
   const payload = await response.json();
+  const profiles = Array.isArray(payload?.llmProfiles?.profiles) ? payload.llmProfiles.profiles : [];
+  const defaultProfileId = String(payload?.llmProfiles?.defaultProfileId || profiles[0]?.id || 'default');
+  const defaultProfile =
+    profiles.find((profile) => String(profile?.id || '') === defaultProfileId) || profiles[0] || {};
   return {
-    apiBase: String(payload?.api?.apiBase || '').trim(),
-    model: String(payload?.api?.model || '').trim(),
-    provider: String(payload?.api?.provider || '').trim(),
-    hasApiKey: Boolean(payload?.api?.hasApiKey),
+    defaultProfileId,
+    profiles,
+    apiBase: String(defaultProfile?.apiBase || '').trim(),
+    model: String(defaultProfile?.defaultModel || '').trim(),
+    provider: String(defaultProfile?.provider || '').trim(),
+    hasApiKey: Boolean(payload?.hasApiKey || defaultProfile?.hasApiKey),
   };
 }
 
-async function postConfigOverride(baseUrl, override) {
-  const response = await fetch(`${baseUrl}/api/config`, {
-    method: 'POST',
+async function putSettingsProfileOverride(baseUrl, snapshot, override) {
+  const defaultProfileId = snapshot.defaultProfileId;
+  const profiles = snapshot.profiles.length > 0 ? snapshot.profiles : [{ id: defaultProfileId }];
+  const nextProfiles = profiles.map((profile) => {
+    const isDefault = String(profile?.id || '') === defaultProfileId;
+    return {
+      id: String(profile?.id || defaultProfileId),
+      name: String(profile?.name || profile?.id || defaultProfileId),
+      provider: isDefault && override.provider !== undefined ? override.provider : profile?.provider,
+      apiBase: isDefault && override.apiBase !== undefined ? override.apiBase : profile?.apiBase,
+      defaultModel: isDefault && override.model !== undefined ? override.model : profile?.defaultModel,
+      maxOutputTokens: profile?.maxOutputTokens,
+      contextWindowTokens: profile?.contextWindowTokens,
+      enabled: profile?.enabled !== false,
+      capabilities: profile?.capabilities,
+    };
+  });
+  const response = await fetch(`${baseUrl}/api/settings`, {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(override),
+    body: JSON.stringify({
+      defaultProfileId,
+      profiles: nextProfiles,
+    }),
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to update runtime config: HTTP ${response.status} ${text}`);
+    throw new Error(`Failed to update runtime settings: HTTP ${response.status} ${text}`);
   }
 }
 
@@ -346,9 +371,9 @@ function messageContentToText(content) {
 async function run() {
   const args = parseArgs(process.argv.slice(2));
   const scenario = readScenario(args.scenarioPath);
-  const cliEntry = path.join(ROOT, 'dist', 'cli', 'minimax-agent.js');
+  const cliEntry = path.join(ROOT, 'dist', 'cli', 'dpagent.js');
   if (!fs.existsSync(cliEntry)) {
-    throw new Error('Missing dist/cli/minimax-agent.js. Run npm run build first.');
+    throw new Error('Missing dist/cli/dpagent.js. Run npm run build first.');
   }
 
   ensureDir(args.uxRoot);
@@ -715,7 +740,7 @@ async function run() {
   try {
     let serverReady = false;
     try {
-      await waitForHttpReady(`${baseUrl}/api/config`, 5000);
+      await waitForHttpReady(`${baseUrl}/api/settings`, 5000);
       serverReady = true;
     } catch {
       serverReady = false;
@@ -740,12 +765,12 @@ async function run() {
       }
       const occupied = await isPortInUse(args.port);
       if (occupied) {
-        throw new Error(`Port ${args.port} appears occupied, but /api/config is not reachable.`);
+        throw new Error(`Port ${args.port} appears occupied, but /api/settings is not reachable.`);
       }
       await ensureWebClientBuild();
       child = spawn(process.execPath, [cliEntry, '--no-open'], {
         cwd: args.uxRoot,
-        env: { ...process.env, MINIMAX_PORT: String(args.port) },
+        env: { ...process.env, DPAGENT_PORT: String(args.port) },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout.pipe(serverStdout);
@@ -755,7 +780,7 @@ async function run() {
       });
     }
 
-    await waitForHttpReady(`${baseUrl}/api/config`, 35000);
+    await waitForHttpReady(`${baseUrl}/api/settings`, 35000);
     try {
       originalSettings = await fetchSettingsSnapshot(baseUrl);
       serverHasApiKey = originalSettings.hasApiKey;
@@ -875,7 +900,7 @@ async function run() {
         || requestedOverride.apiBase !== undefined && requestedOverride.apiBase !== originalSettings.apiBase
         || requestedOverride.model !== undefined && requestedOverride.model !== originalSettings.model;
       if (needsOverride) {
-        await postConfigOverride(baseUrl, requestedOverride);
+        await putSettingsProfileOverride(baseUrl, originalSettings, requestedOverride);
         overrideApplied = true;
         summary.configOverride.applied = true;
         expectedNavigationUntil = Date.now() + 8000;
@@ -1030,7 +1055,7 @@ async function run() {
   } finally {
     if (overrideApplied && args.restoreAfterRun && originalSettings) {
       try {
-        await postConfigOverride(baseUrl, {
+        await putSettingsProfileOverride(baseUrl, originalSettings, {
           provider: originalSettings.provider,
           apiBase: originalSettings.apiBase,
           model: originalSettings.model,

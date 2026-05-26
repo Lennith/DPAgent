@@ -14,7 +14,8 @@ async function testSchedulerSkipsStaleAndOverlap(): Promise<void> {
     const scheduler = new AutomationScheduler(
       {
         store,
-        executeJob: async () => {
+        executeJob: async (_job, _triggerAt, options) => {
+          assert.equal(options?.claimedRunRecord?.status, 'running');
           executeCount += 1;
         },
         logger: { warn: () => undefined },
@@ -45,23 +46,36 @@ async function testSchedulerSkipsStaleAndOverlap(): Promise<void> {
     // overlap: due now but already running should append skipped record
     const runningSet = (scheduler as unknown as { runningJobIds: Set<string> }).runningJobIds;
     runningSet.add(job.id);
+    store.claimRun({
+      jobId: job.id,
+      triggerAt: new Date(Date.now() - 1000).toISOString(),
+      triggerSource: 'schedule',
+      runId: 'already-running',
+      sessionId: 'already-running-session',
+    });
     store.updateJob(job.id, {
       nextRunAt: new Date(Date.now()).toISOString(),
     });
     await scheduler.runTick(new Date());
     const overlapRuns = store.listRuns(job.id);
-    assert.equal(overlapRuns.length, 1);
-    assert.equal(overlapRuns[0]?.status, 'skipped');
-    assert.equal(overlapRuns[0]?.skippedReason, 'overlap_running');
+    const skipped = overlapRuns.find((item) => item.status === 'skipped');
+    assert.equal(skipped?.skippedReason, 'overlap_running');
     assert.equal(executeCount, 0);
 
     // normal due run: dispatch executeAutomationJob
     runningSet.delete(job.id);
+    store.updateRun(job.id, 'already-running', {
+      status: 'succeeded',
+      completedAt: new Date().toISOString(),
+      resultSummary: 'done',
+    });
     store.updateJob(job.id, {
       nextRunAt: new Date(Date.now()).toISOString(),
     });
     await scheduler.runTick(new Date());
     assert.equal(executeCount, 1);
+    const normalRuns = store.listRuns(job.id);
+    assert.equal(normalRuns[0]?.status, 'running');
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
   }
@@ -104,17 +118,17 @@ async function testSchedulerJobIsolation(): Promise<void> {
       nextRunAt: new Date(Date.now()).toISOString(),
     });
 
-    const originalUpdateJob = store.updateJob.bind(store);
-    (store as unknown as { updateJob: typeof store.updateJob }).updateJob = (id, patch) => {
-      if (id === brokenJob.id) {
+    const originalClaimRun = store.claimRun.bind(store);
+    (store as unknown as { claimRun: typeof store.claimRun }).claimRun = (input) => {
+      if (input.jobId === brokenJob.id) {
         throw new Error('simulated scheduler patch failure');
       }
-      return originalUpdateJob(id, patch);
+      return originalClaimRun(input);
     };
 
     await scheduler.runTick(new Date());
     assert.equal(executeCount, 1);
-    assert.equal(store.listRuns(healthyJob.id).length, 0);
+    assert.equal(store.listRuns(healthyJob.id)[0]?.status, 'running');
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
   }

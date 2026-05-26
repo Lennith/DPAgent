@@ -1,4 +1,3 @@
-import React from 'react';
 import { useI18n } from '../../i18n/index.js';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 import { TodoPanel, type TodoPanelItem } from '../chat/TodoPanel.js';
@@ -8,12 +7,14 @@ interface RightToolbarProps {
   sessionId: string | null;
   todoItems: TodoPanelItem[];
   onHide: () => void;
+  onResumeTodo?: (id: string) => void;
+  onDismissTodo?: (id: string) => void;
 }
 
-export function RightToolbar({ sessionId, todoItems, onHide }: RightToolbarProps) {
+export function RightToolbar({ sessionId, todoItems, onHide, onResumeTodo, onDismissTodo }: RightToolbarProps) {
   const theme = useThemeConfig();
   const { t } = useI18n();
-  const openTodoItems = todoItems.filter((item) => item.status !== 'completed');
+  const openTodoItems = todoItems.filter((item) => item.status !== 'completed' && item.status !== 'dismissed');
   const hasTodoItems = openTodoItems.length > 0;
   const toolbarBackground = theme.colors.bg.gradient;
   const todoBackground =
@@ -46,7 +47,12 @@ export function RightToolbar({ sessionId, todoItems, onHide }: RightToolbarProps
               {t('todo.openCount', { count: openTodoItems.length })}
             </span>
           </div>
-          <TodoPanel items={openTodoItems} compact />
+          <TodoPanel
+            items={openTodoItems}
+            compact
+            onResumeTodo={onResumeTodo}
+            onDismissTodo={onDismissTodo}
+          />
         </div>
       )}
     </div>

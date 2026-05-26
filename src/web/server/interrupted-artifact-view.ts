@@ -1,4 +1,5 @@
 import type { InterruptedArtifact, RunTerminalState, SideEffectLedgerEntry } from '../../types.js';
+import { redactToolCallMessagesForCheckpoint } from '../../runtime/tool-result-payload-policy.js';
 
 function sanitizeSideEffectLedgerEntry(entry: SideEffectLedgerEntry): Omit<SideEffectLedgerEntry, 'args'> {
   return {
@@ -24,16 +25,14 @@ export function toInterruptedArtifactView(artifact: InterruptedArtifact | null |
     runFamilyId: artifact.runFamilyId,
     terminalCode: artifact.terminalCode,
     replayCutoffKind: artifact.replayCutoffKind,
-    resumable: artifact.resumable,
     lastSafeStep: artifact.lastSafeStep,
     maxSteps: artifact.maxSteps,
     errorSummary: artifact.errorSummary,
     createdAt: artifact.createdAt,
     updatedAt: artifact.updatedAt,
-    previewMessages: artifact.previewMessages,
+    previewMessages: redactToolCallMessagesForCheckpoint(artifact.previewMessages),
     sideEffectLedger: artifact.sideEffectLedger.map((entry) => sanitizeSideEffectLedgerEntry(entry)),
     ...(artifact.checkpointTurnId ? { checkpointTurnId: artifact.checkpointTurnId } : {}),
-    ...(artifact.dismissedAt ? { dismissedAt: artifact.dismissedAt } : {}),
   };
 }
 
@@ -43,7 +42,6 @@ export function toRunTerminalStateView(state: RunTerminalState) {
     runFamilyId: state.runFamilyId,
     draftId: state.draftId,
     terminalCode: state.terminalCode,
-    resumable: state.resumable,
     lastSafeStep: state.lastSafeStep,
     maxSteps: state.maxSteps,
     replayCutoffKind: state.replayCutoffKind,

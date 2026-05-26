@@ -3,13 +3,18 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  buildAgentProfileSystemSegment,
   buildPromptWithAgentProfileReference,
   buildPromptWithAgentProfile,
+  buildWorkspaceInstructionsSystemSegment,
+  isAgentProfileVisibleToSubagentManager,
   resolveAgentPool,
   loadWorkspaceAgentProfile,
   parseAgentProfilePrompt,
   parseLeadingAgentMention,
+  scanBundledAgentProfiles,
   scanGlobalAgentProfiles,
+  normalizeAgentProfileConfig,
 } from '../../src/agents/AgentProfiles.js';
 
 function writeFile(target: string, content: string): void {
@@ -117,6 +122,42 @@ function testFrontmatterSummaryLengthLimitInRepo(): void {
   }
 }
 
+function testRepositoryAgentProfilesAreNativeAndBounded(): void {
+  const agentsDir = path.resolve(process.cwd(), 'agents');
+  if (!fs.existsSync(agentsDir)) {
+    return;
+  }
+  const expectedNames = [
+    'browser',
+    'checkpoint',
+    'coding',
+    'design',
+    'dpagent-assistant',
+    'guard',
+    'health',
+    'investigate',
+    'planner',
+    'qa',
+    'release',
+    'report',
+    'research',
+    'review',
+    'security',
+  ];
+  const catalog = scanBundledAgentProfiles(agentsDir);
+  assert.deepEqual(catalog.profiles.map((item) => item.name), expectedNames);
+
+  const forbidden = /\b(?:claude|gstack|AskUserQuestion|WebSearch)\b|\.claude|\.gstack|CLAUDE\.md/i;
+  for (const profile of catalog.profiles) {
+    assert.equal(profile.source, 'bundled');
+    const content = fs.readFileSync(profile.path, 'utf-8');
+    const lineCount = content.split(/\r?\n/).length;
+    assert.equal(lineCount <= 500, true, `${profile.name} profile exceeds 500 lines`);
+    assert.doesNotMatch(content, forbidden, `${profile.name} profile contains external AI ecosystem coupling`);
+    assert.equal(profile.description.length <= 150, true, `description too long for ${profile.name}`);
+  }
+}
+
 function testWorkspaceProfileLoad(): void {
   const root = createTempDir('agent-profiles-workspace-');
   try {
@@ -159,6 +200,84 @@ function testPromptInjectionBlock(): void {
   assert.match(prompt, /Implement login$/);
 }
 
+function testAgentYamlConfigDescriptionWarningsAndPromptAppend(): void {
+  const root = createTempDir('agent-profiles-config-');
+  try {
+    writeFile(path.join(root, 'Configured', 'AGENTS.md'), [
+      '---',
+      'summary: Frontmatter summary',
+      '---',
+      '# Markdown Title',
+      'Base prompt.',
+    ].join('\n'));
+    writeFile(path.join(root, 'Configured', 'agent.yaml'), [
+      'version: 1',
+      'description: YAML description',
+      'llmProfileId: kimi',
+      'llmModel: kimi-agent-model',
+      'reasoningPreset: high',
+      'toolsetName: windows-safe',
+      'allowedTools:',
+      '  - read_file',
+      '  - grep',
+      'loadGlobalSkills: false',
+      'exposeAsSubagent: true',
+      'maxSteps: 30',
+      'timeoutMs: 300000',
+      'promptAppend: |',
+      '  Extra system prompt.',
+    ].join('\n'));
+    writeFile(path.join(root, 'Invalid', 'AGENTS.md'), '# Invalid');
+    writeFile(path.join(root, 'Invalid', 'agent.yaml'), 'version: 2\nallowedTools: nope\nloadGlobalSkills: nope\nmaxSteps: -1\n');
+
+    const result = scanGlobalAgentProfiles(root);
+    const configured = result.profiles.find((item) => item.name === 'Configured');
+    const invalid = result.profiles.find((item) => item.name === 'Invalid');
+    assert.ok(configured);
+    assert.equal(configured?.description, 'YAML description');
+    assert.equal(configured?.config?.llmProfileId, 'kimi');
+    assert.equal(configured?.config?.llmModel, 'kimi-agent-model');
+    assert.equal(configured?.config?.reasoningPreset, 'high');
+    assert.equal(configured?.config?.toolsetName, 'windows-safe');
+    assert.deepEqual(configured?.config?.allowedTools, ['read_file', 'grep']);
+    assert.equal(configured?.config?.loadGlobalSkills, false);
+    assert.equal(configured?.config?.exposeAsSubagent, true);
+    assert.equal(configured?.config?.maxSteps, 30);
+    assert.equal(configured?.config?.timeoutMs, 300000);
+    const block = buildPromptWithAgentProfile('Do it', configured!);
+    assert.match(block, /Base prompt\./);
+    assert.match(block, /Extra system prompt\./);
+
+    assert.ok(invalid);
+    assert.match((invalid?.configWarnings ?? []).join(';'), /version must be 1/);
+    assert.match((invalid?.configWarnings ?? []).join(';'), /allowedTools must be an array of strings/);
+    assert.match((invalid?.configWarnings ?? []).join(';'), /loadGlobalSkills must be a boolean/);
+    assert.match((invalid?.configWarnings ?? []).join(';'), /maxSteps must be a positive integer/);
+
+    const normalized = normalizeAgentProfileConfig({ reasoningPreset: 'bad' });
+    assert.match(normalized.warnings.join(';'), /reasoningPreset must be one of off, low, medium, high, xhigh, max/);
+    const invalidRuntimeConfig = normalizeAgentProfileConfig({
+      toolsetName: 1,
+      maxSteps: 1.5,
+      timeoutMs: -1,
+    });
+    assert.match(invalidRuntimeConfig.warnings.join(';'), /toolsetName must be a string/);
+    assert.match(invalidRuntimeConfig.warnings.join(';'), /maxSteps must be a positive integer/);
+    assert.match(invalidRuntimeConfig.warnings.join(';'), /timeoutMs must be a positive integer/);
+
+    const coercedRuntimeConfig = normalizeAgentProfileConfig({
+      maxSteps: true,
+      timeoutMs: '3000',
+    });
+    assert.equal(coercedRuntimeConfig.config.maxSteps, undefined);
+    assert.equal(coercedRuntimeConfig.config.timeoutMs, undefined);
+    assert.match(coercedRuntimeConfig.warnings.join(';'), /maxSteps must be a positive integer/);
+    assert.match(coercedRuntimeConfig.warnings.join(';'), /timeoutMs must be a positive integer/);
+  } finally {
+    cleanup(root);
+  }
+}
+
 function testPromptInjectionReference(): void {
   const prompt = buildPromptWithAgentProfileReference('Implement login', {
     source: 'global',
@@ -166,6 +285,8 @@ function testPromptInjectionReference(): void {
     path: 'D:/Agents/Coder/AGENTS.md',
   });
   assert.match(prompt, /^\[AGENT_PROFILE_REF source=global name=Coder path=D:\/Agents\/Coder\/AGENTS\.md\]/);
+  assert.match(prompt, /\[AGENT_PROFILE_REF_NOTE\]/);
+  assert.match(prompt, /not the current workspace/);
   assert.match(prompt, /Implement login$/);
 }
 
@@ -179,11 +300,16 @@ function testParseAgentProfilePrompt(): void {
   assert.equal(fromBlock.strippedPrompt, 'Do work');
 
   const fromReference = parseAgentProfilePrompt(
-    '[AGENT_PROFILE_REF source=workspace name=workspace path=D:/repo/AGENTS.md]\n\nFix bug'
+    buildPromptWithAgentProfileReference('Fix bug', {
+      source: 'workspace',
+      name: 'workspace',
+      path: 'D:/repo/AGENTS.md',
+    })
   );
   assert.equal(fromReference.matched, true);
   assert.equal(fromReference.matchedKind, 'reference');
   assert.equal(fromReference.reference?.source, 'workspace');
+  assert.equal(fromReference.reference?.path, 'D:/repo/AGENTS.md');
   assert.equal(fromReference.strippedPrompt, 'Fix bug');
 
   const plain = parseAgentProfilePrompt('normal prompt');
@@ -210,16 +336,135 @@ function testResolveAgentPoolWithWorkspaceAndFallbackDescription(): void {
   }
 }
 
+function testSystemSegmentsAreLineCapped(): void {
+  const content = Array.from({ length: 155 }, (_, index) => `line ${index + 1}`).join('\n');
+  const profile = {
+    name: 'Coder',
+    normalizedName: 'coder',
+    description: 'Coding profile',
+    mtime: new Date().toISOString(),
+    path: 'D:/Agents/Coder/AGENTS.md',
+    content,
+    source: 'global' as const,
+    config: {
+      promptAppend: 'prompt append should be truncated when over the cap',
+    },
+  };
+  const roleSegment = buildAgentProfileSystemSegment(profile);
+  assert.match(roleSegment, /^## Active Agent Role/);
+  assert.match(roleSegment, /line 150/);
+  assert.doesNotMatch(roleSegment, /line 151/);
+  assert.match(roleSegment, /Agent profile truncated after 150 lines/);
+  assert.match(roleSegment, /D:\/Agents\/Coder\/AGENTS\.md/);
+
+  const workspaceSegment = buildWorkspaceInstructionsSystemSegment({
+    ...profile,
+    name: 'workspace',
+    normalizedName: 'workspace',
+    source: 'workspace' as const,
+    path: 'D:/Repo/AGENTS.md',
+  });
+  assert.match(workspaceSegment, /^## Workspace Instructions/);
+  assert.match(workspaceSegment, /repository behavior/);
+  assert.match(workspaceSegment, /do not define the assistant persona/i);
+  assert.match(workspaceSegment, /line 150/);
+  assert.doesNotMatch(workspaceSegment, /line 151/);
+  assert.match(workspaceSegment, /Workspace instructions truncated after 150 lines/);
+}
+
+function testSubagentVisibilityRequiresExternalOptIn(): void {
+  const root = createTempDir('agent-profiles-subagent-visibility-');
+  try {
+    const bundledDir = path.join(root, 'package-agents');
+    const globalDir = path.join(root, 'external-agents');
+    const workspaceDir = path.join(root, 'workspace');
+    writeFile(path.join(bundledDir, 'review', 'AGENTS.md'), '# Review\nBundled review');
+    writeFile(path.join(globalDir, 'Hidden', 'AGENTS.md'), '# Hidden\nExternal hidden');
+    writeFile(path.join(globalDir, 'Visible', 'AGENTS.md'), '# Visible\nExternal visible');
+    writeFile(path.join(globalDir, 'Visible', 'agent.yaml'), 'version: 1\nexposeAsSubagent: true\n');
+    writeFile(path.join(workspaceDir, 'AGENTS.md'), '# Workspace\nWorkspace agent');
+
+    const mentionProfiles = resolveAgentPool({
+      bundledAgentsDir: bundledDir,
+      globalAgentsDir: globalDir,
+      workspaceDir,
+      includeWorkspace: true,
+    });
+    assert.equal(mentionProfiles.some((item) => item.name === 'Hidden' && item.source === 'global'), true);
+
+    const subagentProfiles = mentionProfiles.filter(isAgentProfileVisibleToSubagentManager);
+    assert.equal(subagentProfiles.some((item) => item.name === 'review' && item.source === 'bundled'), true);
+    assert.equal(subagentProfiles.some((item) => item.name === 'workspace' && item.source === 'workspace'), true);
+    assert.equal(subagentProfiles.some((item) => item.name === 'Visible' && item.source === 'global'), true);
+    assert.equal(subagentProfiles.some((item) => item.name === 'Hidden'), false);
+  } finally {
+    cleanup(root);
+  }
+}
+
+function testResolveAgentPoolLoadsBundledByDefaultAndExternalOverrides(): void {
+  const root = createTempDir('agent-profiles-bundled-');
+  try {
+    const bundledDir = path.join(root, 'package-agents');
+    const globalDir = path.join(root, 'external-agents');
+    writeFile(path.join(bundledDir, 'coding', 'AGENTS.md'), '# Bundled Coding\nBundled prompt');
+    writeFile(path.join(bundledDir, 'review', 'AGENTS.md'), '# Bundled Review\nReview prompt');
+    writeFile(path.join(globalDir, 'coding', 'AGENTS.md'), '# External Coding\nExternal prompt');
+    writeFile(path.join(globalDir, 'custom', 'AGENTS.md'), '# Custom\nCustom prompt');
+
+    const profiles = resolveAgentPool({
+      bundledAgentsDir: bundledDir,
+      globalAgentsDir: globalDir,
+      includeWorkspace: false,
+    });
+
+    assert.deepEqual(profiles.map((item) => `${item.name}:${item.source}`).sort(), [
+      'coding:global',
+      'custom:global',
+      'review:bundled',
+    ]);
+    const coding = profiles.find((item) => item.name === 'coding');
+    assert.equal(coding?.content.includes('External prompt'), true);
+    assert.equal(coding?.source, 'global');
+  } finally {
+    cleanup(root);
+  }
+}
+
+function testResolveAgentPoolDoesNotTreatBundledDirAsExternal(): void {
+  const root = createTempDir('agent-profiles-bundled-same-dir-');
+  try {
+    const bundledDir = path.join(root, 'agents');
+    writeFile(path.join(bundledDir, 'coding', 'AGENTS.md'), '# Bundled Coding\nBundled prompt');
+
+    const profiles = resolveAgentPool({
+      bundledAgentsDir: bundledDir,
+      globalAgentsDir: bundledDir,
+      includeWorkspace: false,
+    });
+
+    assert.deepEqual(profiles.map((item) => `${item.name}:${item.source}`), ['coding:bundled']);
+  } finally {
+    cleanup(root);
+  }
+}
+
 function runAll(): void {
   testScanGlobalProfilesAndDuplicateOverride();
   testFrontmatterSummaryPriorityAndDelimiterIgnored();
   testFrontmatterSummaryLengthLimitInRepo();
+  testRepositoryAgentProfilesAreNativeAndBounded();
   testWorkspaceProfileLoad();
   testMentionParsingRules();
   testPromptInjectionBlock();
+  testSystemSegmentsAreLineCapped();
+  testAgentYamlConfigDescriptionWarningsAndPromptAppend();
+  testSubagentVisibilityRequiresExternalOptIn();
   testPromptInjectionReference();
   testParseAgentProfilePrompt();
   testResolveAgentPoolWithWorkspaceAndFallbackDescription();
+  testResolveAgentPoolLoadsBundledByDefaultAndExternalOverrides();
+  testResolveAgentPoolDoesNotTreatBundledDirAsExternal();
   console.log('agent-profiles tests passed');
 }
 

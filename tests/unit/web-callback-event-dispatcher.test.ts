@@ -19,6 +19,20 @@ function createRequest(): PlanInputRequest {
   };
 }
 
+function stripCreatedAt(messages: Array<{ type: string; data: unknown }>): Array<{ type: string; data: unknown }> {
+  return messages.map((message) => {
+    if (!message.data || typeof message.data !== 'object' || Array.isArray(message.data)) {
+      return message;
+    }
+    const data = { ...(message.data as Record<string, unknown>) };
+    delete data.createdAt;
+    return {
+      ...message,
+      data,
+    };
+  });
+}
+
 function testDispatcherForwardsMessagesToSinkInOrder(): void {
   const context: ContextRef = { scope: 'session', namespace: 'sess-1' };
   const captured: Array<{ type: string; data: unknown }> = [];
@@ -38,7 +52,9 @@ function testDispatcherForwardsMessagesToSinkInOrder(): void {
   dispatcher.toolResult('request_user_input', { success: true, content: 'done' });
   dispatcher.error('run_error');
 
-  assert.deepEqual(captured, [
+  assert.equal(typeof (captured[0]?.data as { createdAt?: string }).createdAt, 'string');
+  assert.equal(typeof (captured[2]?.data as { createdAt?: string }).createdAt, 'string');
+  assert.deepEqual(stripCreatedAt(captured), [
     {
       type: 'thinking',
       data: {
@@ -92,6 +108,8 @@ function testDispatcherHandlesStructuredMessages(): void {
     ratio: 0.82,
     usedChars: 3280,
     limitChars: 4000,
+    usedTokens: 1640,
+    limitTokens: 2000,
     checkpointId: null,
     failureReason: 'compress_timeout',
   });
@@ -100,6 +118,8 @@ function testDispatcherHandlesStructuredMessages(): void {
     ratio: 0.9,
     usedChars: 3600,
     limitChars: 4000,
+    usedTokens: 1800,
+    limitTokens: 2000,
     triggerRatio: 0.8,
     isWarning: true,
     message: 'Context approaching capacity - compression triggered',
@@ -128,7 +148,8 @@ function testDispatcherHandlesStructuredMessages(): void {
     },
   });
 
-  assert.deepEqual(captured, [
+  assert.equal(typeof (captured[4]?.data as { createdAt?: string }).createdAt, 'string');
+  assert.deepEqual(stripCreatedAt(captured), [
     {
       type: 'context_precompress',
       data: {
@@ -138,6 +159,8 @@ function testDispatcherHandlesStructuredMessages(): void {
         ratio: 0.82,
         usedChars: 3280,
         limitChars: 4000,
+        usedTokens: 1640,
+        limitTokens: 2000,
         checkpointId: null,
         failureReason: 'compress_timeout',
       },
@@ -152,6 +175,8 @@ function testDispatcherHandlesStructuredMessages(): void {
         utilizationRatio: 0.9,
         usedChars: 3600,
         limitChars: 4000,
+        usedTokens: 1800,
+        limitTokens: 2000,
         triggerRatio: 0.8,
         isWarning: true,
         message: 'Context approaching capacity - compression triggered',

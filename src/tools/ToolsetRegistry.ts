@@ -1,13 +1,10 @@
 import type { Tool } from './Tool.js';
-import { resolveToolCapabilityFamilyForTool } from './tool-registration.js';
-
-export interface ToolsetDefinition {
-  name: string;
-  description: string;
-  capabilities: string[];
-  allowUnknownTools?: boolean;
-  hidden?: boolean;
-}
+import {
+  DEFAULT_TOOLSETS,
+  resolveToolCapabilityFamilyForTool,
+  type ToolsetDefinition,
+} from './CapabilityCatalog.js';
+export type { ToolsetDefinition } from './CapabilityCatalog.js';
 
 export interface ResolvedToolset {
   definition: ToolsetDefinition;
@@ -15,120 +12,30 @@ export interface ResolvedToolset {
   capabilities: string[];
 }
 
-const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
-  {
-    name: 'full-access',
-    description: 'Hidden internal default toolset that allows all built-in capabilities plus unknown MCP tools.',
-    capabilities: [
-      'file_read',
-      'tool_result_read',
-      'file_write',
-      'file_edit',
-      'file_glob',
-      'file_grep',
-      'web_search',
-      'web_fetch',
-      'shell_exec',
-      'note',
-      'context_manage',
-      'subagent_manage',
-      'skills_catalog',
-      'skill_manage',
-      'memory_manage',
-      'session_search',
-      'todo_manage',
-      'plan_update',
-      'plan_request_user_input',
-      'plan_finalize',
-      'auto_loop_exit',
-    ],
-    allowUnknownTools: true,
-    hidden: true,
-  },
-  {
-    name: 'windows-dev',
-    description: 'Default Windows development toolset with file, shell, memory, skill, and delegation support.',
-    capabilities: [
-      'file_read',
-      'tool_result_read',
-      'file_write',
-      'file_edit',
-      'file_glob',
-      'file_grep',
-      'shell_exec',
-      'note',
-      'context_manage',
-      'subagent_manage',
-      'skills_catalog',
-      'skill_manage',
-      'memory_manage',
-      'session_search',
-      'todo_manage',
-      'plan_update',
-      'plan_request_user_input',
-      'plan_finalize',
-      'auto_loop_exit',
-    ],
-    allowUnknownTools: false,
-  },
-  {
-    name: 'research',
-    description: 'Windows development toolset plus web search and fetch.',
-    capabilities: [
-      'file_read',
-      'tool_result_read',
-      'file_write',
-      'file_edit',
-      'file_glob',
-      'file_grep',
-      'shell_exec',
-      'note',
-      'context_manage',
-      'subagent_manage',
-      'skills_catalog',
-      'skill_manage',
-      'memory_manage',
-      'session_search',
-      'todo_manage',
-      'web_search',
-      'web_fetch',
-      'plan_update',
-      'plan_request_user_input',
-      'plan_finalize',
-      'auto_loop_exit',
-    ],
-    allowUnknownTools: false,
-  },
-  {
-    name: 'windows-safe',
-    description: 'Read-heavy Windows toolset with context, memory, skills, and structured user input; no shell or write tools.',
-    capabilities: [
-      'file_read',
-      'tool_result_read',
-      'file_glob',
-      'file_grep',
-      'note',
-      'context_manage',
-      'skills_catalog',
-      'memory_manage',
-      'session_search',
-      'todo_manage',
-      'plan_update',
-      'plan_request_user_input',
-      'plan_finalize',
-      'auto_loop_exit',
-    ],
-    allowUnknownTools: false,
-  },
-];
-
 export class ToolsetRegistry {
   private readonly definitions = new Map<string, ToolsetDefinition>();
   private readonly defaultToolsetName: string;
 
-  constructor(defaultToolsetName = 'full-access', definitions: ToolsetDefinition[] = DEFAULT_TOOLSETS) {
-    for (const definition of definitions) {
+  constructor(defaultToolsetName = 'full-access', customDefinitions: ToolsetDefinition[] = []) {
+    const builtinNames = new Set(DEFAULT_TOOLSETS.map((definition) => definition.name.trim().toLowerCase()));
+    for (const definition of DEFAULT_TOOLSETS) {
       this.definitions.set(definition.name.trim().toLowerCase(), {
+        ...definition,
+        name: definition.name.trim(),
+        capabilities: Array.from(
+          new Set(definition.capabilities.map((item) => item.trim().toLowerCase()).filter((item) => item.length > 0))
+        ),
+      });
+    }
+    for (const definition of customDefinitions) {
+      const normalizedName = definition.name.trim().toLowerCase();
+      if (!normalizedName) {
+        continue;
+      }
+      if (builtinNames.has(normalizedName)) {
+        throw new Error(`Custom toolset cannot override built-in toolset: ${definition.name}`);
+      }
+      this.definitions.set(normalizedName, {
         ...definition,
         name: definition.name.trim(),
         capabilities: Array.from(
@@ -145,11 +52,29 @@ export class ToolsetRegistry {
       .map((definition) => ({ ...definition }));
   }
 
-  get(name: string | undefined | null): ToolsetDefinition {
+  find(name: string | undefined | null): ToolsetDefinition | undefined {
     const normalized = String(name ?? '').trim().toLowerCase();
     const matched = this.definitions.get(normalized);
+    return matched ? { ...matched, capabilities: [...matched.capabilities] } : undefined;
+  }
+
+  has(name: string | undefined | null): boolean {
+    return this.find(name) !== undefined;
+  }
+
+  requireToolset(name: string | undefined | null, source = 'toolset'): ToolsetDefinition {
+    const matched = this.find(name);
     if (matched) {
-      return { ...matched, capabilities: [...matched.capabilities] };
+      return matched;
+    }
+    const normalized = String(name ?? '').trim();
+    throw new Error(`Unknown ${source}: ${normalized || '(empty)'}`);
+  }
+
+  get(name: string | undefined | null): ToolsetDefinition {
+    const matched = this.find(name);
+    if (matched) {
+      return matched;
     }
     const fallback = this.definitions.get(this.defaultToolsetName) ?? DEFAULT_TOOLSETS[0];
     return { ...fallback, capabilities: [...fallback.capabilities] };
@@ -190,6 +115,6 @@ export class ToolsetRegistry {
   }
 }
 
-export function createToolsetRegistry(defaultToolsetName?: string): ToolsetRegistry {
-  return new ToolsetRegistry(defaultToolsetName);
+export function createToolsetRegistry(defaultToolsetName?: string, customDefinitions: ToolsetDefinition[] = []): ToolsetRegistry {
+  return new ToolsetRegistry(defaultToolsetName, customDefinitions);
 }

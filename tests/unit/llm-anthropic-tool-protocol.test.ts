@@ -1,8 +1,10 @@
 import * as assert from 'node:assert/strict';
-import { LLMClient } from '../../src/llm/index.js';
+import { LLMClient, prepareMessagesForModel } from '../../src/llm/index.js';
 import { buildToolProtocolFrames } from '../../src/llm/tool-protocol.js';
+import { AnthropicAdapter } from '../../src/llm/providers/AnthropicAdapter.js';
 import { OpenAICompatibleAdapter } from '../../src/llm/providers/OpenAICompatibleAdapter.js';
 import type { Message } from '../../src/types.js';
+import type { PreparedProviderPayload } from '../../src/llm/runtime-types.js';
 
 function buildMultiToolReplayMessages(): Message[] {
   return [
@@ -56,6 +58,24 @@ function findAssistantContentBlocks(
     return message.content.some((block) => block?.type === 'text' && String(block?.text ?? '').includes(text));
   });
   return Array.isArray(assistant?.content) ? (assistant.content as Array<Record<string, unknown>>) : [];
+}
+
+function buildPreparedPayload(messages: Message[], systemPrompt?: string): PreparedProviderPayload {
+  const preparation = prepareMessagesForModel(messages);
+  return {
+    messages: preparation.postTrimSanitized.messages,
+    systemPrompt,
+    preparation,
+  };
+}
+
+function buildUnsafePreparedPayload(messages: Message[], systemPrompt?: string): PreparedProviderPayload {
+  const preparation = prepareMessagesForModel([]);
+  return {
+    messages,
+    systemPrompt,
+    preparation,
+  };
 }
 
 async function testBuildToolProtocolFramesBundlesAlignedResults(): Promise<void> {
@@ -147,6 +167,56 @@ async function testAnthropicAdapterBatchesToolResultsInImmediateNextMessage(): P
     return message.content.some((block) => block?.type === 'tool_result');
   });
   assert.equal(batchedUserMessages.length, 1);
+}
+
+async function testAnthropicAdapterRejectsMalformedPreparedToolUseReplay(): Promise<void> {
+  const adapter = new AnthropicAdapter({
+    apiKey: 'test-api-key',
+    apiBase: 'https://api.minimaxi.com',
+    model: 'MiniMax-M2.7',
+    maxTokens: 4096,
+    provider: 'anthropic',
+  });
+
+  await assert.rejects(
+    () =>
+      adapter.generate(
+        buildUnsafePreparedPayload([
+          { role: 'user', content: 'inspect project status' },
+          {
+            role: 'assistant',
+            content: 'Calling read_file for multiple paths',
+            toolCalls: [
+              { id: 'call_01', type: 'function', function: { name: 'read_file', arguments: { path: 'a.md' } } },
+              { id: 'call_02', type: 'function', function: { name: 'read_file', arguments: { path: 'b.md' } } },
+            ],
+          },
+          { role: 'assistant', content: 'I will continue after tools.' },
+        ])
+      ),
+    /unbundled assistant tool calls/
+  );
+}
+
+async function testAnthropicAdapterRejectsOrphanPreparedToolResultReplay(): Promise<void> {
+  const adapter = new AnthropicAdapter({
+    apiKey: 'test-api-key',
+    apiBase: 'https://api.minimaxi.com',
+    model: 'MiniMax-M2.7',
+    maxTokens: 4096,
+    provider: 'anthropic',
+  });
+
+  await assert.rejects(
+    () =>
+      adapter.generate(
+        buildUnsafePreparedPayload([
+          { role: 'user', content: 'inspect project status' },
+          { role: 'tool', name: 'read_file', content: 'A content without tool_call_id' },
+        ])
+      ),
+    /unbundled tool_result messages/
+  );
 }
 
 async function testAnthropicAdapterDropsMalformedUnbundledToolUseReplay(): Promise<void> {
@@ -497,7 +567,7 @@ async function testOpenAiAdapterKeepsToolResultsAsRoleToolMessages(): Promise<vo
     },
   };
 
-  await adapter.generate(buildMultiToolReplayMessages());
+  await adapter.generate(buildPreparedPayload(buildMultiToolReplayMessages()));
 
   const outbound = (capturedRequest?.messages as Array<Record<string, unknown>>) ?? [];
   const assistantIndex = outbound.findIndex((message) => {
@@ -523,6 +593,8 @@ async function runAll(): Promise<void> {
   await testBuildToolProtocolFramesBundlesAlignedResults();
   await testBuildToolProtocolFramesLeavesMismatchedChainUnbundled();
   await testAnthropicAdapterBatchesToolResultsInImmediateNextMessage();
+  await testAnthropicAdapterRejectsMalformedPreparedToolUseReplay();
+  await testAnthropicAdapterRejectsOrphanPreparedToolResultReplay();
   await testAnthropicAdapterDropsMalformedUnbundledToolUseReplay();
   await testAnthropicAdapterDropsCrossRuntimeThinkingReplay();
   await testAnthropicAdapterDropsNonReplayableThinkingToolBundle();

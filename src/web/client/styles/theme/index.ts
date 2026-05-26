@@ -26,7 +26,7 @@ export function getSystemTheme(): Theme {
 }
 
 // 本地存储键
-export const THEME_STORAGE_KEY = 'minimax-agent-theme';
+export const THEME_STORAGE_KEY = 'dpagent-theme';
 
 // 获取初始主题
 export function getInitialTheme(): Theme {

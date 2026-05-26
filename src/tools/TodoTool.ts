@@ -1,10 +1,11 @@
-import type { TodoPriority, TodoScope, TodoStatus, TodoStore } from '../todo/index.js';
+import type { TodoItem, TodoPriority, TodoProtocolState, TodoScope, TodoStatus, TodoStore } from '../todo/index.js';
 import { Tool, errorResult, successResult } from './Tool.js';
 
 export interface TodoToolOptions {
   todoStore: TodoStore;
   resolveSessionId: () => string | undefined;
   resolveWorkspaceDir: () => string | undefined;
+  resolveActivePlanId?: () => string | undefined;
 }
 
 function normalizeScope(value: unknown, fallback: TodoScope): TodoScope {
@@ -56,6 +57,23 @@ function normalizeEvidence(value: unknown): string[] | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function sanitizeProtocolForTool(protocol: TodoProtocolState): Omit<TodoProtocolState, 'dismissedItems'> {
+  const keepVisible = (item: TodoItem) => item.status !== 'dismissed';
+  const visibleItems = protocol.items.filter(keepVisible);
+  const visibleUnfinishedItems = protocol.unfinishedItems.filter(keepVisible);
+  const visibleCompletedItems = protocol.completedItems.filter(keepVisible);
+  return {
+    items: visibleItems,
+    unfinishedItems: visibleUnfinishedItems,
+    activeItem: protocol.activeItem?.status === 'dismissed' ? null : protocol.activeItem,
+    blockedItem: protocol.blockedItem?.status === 'dismissed' ? null : protocol.blockedItem,
+    pendingItems: protocol.pendingItems.filter(keepVisible),
+    completedItems: visibleCompletedItems,
+    hasUnfinished: visibleUnfinishedItems.length > 0,
+    allCompleted: visibleItems.length > 0 && visibleUnfinishedItems.length === 0 && visibleCompletedItems.length === visibleItems.length,
+  };
+}
+
 function parsePlanItems(value: unknown):
   | {
       items: Array<{
@@ -65,6 +83,7 @@ function parsePlanItems(value: unknown):
         tags?: string[];
         status?: TodoStatus;
         blockedReason?: string;
+        planStepId?: string;
       }>;
     }
   | { error: string } {
@@ -76,6 +95,7 @@ function parsePlanItems(value: unknown):
     detectionStandard: string;
     priority?: TodoPriority;
     tags?: string[];
+    planStepId?: string;
     status?: TodoStatus;
     blockedReason?: string;
   }> = [];
@@ -97,6 +117,7 @@ function parsePlanItems(value: unknown):
       tags: normalizeTags(record.tags),
       status: normalizedStatus,
       blockedReason: String(record.blocked_reason ?? '').trim() || undefined,
+      planStepId: String(record.plan_step_id ?? '').trim() || undefined,
     });
   }
   return { items };
@@ -106,12 +127,14 @@ export class TodoTool extends Tool {
   private readonly todoStore: TodoStore;
   private readonly resolveSessionId: () => string | undefined;
   private readonly resolveWorkspaceDir: () => string | undefined;
+  private readonly resolveActivePlanId: () => string | undefined;
 
   constructor(options: TodoToolOptions) {
     super();
     this.todoStore = options.todoStore;
     this.resolveSessionId = options.resolveSessionId;
     this.resolveWorkspaceDir = options.resolveWorkspaceDir;
+    this.resolveActivePlanId = options.resolveActivePlanId ?? (() => undefined);
   }
 
   get name(): string {
@@ -205,6 +228,10 @@ export class TodoTool extends Tool {
                 items: { type: 'string' },
                 description: 'Optional tags for each plan_set item.',
               },
+              plan_step_id: {
+                type: 'string',
+                description: 'Optional approved plan step id for this todo item.',
+              },
             },
             required: ['work', 'detection_standard'],
           },
@@ -222,6 +249,7 @@ export class TodoTool extends Tool {
     const action = String(args.action ?? '').trim().toLowerCase();
     const sessionId = this.resolveSessionId();
     const workspaceDir = this.resolveWorkspaceDir();
+    const activePlanId = this.resolveActivePlanId();
     const defaultScope: TodoScope = sessionId ? 'session' : workspaceDir ? 'workspace' : 'user';
     const scope = normalizeScope(args.scope, defaultScope);
 
@@ -231,17 +259,18 @@ export class TodoTool extends Tool {
       }
       switch (action) {
         case 'list':
+          const protocol = this.todoStore.getProtocolState({
+            scope,
+            sessionId,
+            workspaceDir,
+          });
           return successResult(
             JSON.stringify(
               {
                 ok: true,
                 action,
                 scope,
-                protocol: this.todoStore.getProtocolState({
-                  scope,
-                  sessionId,
-                  workspaceDir,
-                }),
+                protocol: sanitizeProtocolForTool(protocol),
               },
               null,
               2
@@ -258,6 +287,7 @@ export class TodoTool extends Tool {
             workspaceDir,
             items: parsedPlanItems.items,
             sourceSessionId: sessionId,
+            planId: activePlanId,
           });
           return successResult(JSON.stringify({ ok: true, action, items: nextItems }, null, 2));
         }
@@ -279,6 +309,8 @@ export class TodoTool extends Tool {
             priority: normalizePriority(args.priority),
             tags: normalizeTags(args.tags),
             sourceSessionId: sessionId,
+            planId: activePlanId,
+            planStepId: String(args.plan_step_id ?? '').trim() || undefined,
           });
           return successResult(JSON.stringify({ ok: true, action, item }, null, 2));
         }

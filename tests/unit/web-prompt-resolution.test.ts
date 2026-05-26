@@ -1,19 +1,19 @@
 import * as assert from 'node:assert/strict';
 import type { AgentProfile } from '../../src/agents/AgentProfiles.js';
 import {
+  buildFileReferencesPromptBlock,
   mergeAgentInjectionState,
   resolvePromptWithProfiles,
 } from '../../src/web/server/prompt-resolution.js';
+import { PLAN_MODE_PROMPT_PREFIX as RUNTIME_PLAN_MODE_PROMPT_PREFIX } from '../../src/web/server/web-server-shared.js';
 
 const PLAN_MODE_PROMPT_PREFIX =
   [
     '[PLAN_MODE_REQUIRED]',
     'You MUST execute this turn in Plan Mode and follow this protocol strictly:',
-    '1) First tool call MUST be `update_plan` with an actionable step list.',
-    '2) If requirements are ambiguous or choices are needed, call `request_user_input` before implementation.',
-    '3) Keep plan status updated with `update_plan` while executing.',
-    '4) Final output MUST be produced via `finalize_plan` (Markdown only).',
-    '5) Do NOT skip directly to a normal free-form answer.',
+    '1) If requirements are ambiguous or choices are needed, call `request_user_input` before finalizing.',
+    '2) Final output MUST be produced via `finalize_plan` with executable steps and detection standards.',
+    '3) Do NOT skip directly to a normal free-form answer.',
     'If any step cannot be completed, explain why in the finalized plan.',
     '[/PLAN_MODE_REQUIRED]',
   ].join('\n');
@@ -21,7 +21,8 @@ const PLAN_MODE_PROMPT_PREFIX =
 function createProfile(
   name: string,
   source: AgentProfile['source'],
-  filePath: string
+  filePath: string,
+  overrides: Partial<AgentProfile> = {}
 ): AgentProfile {
   return {
     name,
@@ -31,6 +32,7 @@ function createProfile(
     path: filePath,
     content: `${name} content`,
     source,
+    ...overrides,
   };
 }
 
@@ -39,7 +41,7 @@ function createInput(overrides: Partial<Parameters<typeof resolvePromptWithProfi
   return {
     prompt: 'Implement login',
     selectedAgentName: '',
-    usePlanMode: false,
+    planningState: 'normal' as const,
     currentAgentInjectionState: undefined,
     globalAgentProfilesByName: new Map([[globalProfile.normalizedName, globalProfile]]),
     loadWorkspaceProfile: () => null,
@@ -67,11 +69,90 @@ function testSelectedAgentInitialInjectionReturnsEffectiveAndHistoryPrompts(): v
   assert.equal(result.profileInjectionMode, 'initial');
   assert.equal(result.activeAgent?.source, 'global');
   assert.equal(result.activeAgent?.name, 'Coder');
-  assert.match(result.effectiveUserPrompt, /^\[AGENT_PROFILE_REF source=global name=Coder path=D:\/Agents\/Coder\/AGENTS\.md\]/);
-  assert.match(result.effectiveUserPrompt, /\[AGENT_PROFILE_BODY_BEGIN\]\nCoder content\n\[AGENT_PROFILE_BODY_END\]/);
-  assert.match(result.historyUserPrompt, /^\[AGENT_PROFILE_REF source=global name=Coder path=D:\/Agents\/Coder\/AGENTS\.md\]\n\nImplement login$/);
+  assert.equal(result.effectiveUserPrompt, 'Implement login');
+  assert.doesNotMatch(result.effectiveUserPrompt, /\[AGENT_PROFILE_BODY_BEGIN\]/);
+  assert.doesNotMatch(result.effectiveUserPrompt, /\[AGENT_PROFILE_REF/);
+  assert.match(
+    result.historyUserPrompt,
+    /^\[AGENT_PROFILE_REF source=global name=Coder path=D:\/Agents\/Coder\/AGENTS\.md\]\n\[AGENT_PROFILE_REF_NOTE\][\s\S]*?\[\/AGENT_PROFILE_REF_NOTE\]\n\nImplement login$/
+  );
   assert.equal(result.historyUserPrompt.includes('Coder content'), false);
   assert.equal(result.agentInjectionState.lastExplicitAgentName, 'Coder');
+}
+
+function testSelectedAgentReturnsRuntimeOverridesAndPromptAppend(): void {
+  const profile = createProfile('Coder', 'global', 'D:/Agents/Coder/AGENTS.md', {
+    config: {
+      llmProfileId: 'kimi',
+      llmModel: 'kimi-agent-model',
+      reasoningPreset: 'high',
+      loadGlobalSkills: false,
+      promptAppend: 'Extra profile guidance.',
+    },
+  });
+  const result = resolvePromptWithProfiles(
+    createInput({
+      selectedAgentName: 'Coder',
+      globalAgentProfilesByName: new Map([[profile.normalizedName, profile]]),
+    })
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  assert.deepEqual(result.agentRuntimeOverrides, {
+    agentProfile: {
+      source: 'global',
+      name: 'Coder',
+      path: 'D:/Agents/Coder/AGENTS.md',
+    },
+    llmProfileId: 'kimi',
+    llmModel: 'kimi-agent-model',
+    reasoningPreset: 'high',
+    loadGlobalSkills: false,
+  });
+  assert.doesNotMatch(result.effectiveUserPrompt, /Extra profile guidance\./);
+}
+
+function testActiveAgentFollowUpKeepsRuntimeOverrides(): void {
+  const profile = createProfile('Coder', 'global', 'D:/Agents/Coder/AGENTS.md', {
+    config: {
+      llmProfileId: 'kimi',
+      llmModel: 'kimi-agent-model',
+    },
+  });
+  const selected = resolvePromptWithProfiles(
+    createInput({
+      selectedAgentName: 'Coder',
+      globalAgentProfilesByName: new Map([[profile.normalizedName, profile]]),
+    })
+  );
+  assert.equal(selected.ok, true);
+  if (!selected.ok) {
+    throw new Error(selected.error);
+  }
+  const result = resolvePromptWithProfiles(
+    createInput({
+      prompt: 'Follow up',
+      selectedAgentName: 'Coder',
+      currentAgentInjectionState: mergeAgentInjectionState(undefined, selected.agentInjectionState),
+      globalAgentProfilesByName: new Map([[profile.normalizedName, profile]]),
+    })
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  assert.equal(result.profileInjectionMode, 'none');
+  assert.deepEqual(result.agentRuntimeOverrides, {
+    agentProfile: {
+      source: 'global',
+      name: 'Coder',
+      path: 'D:/Agents/Coder/AGENTS.md',
+    },
+    llmProfileId: 'kimi',
+    llmModel: 'kimi-agent-model',
+  });
 }
 
 function testSelectedAgentSameAsCurrentActiveSkipsReinjection(): void {
@@ -99,7 +180,7 @@ function testSelectedAgentSameAsCurrentActiveSkipsReinjection(): void {
   assert.equal(result.promptRef, undefined);
 }
 
-function testMentionedGlobalAgentStripsMentionAndSwitchesOnce(): void {
+function testMentionedGlobalAgentStripsMentionAndInjectsRoleOnce(): void {
   const workspaceProfile = createProfile('workspace', 'workspace', 'D:/Repo/AGENTS.md');
   const workspaceResolved = resolvePromptWithProfiles(
     createInput({
@@ -123,8 +204,13 @@ function testMentionedGlobalAgentStripsMentionAndSwitchesOnce(): void {
     throw new Error(result.error);
   }
   assert.equal(result.displayPrompt, 'fix the bug');
-  assert.equal(result.profileInjectionMode, 'switch');
-  assert.match(result.historyUserPrompt, /^\[AGENT_PROFILE_REF source=global name=Coder path=D:\/Agents\/Coder\/AGENTS\.md\]\n\nfix the bug$/);
+  assert.equal(result.profileInjectionMode, 'initial');
+  assert.equal(result.effectiveUserPrompt, 'fix the bug');
+  assert.doesNotMatch(result.effectiveUserPrompt, /\[AGENT_PROFILE_BODY_BEGIN\]/);
+  assert.match(
+    result.historyUserPrompt,
+    /^\[AGENT_PROFILE_REF source=global name=Coder path=D:\/Agents\/Coder\/AGENTS\.md\]\n\[AGENT_PROFILE_REF_NOTE\][\s\S]*?\[\/AGENT_PROFILE_REF_NOTE\]\n\nfix the bug$/
+  );
   assert.equal(result.agentInjectionState.lastExplicitAgentName, 'Coder');
 }
 
@@ -137,7 +223,7 @@ function testMentionOnlyErrors(): void {
   assert.equal(result.error, 'Please enter a message after @Coder');
 }
 
-function testWorkspaceProfileInjectsOnlyOnInitialTurn(): void {
+function testWorkspaceProfileDoesNotBecomeActiveAgent(): void {
   const workspaceProfile = createProfile('workspace', 'workspace', 'D:/Repo/AGENTS.md');
   const first = resolvePromptWithProfiles(
     createInput({
@@ -148,8 +234,10 @@ function testWorkspaceProfileInjectsOnlyOnInitialTurn(): void {
   if (!first.ok) {
     throw new Error(first.error);
   }
-  assert.equal(first.profileInjectionMode, 'initial');
-  assert.match(first.historyUserPrompt, /^\[AGENT_PROFILE_REF source=workspace name=workspace path=D:\/Repo\/AGENTS\.md\]\n\nImplement login$/);
+  assert.equal(first.profileInjectionMode, 'none');
+  assert.equal(first.activeAgent, undefined);
+  assert.equal(first.effectiveUserPrompt, 'Implement login');
+  assert.equal(first.historyUserPrompt, 'Implement login');
 
   const currentState = mergeAgentInjectionState(undefined, first.agentInjectionState);
   const second = resolvePromptWithProfiles(
@@ -164,11 +252,12 @@ function testWorkspaceProfileInjectsOnlyOnInitialTurn(): void {
     throw new Error(second.error);
   }
   assert.equal(second.profileInjectionMode, 'none');
+  assert.equal(second.activeAgent, undefined);
   assert.equal(second.effectiveUserPrompt, 'plain follow-up');
   assert.equal(second.historyUserPrompt, 'plain follow-up');
 }
 
-function testClearingExplicitSelectionFallsBackToWorkspaceOnce(): void {
+function testClearingExplicitSelectionReturnsToDefaultRoleState(): void {
   const workspaceProfile = createProfile('workspace', 'workspace', 'D:/Repo/AGENTS.md');
   const selected = resolvePromptWithProfiles(createInput({ selectedAgentName: 'Coder' }));
   assert.equal(selected.ok, true);
@@ -187,11 +276,30 @@ function testClearingExplicitSelectionFallsBackToWorkspaceOnce(): void {
   if (!cleared.ok) {
     throw new Error(cleared.error);
   }
-  assert.equal(cleared.profileInjectionMode, 'switch');
-  assert.equal(cleared.activeAgent?.source, 'workspace');
+  assert.equal(cleared.profileInjectionMode, 'none');
+  assert.equal(cleared.activeAgent, undefined);
+  assert.equal(cleared.effectiveUserPrompt, 'Check repo status');
+  assert.doesNotMatch(cleared.effectiveUserPrompt, /\[AGENT_PROFILE_BODY_BEGIN\]/);
   const merged = mergeAgentInjectionState(currentState, cleared.agentInjectionState);
   assert.equal(merged.lastExplicitAgentName, undefined);
-  assert.equal(merged.lastProfileSource, 'workspace');
+  assert.equal(merged.lastProfileSource, undefined);
+
+  const clearedInPlanMode = resolvePromptWithProfiles(
+    createInput({
+      prompt: 'Plan the default follow-up',
+      currentAgentInjectionState: currentState,
+      planningState: 'plan_drafting',
+      loadWorkspaceProfile: () => workspaceProfile,
+    })
+  );
+  assert.equal(clearedInPlanMode.ok, true);
+  if (!clearedInPlanMode.ok) {
+    throw new Error(clearedInPlanMode.error);
+  }
+  assert.equal(clearedInPlanMode.activeAgent, undefined);
+  assert.match(clearedInPlanMode.effectiveUserPrompt, /^\[PLAN_MODE_REQUIRED\]/);
+  assert.match(clearedInPlanMode.promptRef ?? '', /reason=cleared_agent/);
+  assert.match(clearedInPlanMode.promptRef ?? '', /plan_mode=true/);
 }
 
 function testUnknownMentionWithoutWorkspaceStaysPlainText(): void {
@@ -207,24 +315,114 @@ function testUnknownMentionWithoutWorkspaceStaysPlainText(): void {
   assert.equal(result.historyUserPrompt, '@Unknown fix the bug');
 }
 
-function testPlanModeWithoutAgentKeepsPromptPlainAndAnnotated(): void {
-  const workspaceProfile = createProfile('workspace', 'workspace', 'D:/Repo/AGENTS.md');
-  const initial = resolvePromptWithProfiles(
+function testFileDirectiveMentionNeverRoutesAsAgent(): void {
+  const fileAgent = createProfile('file', 'global', 'D:/Agents/File/AGENTS.md');
+  const result = resolvePromptWithProfiles(
     createInput({
-      loadWorkspaceProfile: () => workspaceProfile,
+      prompt: '@file D:\\repo\\README.md',
+      globalAgentProfilesByName: new Map([
+        ['coder', createProfile('Coder', 'global', 'D:/Agents/Coder/AGENTS.md')],
+        ['file', fileAgent],
+      ]),
     })
   );
-  assert.equal(initial.ok, true);
-  if (!initial.ok) {
-    throw new Error(initial.error);
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error(result.error);
   }
-  const currentState = mergeAgentInjectionState(undefined, initial.agentInjectionState);
+  assert.equal(result.displayPrompt, '@file D:\\repo\\README.md');
+  assert.equal(result.profileInjectionMode, 'none');
+  assert.equal(result.activeAgent, undefined);
+  assert.equal(result.effectiveUserPrompt, '@file D:\\repo\\README.md');
+  assert.equal(result.historyUserPrompt, '@file D:\\repo\\README.md');
+}
+
+function testMultiAgentResolutionSequenceKeepsBodiesOutOfUserPrompt(): void {
+  const coder = createProfile('Coder', 'global', 'D:/Agents/Coder/AGENTS.md');
+  const reviewer = createProfile('Reviewer', 'global', 'D:/Agents/Reviewer/AGENTS.md', {
+    content: 'Reviewer content',
+  });
+  const profiles = new Map([
+    [coder.normalizedName, coder],
+    [reviewer.normalizedName, reviewer],
+  ]);
+
+  const selected = resolvePromptWithProfiles(
+    createInput({
+      prompt: 'Implement login',
+      selectedAgentName: 'Coder',
+      globalAgentProfilesByName: profiles,
+    })
+  );
+  assert.equal(selected.ok, true);
+  if (!selected.ok) {
+    throw new Error(selected.error);
+  }
+  assert.equal(selected.effectiveUserPrompt, 'Implement login');
+  assert.doesNotMatch(selected.effectiveUserPrompt, /\[AGENT_PROFILE_BODY_BEGIN\]/);
+  assert.equal(selected.activeAgent?.name, 'Coder');
+
+  const selectedState = mergeAgentInjectionState(undefined, selected.agentInjectionState);
+  const selectedFollowUp = resolvePromptWithProfiles(
+    createInput({
+      prompt: 'Continue implementation',
+      selectedAgentName: 'Coder',
+      currentAgentInjectionState: selectedState,
+      globalAgentProfilesByName: profiles,
+    })
+  );
+  assert.equal(selectedFollowUp.ok, true);
+  if (!selectedFollowUp.ok) {
+    throw new Error(selectedFollowUp.error);
+  }
+  assert.equal(selectedFollowUp.profileInjectionMode, 'none');
+  assert.equal(selectedFollowUp.activeAgent?.name, 'Coder');
+  assert.deepEqual(selectedFollowUp.agentRuntimeOverrides?.agentProfile, {
+    source: 'global',
+    name: 'Coder',
+    path: 'D:/Agents/Coder/AGENTS.md',
+  });
+  assert.doesNotMatch(selectedFollowUp.effectiveUserPrompt, /\[AGENT_PROFILE_BODY_BEGIN\]/);
+
+  const mentionedReviewer = resolvePromptWithProfiles(
+    createInput({
+      prompt: '@Reviewer review the patch',
+      currentAgentInjectionState: mergeAgentInjectionState(selectedState, selectedFollowUp.agentInjectionState),
+      globalAgentProfilesByName: profiles,
+    })
+  );
+  assert.equal(mentionedReviewer.ok, true);
+  if (!mentionedReviewer.ok) {
+    throw new Error(mentionedReviewer.error);
+  }
+  assert.equal(mentionedReviewer.displayPrompt, 'review the patch');
+  assert.equal(mentionedReviewer.effectiveUserPrompt, 'review the patch');
+  assert.equal(mentionedReviewer.activeAgent?.name, 'Reviewer');
+  assert.doesNotMatch(mentionedReviewer.effectiveUserPrompt, /Reviewer content/);
+
+  const cleared = resolvePromptWithProfiles(
+    createInput({
+      prompt: 'Back to default',
+      currentAgentInjectionState: mergeAgentInjectionState(selectedState, mentionedReviewer.agentInjectionState),
+      globalAgentProfilesByName: profiles,
+    })
+  );
+  assert.equal(cleared.ok, true);
+  if (!cleared.ok) {
+    throw new Error(cleared.error);
+  }
+  assert.equal(cleared.activeAgent, undefined);
+  assert.equal(cleared.agentRuntimeOverrides, undefined);
+  assert.equal(cleared.effectiveUserPrompt, 'Back to default');
+  assert.match(cleared.promptRef ?? '', /reason=cleared_agent/);
+  assert.doesNotMatch(cleared.effectiveUserPrompt, /\[AGENT_PROFILE_BODY_BEGIN\]/);
+}
+
+function testPlanModeWithoutAgentKeepsPromptPlainAndAnnotated(): void {
   const result = resolvePromptWithProfiles(
     createInput({
       prompt: 'Plan the next change',
-      usePlanMode: true,
-      currentAgentInjectionState: currentState,
-      loadWorkspaceProfile: () => workspaceProfile,
+      planningState: 'plan_drafting',
     })
   );
   assert.equal(result.ok, true);
@@ -237,16 +435,58 @@ function testPlanModeWithoutAgentKeepsPromptPlainAndAnnotated(): void {
   assert.match(result.promptRef ?? '', /^\[PROMPT_REF reason=plan_mode /);
 }
 
+function testRuntimePlanModePromptEncouragesConversationalClarification(): void {
+  assert.match(RUNTIME_PLAN_MODE_PROMPT_PREFIX, /Keep asking until/i);
+  assert.match(RUNTIME_PLAN_MODE_PROMPT_PREFIX, /You SHOULD ask many questions/);
+  assert.match(RUNTIME_PLAN_MODE_PROMPT_PREFIX, /product requirements/i);
+  assert.match(RUNTIME_PLAN_MODE_PROMPT_PREFIX, /complex project/i);
+  assert.match(RUNTIME_PLAN_MODE_PROMPT_PREFIX, /subagents/i);
+  assert.match(RUNTIME_PLAN_MODE_PROMPT_PREFIX, /request_user_input/);
+  assert.match(RUNTIME_PLAN_MODE_PROMPT_PREFIX, /finalize_plan/);
+}
+
+function testFileReferencesOnlyAffectEffectivePrompt(): void {
+  const result = resolvePromptWithProfiles(
+    createInput({
+      prompt: 'Summarize',
+      fileReferences: ['D:\\repo\\README.md', 'D:\\repo\\"quoted"&<tag>.md'],
+    })
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  assert.equal(result.displayPrompt, 'Summarize');
+  assert.equal(result.historyUserPrompt, 'Summarize');
+  assert.match(result.effectiveUserPrompt, /^<refs_file_for_this_turn>/);
+  assert.match(result.effectiveUserPrompt, /<file path="D:\\repo\\README\.md" \/>/);
+  assert.match(result.effectiveUserPrompt, /&quot;quoted&quot;&amp;&lt;tag&gt;/);
+}
+
+function testBuildFileReferencesPromptBlockDedupesReferences(): void {
+  assert.equal(
+    buildFileReferencesPromptBlock(['D:\\repo\\README.md', 'd:\\repo\\readme.md']),
+    '<refs_file_for_this_turn>\n  <file path="D:\\repo\\README.md" />\n</refs_file_for_this_turn>'
+  );
+}
+
 function runAll(): void {
   testEmptyPromptRejected();
   testSelectedAgentInitialInjectionReturnsEffectiveAndHistoryPrompts();
+  testSelectedAgentReturnsRuntimeOverridesAndPromptAppend();
+  testActiveAgentFollowUpKeepsRuntimeOverrides();
   testSelectedAgentSameAsCurrentActiveSkipsReinjection();
-  testMentionedGlobalAgentStripsMentionAndSwitchesOnce();
+  testMentionedGlobalAgentStripsMentionAndInjectsRoleOnce();
   testMentionOnlyErrors();
-  testWorkspaceProfileInjectsOnlyOnInitialTurn();
-  testClearingExplicitSelectionFallsBackToWorkspaceOnce();
+  testWorkspaceProfileDoesNotBecomeActiveAgent();
+  testClearingExplicitSelectionReturnsToDefaultRoleState();
   testUnknownMentionWithoutWorkspaceStaysPlainText();
+  testFileDirectiveMentionNeverRoutesAsAgent();
+  testMultiAgentResolutionSequenceKeepsBodiesOutOfUserPrompt();
   testPlanModeWithoutAgentKeepsPromptPlainAndAnnotated();
+  testRuntimePlanModePromptEncouragesConversationalClarification();
+  testFileReferencesOnlyAffectEffectivePrompt();
+  testBuildFileReferencesPromptBlockDedupesReferences();
   console.log('web-prompt-resolution tests passed');
 }
 

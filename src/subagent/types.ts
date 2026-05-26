@@ -6,6 +6,7 @@ import type {
   SubAgentCreateParams,
   SubAgentLifecycleStatus,
   SubAgentResult,
+  AgentProfileConfig,
 } from '../types.js';
 
 export type SubAgentOperation = 'create' | 'resume';
@@ -19,11 +20,13 @@ export interface SubAgentQueuedTask {
   subagentId: string;
   parentKey: string;
   parentContext: ContextRef;
+  parentTurnId?: string;
   subagentContext: ContextRef;
   operation: SubAgentOperation;
   prompt: string;
   agentName?: string;
   agentProfile?: SubAgentAssignedAgentProfile;
+  agentConfig?: AgentProfileConfig;
   providerId: string;
   allowedTools?: string[];
   timeoutMs: number;
@@ -35,6 +38,7 @@ export interface SubAgentRecord {
   id: string;
   parentContext: ContextRef;
   parentKey: string;
+  parentTurnId?: string;
   context: ContextRef;
   status: SubAgentLifecycleStatus;
   runSeq: number;
@@ -45,14 +49,15 @@ export interface SubAgentRecord {
   providerId: string;
   prompt?: string;
   agentName?: string;
+  agentProfile?: SubAgentAssignedAgentProfile;
+  agentConfig?: AgentProfileConfig;
   allowedTools?: string[];
   timeoutMs?: number;
   workspaceDir?: string;
   queuePosition?: number;
   lastError?: string;
+  lifecycleDiagnostic?: string;
   latestResult?: SubAgentResult;
-  // REQ-0027: Track retry attempts for this subagent
-  retryCount?: number;
 }
 
 export interface ParentQueueState {
@@ -60,30 +65,11 @@ export interface ParentQueueState {
   queuedTaskIds: string[];
 }
 
-// REQ-0027: Retry queue entry for interrupted agents
-export interface SubAgentRetryEntry {
-  subagentId: string;
-  parentContext: ContextRef;
-  parentKey: string;
-  operation: SubAgentOperation;
-  prompt: string;
-  providerId: string;
-  agentName?: string;
-  allowedTools?: string[];
-  timeoutMs?: number;
-  workspaceDir?: string;
-  retryCount: number;
-  lastFailedAt: string;
-  failureReason: string;
-}
-
 export interface SubAgentRegistryState {
   version: 2;
   records: Record<string, SubAgentRecord>;
   tasks: Record<string, SubAgentQueuedTask>;
   queues: Record<string, ParentQueueState>;
-  // REQ-0027: Retry queue for interrupted agents
-  retryQueue: SubAgentRetryEntry[];
 }
 
 export interface SubAgentExecutionOutput {

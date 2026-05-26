@@ -11,13 +11,16 @@ function ensureConfig() {
     throw new Error(`Missing config.yaml: ${CONFIG_PATH}`);
   }
   const parsed = yaml.load(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
-  const apiKey = parsed.api?.apiKey || '';
-  const maxOutputTokens = parsed.api?.maxOutputTokens;
+  const defaultProfileId = String(parsed.llmProfiles?.defaultProfileId || '').trim();
+  const profiles = Array.isArray(parsed.llmProfiles?.profiles) ? parsed.llmProfiles.profiles : [];
+  const defaultProfile = profiles.find((profile) => profile?.id === defaultProfileId) || profiles[0] || null;
+  const apiKey = defaultProfile?.apiKey || parsed.api?.apiKey || '';
+  const maxOutputTokens = defaultProfile?.maxOutputTokens ?? parsed.api?.maxOutputTokens;
   if (!apiKey || apiKey.length < 20) {
-    throw new Error('Invalid config.yaml: api.apiKey must be configured.');
+    throw new Error('Invalid config.yaml: llmProfiles default profile apiKey must be configured.');
   }
   if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) {
-    throw new Error('Invalid config.yaml: api.maxOutputTokens must be a positive number.');
+    throw new Error('Invalid config.yaml: llmProfiles default profile maxOutputTokens must be a positive number.');
   }
 }
 

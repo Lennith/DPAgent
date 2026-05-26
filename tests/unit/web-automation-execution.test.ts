@@ -117,6 +117,75 @@ async function testAutomationExecutionInjectsTemplateAndPersistsMemory(): Promis
   }
 }
 
+async function testSessionOwnedScheduledTaskRunsInIsolatedAutomationSession(): Promise<void> {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-automation-execution-session-owned-'));
+  try {
+    const store = new AutomationStore(storeDir);
+    const job = store.createJob({
+      name: 'Visible session follow-up',
+      prompt: 'check the visible session task',
+      workspaceDir: 'D:\\repo',
+      skills: [],
+      schedule: normalizeAutomationSchedule({
+        frequency: 'interval',
+        intervalSeconds: 60,
+      }),
+      timezone: 'UTC',
+      enabled: true,
+      sessionId: 'visible-session',
+    });
+
+    const contextMetaUpdates: Array<{ context: ContextRef; patch: Record<string, unknown> }> = [];
+    const ensuredSessionIds: string[] = [];
+    const runAgent = {
+      updateContextNamespaceMeta: (context: ContextRef, patch: Record<string, unknown>) => {
+        contextMetaUpdates.push({ context, patch });
+      },
+      runWithResult: async () => ({ content: 'session-owned task completed' }),
+    };
+
+    const service = new AutomationExecutionService({
+      store,
+      ensureSessionRuntime: async (sessionId: string) => {
+        ensuredSessionIds.push(sessionId);
+        return {
+          agent: runAgent as any,
+          reused: false,
+        };
+      },
+      cleanupSessionRuntime: async () => undefined,
+      updateContextNamespaceMetaSafe: (context, patch) => {
+        contextMetaUpdates.push({ context, patch: patch as Record<string, unknown> });
+        return null;
+      },
+      getDefaultWorkspaceDir: () => 'D:\\default',
+      getContextMessages: () => [],
+      mutateWorkspaceMemory: async () => ({ entry: { id: 'memory-1' } }),
+      logger: { warn: () => undefined },
+    });
+
+    await service.executeJob(job, '2026-04-19T04:00:00.000Z');
+
+    const run = store.listRuns(job.id)[0];
+    assert.ok(run);
+    assert.equal(run.status, 'succeeded');
+    assert.notEqual(run.sessionId, 'visible-session');
+    assert.match(run.sessionId, /^auto-/);
+    assert.deepEqual(ensuredSessionIds, [run.sessionId]);
+    assert.equal(store.getJob(job.id)?.sessionId, 'visible-session');
+    assert.equal(
+      contextMetaUpdates.some((item) => item.context.namespace === 'visible-session'),
+      false
+    );
+    assert.equal(
+      contextMetaUpdates.some((item) => item.context.namespace === run.sessionId && item.patch.automationRun),
+      true
+    );
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+}
+
 async function testExecutionSuccessNotDowngradedByMemoryFailure(): Promise<void> {
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-automation-execution-memory-failure-'));
   try {
@@ -164,6 +233,152 @@ async function testExecutionSuccessNotDowngradedByMemoryFailure(): Promise<void>
     assert.equal(runs[0]?.memorySyncStatus, 'failed');
     assert.match(String(runs[0]?.memorySyncError ?? ''), /memory backend unavailable/);
     assert.equal(runs[0]?.error, undefined);
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+}
+
+async function testExternalAgentUsesAgentRuntimeAndIgnoresAutomationSkills(): Promise<void> {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-automation-execution-agent-'));
+  try {
+    const store = new AutomationStore(storeDir);
+    const job = store.createJob({
+      name: 'Agent run',
+      prompt: 'complete task',
+      workspaceDir: 'D:\\repo',
+      skills: ['checks'],
+      agentName: 'browser',
+      schedule: normalizeAutomationSchedule({
+        frequency: 'daily',
+        hour: 3,
+        minute: 30,
+      }),
+      timezone: 'UTC',
+      enabled: true,
+    });
+
+    let runWithResultArgs: Record<string, unknown> | null = null;
+    let ensuredProfileId = '';
+    const runAgent = {
+      updateContextNamespaceMeta: () => undefined,
+      runWithResult: async (args: Record<string, unknown>) => {
+        runWithResultArgs = args;
+        return { content: 'agent task finished' };
+      },
+    };
+
+    const service = new AutomationExecutionService({
+      store,
+      ensureSessionRuntime: async (_sessionId, _workspaceDir, _llmRuntime, llmSelection) => {
+        ensuredProfileId = String(llmSelection?.profileId ?? '');
+        return {
+          agent: runAgent as any,
+          reused: false,
+        };
+      },
+      cleanupSessionRuntime: async () => undefined,
+      updateContextNamespaceMetaSafe: () => null,
+      getDefaultWorkspaceDir: () => 'D:\\default',
+      getContextMessages: () => [],
+      mutateWorkspaceMemory: async () => ({ entry: { id: 'mem-1' } }),
+      resolveAutomationAgentRuntime: () => ({
+        agentName: 'browser',
+        effectiveAgentName: 'browser',
+        llmSelection: {
+          profileId: 'agent-profile',
+          model: 'agent-model',
+          reasoningPreset: 'medium',
+          updatedAt: '2026-04-19T00:00:00.000Z',
+        },
+        agentRuntimeOverrides: {
+          agentProfile: {
+            source: 'global',
+            name: 'browser',
+            path: 'D:\\agents\\browser\\AGENTS.md',
+          },
+          loadGlobalSkills: false,
+        },
+      }),
+      logger: { warn: () => undefined },
+    });
+
+    await service.executeJob(job, '2026-04-19T03:30:00.000Z');
+
+    assert.equal(ensuredProfileId, 'agent-profile');
+    assert.deepEqual(
+      (runWithResultArgs?.agentRuntimeOverrides as { agentProfile?: { name?: string }; loadGlobalSkills?: boolean })?.agentProfile?.name,
+      'browser'
+    );
+    assert.equal(
+      (runWithResultArgs?.agentRuntimeOverrides as { loadGlobalSkills?: boolean })?.loadGlobalSkills,
+      false
+    );
+    assert.doesNotMatch(String(runWithResultArgs?.additionalSystemPrompt ?? ''), /Preferred skills/);
+    const run = store.listRuns(job.id)[0];
+    assert.equal(run?.agentName, 'browser');
+    assert.equal(run?.effectiveAgentName, 'browser');
+  } finally {
+    fs.rmSync(storeDir, { recursive: true, force: true });
+  }
+}
+
+async function testMissingExternalAgentFallsBackToDefaultWithDiagnostic(): Promise<void> {
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-automation-execution-agent-fallback-'));
+  try {
+    const store = new AutomationStore(storeDir);
+    const job = store.createJob({
+      name: 'Fallback run',
+      prompt: 'complete task',
+      workspaceDir: 'D:\\repo',
+      skills: ['checks'],
+      agentName: 'deleted-agent',
+      schedule: normalizeAutomationSchedule({
+        frequency: 'daily',
+        hour: 4,
+        minute: 30,
+      }),
+      timezone: 'UTC',
+      enabled: true,
+    });
+
+    let runWithResultArgs: Record<string, unknown> | null = null;
+    const warnings: string[] = [];
+    const runAgent = {
+      updateContextNamespaceMeta: () => undefined,
+      runWithResult: async (args: Record<string, unknown>) => {
+        runWithResultArgs = args;
+        return { content: 'fallback task finished' };
+      },
+    };
+
+    const service = new AutomationExecutionService({
+      store,
+      ensureSessionRuntime: async () => ({
+        agent: runAgent as any,
+        reused: false,
+      }),
+      cleanupSessionRuntime: async () => undefined,
+      updateContextNamespaceMetaSafe: () => null,
+      getDefaultWorkspaceDir: () => 'D:\\default',
+      getContextMessages: () => [],
+      mutateWorkspaceMemory: async () => ({ entry: { id: 'mem-1' } }),
+      resolveAutomationAgentRuntime: () => ({
+        agentName: 'deleted-agent',
+        effectiveAgentName: 'default',
+        fallbackReason: 'agent_not_found:deleted-agent',
+      }),
+      logger: { warn: (message) => warnings.push(message) },
+    });
+
+    await service.executeJob(job, '2026-04-19T04:30:00.000Z');
+
+    assert.equal(runWithResultArgs?.agentRuntimeOverrides, undefined);
+    assert.match(String(runWithResultArgs?.additionalSystemPrompt ?? ''), /Preferred skills: checks/);
+    assert.match(warnings.join('\n'), /agent_not_found:deleted-agent/);
+    const run = store.listRuns(job.id)[0];
+    assert.equal(run?.agentName, 'deleted-agent');
+    assert.equal(run?.effectiveAgentName, 'default');
+    assert.equal(run?.agentFallbackReason, 'agent_not_found:deleted-agent');
   } finally {
     fs.rmSync(storeDir, { recursive: true, force: true });
   }
@@ -300,7 +515,10 @@ async function testSystemTaskWritesRunReport(): Promise<void> {
 
 async function runAll(): Promise<void> {
   await testAutomationExecutionInjectsTemplateAndPersistsMemory();
+  await testSessionOwnedScheduledTaskRunsInIsolatedAutomationSession();
   await testExecutionSuccessNotDowngradedByMemoryFailure();
+  await testExternalAgentUsesAgentRuntimeAndIgnoresAutomationSkills();
+  await testMissingExternalAgentFallsBackToDefaultWithDiagnostic();
   await testExecutionSuccessNotDowngradedWhenTemplateWriteFails();
   await testSystemTaskWritesRunReport();
   console.log('web-automation-execution tests passed');

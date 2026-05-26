@@ -279,7 +279,7 @@ async function testEmitsToolUseOnToolStartBeforeComplete(): Promise<void> {
     };
     yield {
       type: 'tool_input',
-      data: '{"command":"Get-ChildItem","timeoutMs":1000}',
+      data: { id: 'tool-1', chunk: '{"command":"Get-ChildItem","timeoutMs":1000}' },
     };
     yield {
       type: 'complete',
@@ -367,6 +367,86 @@ async function testMapsReasoningPresetToThinkingBudget(): Promise<void> {
   });
 }
 
+async function testMapsMaxReasoningPresetToHighestThinkingBudget(): Promise<void> {
+  const requests: Array<Record<string, unknown>> = [];
+  const client = createClient(
+    requests,
+    [],
+    {
+      content: [
+        {
+          type: 'text',
+          text: 'ok',
+        },
+      ],
+      usage: {
+        input_tokens: 5,
+        output_tokens: 3,
+      },
+      stop_reason: 'end_turn',
+    },
+    {
+      profileId: 'anthropic-default',
+      provider: 'anthropic',
+      apiKey: 'test-api-key',
+      apiBase: 'https://api.minimaxi.com',
+      model: 'MiniMax-M2.7',
+      maxOutputTokens: 4096,
+      reasoningPreset: 'max',
+      capabilities: {
+        reasoningEffort: false,
+        thinkingBudget: true,
+      },
+    }
+  );
+
+  await client.generateWithCallbacks([{ role: 'user', content: 'question' }], {});
+  assert.deepEqual(requests[0]?.thinking, {
+    type: 'enabled',
+    budget_tokens: 32768,
+  });
+}
+
+async function testMapsOfficialClaudeMaxPresetToOutputConfigEffort(): Promise<void> {
+  const requests: Array<Record<string, unknown>> = [];
+  const client = createClient(
+    requests,
+    [],
+    {
+      content: [
+        {
+          type: 'text',
+          text: 'ok',
+        },
+      ],
+      usage: {
+        input_tokens: 5,
+        output_tokens: 3,
+      },
+      stop_reason: 'end_turn',
+    },
+    {
+      profileId: 'anthropic-default',
+      provider: 'anthropic',
+      apiKey: 'test-api-key',
+      apiBase: 'https://api.anthropic.com',
+      model: 'claude-opus-4-7',
+      maxOutputTokens: 4096,
+      reasoningPreset: 'max',
+      capabilities: {
+        reasoningEffort: false,
+        thinkingBudget: true,
+      },
+    }
+  );
+
+  await client.generateWithCallbacks([{ role: 'user', content: 'question' }], {});
+  assert.deepEqual(requests[0]?.output_config, {
+    effort: 'max',
+  });
+  assert.equal('thinking' in (requests[0] ?? {}), false);
+}
+
 async function testOmitsThinkingBudgetWhenCapabilityIsDisabled(): Promise<void> {
   const requests: Array<Record<string, unknown>> = [];
   const client = createClient(
@@ -411,6 +491,8 @@ async function runAll(): Promise<void> {
   await testDropsSignatureOnlyThinkingFromReplayPayload();
   await testEmitsToolUseOnToolStartBeforeComplete();
   await testMapsReasoningPresetToThinkingBudget();
+  await testMapsMaxReasoningPresetToHighestThinkingBudget();
+  await testMapsOfficialClaudeMaxPresetToOutputConfigEffort();
   await testOmitsThinkingBudgetWhenCapabilityIsDisabled();
   console.log('llm-thinking-signature tests passed');
 }

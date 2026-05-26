@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useI18n } from '../../i18n/index.js';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 
@@ -62,15 +62,6 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
   const [showConfig, setShowConfig] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [todoDriven, setTodoDriven] = useState(false);
-  const loopStatus = todoDriven
-    ? config.pendingPlanConfirmation
-      ? t('autoLoop.status.pendingPlan')
-      : config.enabled
-        ? t('autoLoop.status.running')
-        : t('autoLoop.status.paused')
-    : config.enabled
-      ? t('autoLoop.status.enabled')
-      : t('autoLoop.status.off');
   const toggleLabel = todoDriven ? t('autoLoop.toggleTodoAria') : t('autoLoop.toggleRalphAria');
 
   useEffect(() => {
@@ -127,7 +118,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
 
   const updateConfig = useCallback(
     async (updates: Partial<AutoLoopConfig>) => {
-      if (!sessionId) {
+      if (!sessionId || disabled) {
         return;
       }
       const nextConfig = { ...config, ...updates };
@@ -156,7 +147,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
         setIsSaving(false);
       }
     },
-    [config, sessionId]
+    [config, disabled, sessionId]
   );
 
   const toggleEnabled = useCallback(() => {
@@ -200,9 +191,6 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                 <div className="text-sm font-semibold" style={{ color: theme.colors.text.primary }}>
                   {todoDriven ? t('autoLoop.titleTodo') : t('autoLoop.titleRalph')}
                 </div>
-                <div className="text-xs" style={{ color: theme.colors.text.muted }}>
-                  {loopStatus}
-                </div>
               </div>
               <button
                 type="button"
@@ -226,6 +214,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                   </label>
                   <textarea
                     value={config.prompt}
+                    disabled={disabled}
                     onChange={(event) => {
                       void updateConfig({ prompt: event.target.value });
                     }}
@@ -246,6 +235,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                   <input
                     type="number"
                     value={config.maxRounds}
+                    disabled={disabled}
                     onChange={(event) => {
                       void updateConfig({ maxRounds: parseInt(event.target.value, 10) || 20 });
                     }}
@@ -264,6 +254,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                   <input
                     type="number"
                     value={config.maxDurationMinutes}
+                    disabled={disabled}
                     onChange={(event) => {
                       void updateConfig({ maxDurationMinutes: parseInt(event.target.value, 10) || 120 });
                     }}
@@ -307,6 +298,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
           <button
             type="button"
             onClick={() => setShowConfig((prev) => !prev)}
+            disabled={disabled}
             className="min-w-0 truncate text-xs font-medium"
             style={{ color: config.enabled ? theme.colors.primary.DEFAULT : theme.colors.text.secondary }}
           >
@@ -342,9 +334,6 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
             {todoDriven ? t('autoLoop.titleTodo') : t('autoLoop.titleRalph')}
             {state.isRunning && <span className="ml-2 text-orange-500">{t('autoLoop.round', { round: state.currentRound })}</span>}
           </div>
-          <div className="text-xs text-neutral-500 dark:text-neutral-400">
-            {loopStatus}
-          </div>
         </div>
       </div>
 
@@ -364,6 +353,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                 <label className="mb-1 block text-xs text-neutral-600 dark:text-neutral-400">{t('autoLoop.loopPrompt')}</label>
                 <textarea
                   value={config.prompt}
+                  disabled={disabled}
                   onChange={(event) => {
                     void updateConfig({ prompt: event.target.value });
                   }}
@@ -379,6 +369,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                 <input
                   type="number"
                   value={config.maxRounds}
+                  disabled={disabled}
                   onChange={(event) => {
                     void updateConfig({ maxRounds: parseInt(event.target.value, 10) || 20 });
                   }}
@@ -393,6 +384,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                 <input
                   type="number"
                   value={config.maxDurationMinutes}
+                  disabled={disabled}
                   onChange={(event) => {
                     void updateConfig({ maxDurationMinutes: parseInt(event.target.value, 10) || 120 });
                   }}
@@ -409,6 +401,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                     <input
                       type="number"
                       value={config.similarityThreshold}
+                      disabled={disabled}
                       onChange={(event) => {
                         void updateConfig({ similarityThreshold: parseFloat(event.target.value) || 0.85 });
                       }}
@@ -424,6 +417,7 @@ export default function AutoLoopControl({ sessionId, disabled, compact = false }
                     <input
                       type="number"
                       value={config.compareRounds}
+                      disabled={disabled}
                       onChange={(event) => {
                         void updateConfig({ compareRounds: parseInt(event.target.value, 10) || 3 });
                       }}

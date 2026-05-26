@@ -8,7 +8,7 @@ import { ConfigManager } from '../config/index.js';
 import type { APIProvider, PersistedMessage } from '../types.js';
 
 const ROLLOUT_FILE = 'D:\\work\\AIAgent\\MiniMaxCli\\assert\\rollout-2026-02-18T01-50-32-019c6cb9-a83c-7e53-a7c3-2a6464652ee4.jsonl';
-const OUTPUT_DIR = 'D:\\work\\AIAgent\\MiniMaxCli\\workspace\\minimax-session\\test-from-rollout';
+const OUTPUT_DIR = 'D:\\work\\AIAgent\\MiniMaxCli\\workspace\\dpagent-session\\test-from-rollout';
 interface RolloutRecord {
   timestamp: string;
   type: string;
@@ -193,7 +193,7 @@ async function testCompression(messages: PersistedMessage[], totalSize: number) 
   });
 
   // Create compressor
-  const compressor = new ContextCompressor(llmClient, 0.3);
+  const compressor = new ContextCompressor(llmClient);
 
   console.log('\nStarting compression (this may take a while)...');
   const startTime = Date.now();

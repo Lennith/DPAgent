@@ -2,6 +2,8 @@ import * as crypto from 'crypto';
 import type { Message, SideEffectLedgerEntry } from './types.js';
 import { resolveToolCapabilityFamily } from './tools/tool-registration.js';
 
+export const INTERRUPTED_TURN_RESUME_MARKER = '[INTERRUPTED_TURN_RESUME]';
+
 function messageTextContent(content: Message['content']): string {
   if (typeof content === 'string') {
     return content;
@@ -189,7 +191,7 @@ const OBSERVATION_TOOL_FAMILIES = new Set([
   'plan_request_user_input',
 ]);
 
-const CONTROL_TOOL_FAMILIES = new Set(['context_manage', 'plan_update', 'plan_finalize', 'auto_loop_exit']);
+const CONTROL_TOOL_FAMILIES = new Set(['context_manage', 'plan_finalize', 'auto_loop_exit']);
 
 const MUTATING_TOOL_FAMILIES = new Set([
   'file_write',

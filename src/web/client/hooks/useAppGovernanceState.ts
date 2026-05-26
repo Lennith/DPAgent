@@ -136,6 +136,43 @@ export function useAppGovernanceState({
     }
   }, [currentSessionId, fetchGovernanceState, memoryOrganizeLoading, refreshSessions]);
 
+  const handleTodoAction = useCallback(async (todoId: string, action: 'dismiss' | 'resume') => {
+    const sessionId = currentSessionId;
+    if (!sessionId || !todoId) {
+      return;
+    }
+    try {
+      const response = await fetch(`/api/todos/${encodeURIComponent(todoId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, sessionId }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error || `status=${response.status}`);
+      }
+      await Promise.all([fetchGovernanceState(sessionId), refreshSessions()]);
+    } catch (error) {
+      console.error(`Failed to ${action} todo:`, error);
+    }
+  }, [currentSessionId, fetchGovernanceState, refreshSessions]);
+
+  const handleDismissTodo = useCallback(
+    async (todoId: string) => {
+      await handleTodoAction(todoId, 'dismiss');
+    },
+    [handleTodoAction]
+  );
+
+  const handleResumeTodo = useCallback(
+    async (todoId: string) => {
+      await handleTodoAction(todoId, 'resume');
+    },
+    [handleTodoAction]
+  );
+
   const memoryPendingCount = useMemo(
     () => memoryPromotionState?.pendingTurnCount ?? 0,
     [memoryPromotionState]
@@ -151,5 +188,7 @@ export function useAppGovernanceState({
     resetGovernanceState,
     fetchGovernanceState,
     handleOrganizeMemory,
+    handleDismissTodo,
+    handleResumeTodo,
   };
 }

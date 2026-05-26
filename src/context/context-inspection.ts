@@ -83,9 +83,11 @@ export function toInspectableMeta(meta?: ContextNamespaceMeta): ContextInspectab
     compressedHistoryContext: meta.compressedHistoryContext,
     autoLoopConfig: meta.autoLoopConfig,
     agentInjectionState: meta.agentInjectionState,
+    planningState: meta.planningState,
     automationRun: meta.automationRun,
     completionMarkerStats: meta.completionMarkerStats,
     pendingPlanInput: meta.pendingPlanInput,
+    runtimeErrors: meta.runtimeErrors,
   };
 }
 

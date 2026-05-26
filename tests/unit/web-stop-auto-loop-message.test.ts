@@ -1,8 +1,8 @@
 import * as assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import { autoLoopManager } from '../../src/auto-loop/index.js';
 import type { ContextRef } from '../../src/types.js';
+import { createWebServerDouble } from './helpers/web-server-harness.js';
 
 interface EmittedMessage {
   ws: object;
@@ -20,11 +20,12 @@ interface StopAutoLoopHarness {
 }
 
 function createHarness(): StopAutoLoopHarness {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   const emitted: EmittedMessage[] = [];
   const lifecycle: string[] = [];
   const originalGet = autoLoopManager.get;
 
+  server.activeRunStatesByContext = new Map();
   server.emitToClient = (ws: object, message: Omit<EmittedMessage, 'ws'>) => {
     lifecycle.push(`emit:${message.type}`);
     emitted.push({ ws, ...message });
@@ -178,6 +179,73 @@ function testStopAutoLoopForContextStopsControllerAndEmitsPayload(): void {
   }
 }
 
+function testStopAutoLoopForContextPausesPlanExecutionWithoutPersistingUserPause(): void {
+  const harness = createHarness();
+  const context: ContextRef = { scope: 'session', namespace: 'sess-plan-exec' };
+  const metaUpdates: unknown[] = [];
+
+  try {
+    let requestedKey = '';
+    harness.server.getContextNamespaceMetaSafe = () => ({
+      planningState: {
+        state: 'plan_executing',
+        activeExecutionPlanId: 'plan-1',
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      },
+      autoLoopConfig: {
+        enabled: true,
+        mode: 'todo',
+        ralphEnabled: false,
+        pendingPlanConfirmation: false,
+        pausedByUser: false,
+      },
+    });
+    harness.server.getSessionTodoProtocolState = () => ({
+      items: [{ id: 'todo-1', status: 'pending' }],
+      unfinishedItems: [{ id: 'todo-1', status: 'pending' }],
+      activeItem: null,
+      blockedItem: null,
+      pendingItems: [{ id: 'todo-1', status: 'pending' }],
+      completedItems: [],
+      hasUnfinished: true,
+      allCompleted: false,
+    });
+    harness.server.updateContextNamespaceMetaSafe = (_context: ContextRef, patch: unknown) => {
+      metaUpdates.push(patch);
+    };
+    harness.setController((key: string) => {
+      requestedKey = key;
+      return {
+        stop: (reason: string) => {
+          harness.lifecycle.push(`stop:${reason}`);
+        },
+        getState: () => ({
+          currentRound: 5,
+        }),
+      };
+    });
+
+    harness.server.stopAutoLoopForContext(context, harness.openSocket);
+
+    assert.equal(requestedKey, 'sess-plan-exec');
+    assert.deepEqual(metaUpdates, []);
+    assert.deepEqual(harness.lifecycle, ['stop:user_stop', 'emit:auto_loop_stopped']);
+    assert.deepEqual(harness.emitted, [
+      {
+        ws: harness.openSocket,
+        type: 'auto_loop_stopped',
+        data: {
+          context,
+          reason: 'Plan execution paused for user input',
+          totalRounds: 5,
+        },
+      },
+    ]);
+  } finally {
+    harness.restore();
+  }
+}
+
 function testHandleStopAutoLoopMessageRunsFullChainFromSessionId(): void {
   const harness = createHarness();
   const context: ContextRef = { scope: 'session', namespace: 'sess-2' };
@@ -245,6 +313,7 @@ async function runAll(): Promise<void> {
   testResolveStopAutoLoopContextTreatsMalformedExplicitContextAsAuthoritativeNoOp();
   testStopAutoLoopForContextWithoutControllerIsANoOp();
   testStopAutoLoopForContextStopsControllerAndEmitsPayload();
+  testStopAutoLoopForContextPausesPlanExecutionWithoutPersistingUserPause();
   testHandleStopAutoLoopMessageRunsFullChainFromSessionId();
   testHandleStopAutoLoopMessageIgnoresBlankRequest();
   console.log('web-stop-auto-loop-message tests passed');

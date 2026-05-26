@@ -1,5 +1,4 @@
 import type {
-  AgentConfig,
   APIProvider,
   LlmProfileIntrospection,
   LlmProfilesConfig,
@@ -11,9 +10,10 @@ import type {
   SessionLlmSelectionInput,
   SessionLlmProviderOptions,
 } from '../types.js';
+import { resolveAnthropicThinkingBudgetTokens } from './anthropic-thinking-budget.js';
 
-export const LEGACY_DEFAULT_LLM_PROFILE_ID = 'legacy-default';
-export const DEFAULT_REASONING_PRESET: ReasoningPreset = 'off';
+export const DEFAULT_LLM_PROFILE_ID = 'default';
+export const DEFAULT_REASONING_PRESET: ReasoningPreset = 'high';
 export const DEFAULT_MAX_OUTPUT_TOKENS = 32768;
 export const DEFAULT_SYNTHETIC_SELECTION_UPDATED_AT = '1970-01-01T00:00:00.000Z';
 
@@ -22,7 +22,14 @@ export function normalizeApiProvider(value: unknown): APIProvider {
 }
 
 export function normalizeReasoningPreset(value: unknown): ReasoningPreset {
-  return value === 'low' || value === 'medium' || value === 'high' ? value : DEFAULT_REASONING_PRESET;
+  return value === 'off' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max'
+    ? value
+    : DEFAULT_REASONING_PRESET;
 }
 
 function normalizeOptionalTimestamp(value: unknown): string | undefined {
@@ -54,19 +61,47 @@ function normalizeProfileId(value: unknown, fallback: string): string {
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
-function normalizeProfileName(value: unknown, fallbackId: string, provider: APIProvider): string {
+function normalizeProfileName(value: unknown, _fallbackId: string, provider: APIProvider): string {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (trimmed.length > 0) {
     return trimmed;
-  }
-  if (fallbackId === LEGACY_DEFAULT_LLM_PROFILE_ID) {
-    return 'Default Profile';
   }
   return `${provider === 'openai' ? 'OpenAI-Compatible' : 'Anthropic-Compatible'} Profile`;
 }
 
 function normalizePositiveInteger(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function normalizeOptionalPositiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+function normalizeModelId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeAvailableModels(value: unknown, defaultModel: string): string[] {
+  const models = new Map<string, string>();
+  const addModel = (model: unknown): void => {
+    const id = normalizeModelId(model);
+    if (id && !models.has(id)) {
+      models.set(id, id);
+    }
+  };
+
+  if (Array.isArray(value)) {
+    value.forEach(addModel);
+  }
+  addModel(defaultModel);
+
+  return [...models.values()];
+}
+
+export function getAvailableLlmProfileModels(
+  profile: Pick<LlmProviderProfileConfig, 'defaultModel' | 'availableModels'>
+): string[] {
+  return normalizeAvailableModels(profile.availableModels, profile.defaultModel);
 }
 
 function normalizeThinkingBudgetTokens(value: unknown): number | null | undefined {
@@ -79,11 +114,11 @@ function normalizeThinkingBudgetTokens(value: unknown): number | null | undefine
   return Math.floor(value);
 }
 
-function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | null | undefined {
+function normalizeReasoningEffort(value: unknown): 'low' | 'medium' | 'high' | 'xhigh' | null | undefined {
   if (value === null) {
     return null;
   }
-  return value === 'low' || value === 'medium' || value === 'high' ? value : undefined;
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' ? value : undefined;
 }
 
 function defaultCapabilitiesForProvider(provider: APIProvider): Required<LlmProviderCapabilities> {
@@ -121,29 +156,26 @@ export function getResolvedProfileCapabilities(
   };
 }
 
-export function createLlmProfileFromLegacyApi(
-  api?: Partial<AgentConfig['api']>,
-  profileId = LEGACY_DEFAULT_LLM_PROFILE_ID
-): LlmProviderProfileConfig {
-  const provider = normalizeApiProvider(api?.provider);
+export function createDefaultLlmProfile(profileId = DEFAULT_LLM_PROFILE_ID): LlmProviderProfileConfig {
+  const provider: APIProvider = 'anthropic';
   return {
     id: profileId,
-    name: profileId === LEGACY_DEFAULT_LLM_PROFILE_ID ? 'Default Profile' : `${provider} profile`,
+    name: 'Default Profile',
     provider,
-    apiKey: String(api?.apiKey ?? '').trim(),
-    apiBase: String(api?.apiBase ?? '').trim() || 'https://api.minimax.io',
-    defaultModel: String(api?.model ?? '').trim() || 'MiniMax-M2.5',
-    maxOutputTokens: normalizePositiveInteger(api?.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS),
+    apiKey: '',
+    apiBase: 'https://api.minimax.io',
+    defaultModel: 'MiniMax-M2.5',
+    availableModels: ['MiniMax-M2.5'],
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
     enabled: true,
     capabilities: getResolvedProfileCapabilities({ provider, capabilities: undefined }),
   };
 }
 
 export function normalizeLlmProfilesConfig(config: {
-  api?: Partial<AgentConfig['api']>;
   llmProfiles?: LlmProfilesConfig | null | undefined;
 }): LlmProfilesConfig {
-  const fallbackProfile = createLlmProfileFromLegacyApi(config.api);
+  const fallbackProfile = createDefaultLlmProfile();
   const rawProfiles = Array.isArray(config.llmProfiles?.profiles) ? config.llmProfiles?.profiles : [];
   const profilesToNormalize = rawProfiles.length > 0 ? rawProfiles : [fallbackProfile];
   const dedupedProfiles = new Map<string, LlmProviderProfileConfig>();
@@ -153,25 +185,23 @@ export function normalizeLlmProfilesConfig(config: {
     const fallbackId = index === 0 ? fallbackProfile.id : `profile-${index + 1}`;
     const id = normalizeProfileId(rawProfile?.id, fallbackId);
     const apiBase = String(rawProfile?.apiBase ?? '').trim() || fallbackProfile.apiBase;
-    const defaultModel = String(rawProfile?.defaultModel ?? '').trim() || fallbackProfile.defaultModel;
-    const maxOutputTokens = normalizePositiveInteger(
-      rawProfile?.maxOutputTokens,
-      normalizePositiveInteger(config.api?.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS)
-    );
+    const rawDefaultModel = String(rawProfile?.defaultModel ?? '').trim() || fallbackProfile.defaultModel;
+    const availableModels = normalizeAvailableModels(rawProfile?.availableModels, rawDefaultModel);
+    const defaultModel = availableModels.includes(rawDefaultModel)
+      ? rawDefaultModel
+      : availableModels[0] ?? rawDefaultModel;
+    const maxOutputTokens = normalizePositiveInteger(rawProfile?.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
 
     dedupedProfiles.set(id, {
       id,
       name: normalizeProfileName(rawProfile?.name, id, provider),
       provider,
-      apiKey:
-        typeof rawProfile?.apiKey === 'string'
-          ? rawProfile.apiKey.trim()
-          : id === fallbackProfile.id
-            ? fallbackProfile.apiKey
-            : '',
+      apiKey: typeof rawProfile?.apiKey === 'string' ? rawProfile.apiKey.trim() : '',
       apiBase,
       defaultModel,
+      availableModels,
       maxOutputTokens,
+      contextWindowTokens: normalizeOptionalPositiveInteger(rawProfile?.contextWindowTokens),
       enabled: rawProfile?.enabled !== false,
       capabilities: getResolvedProfileCapabilities({
         provider,
@@ -183,43 +213,27 @@ export function normalizeLlmProfilesConfig(config: {
   });
 
   const profiles = [...dedupedProfiles.values()];
-  const defaultProfileId = normalizeProfileId(
-    config.llmProfiles?.defaultProfileId,
-    profiles[0]?.id ?? fallbackProfile.id
-  );
+  const defaultProfileId = normalizeProfileId(config.llmProfiles?.defaultProfileId, profiles[0]?.id ?? fallbackProfile.id);
   const resolvedDefaultProfileId =
     profiles.some((profile) => profile.id === defaultProfileId) && defaultProfileId
       ? defaultProfileId
       : profiles[0]?.id ?? fallbackProfile.id;
 
-  if (profiles.length === 0) {
-    return {
-      defaultProfileId: fallbackProfile.id,
-      profiles: [fallbackProfile],
-    };
-  }
-
   return {
     defaultProfileId: resolvedDefaultProfileId,
-    profiles,
+    profiles: profiles.length > 0 ? profiles : [fallbackProfile],
   };
 }
 
 export function resolveDefaultLlmProfile(config: {
-  api?: Partial<AgentConfig['api']>;
   llmProfiles: LlmProfilesConfig;
 }): LlmProviderProfileConfig {
   const normalized = normalizeLlmProfilesConfig(config);
-  return (
-    normalized.profiles.find((profile) => profile.id === normalized.defaultProfileId) ??
-    normalized.profiles[0] ??
-    createLlmProfileFromLegacyApi(config.api)
-  );
+  return normalized.profiles.find((profile) => profile.id === normalized.defaultProfileId) ?? normalized.profiles[0] ?? createDefaultLlmProfile();
 }
 
 export function findResolvedLlmProfile(
   config: {
-    api?: Partial<AgentConfig['api']>;
     llmProfiles?: LlmProfilesConfig | null | undefined;
   },
   profileId: string
@@ -230,87 +244,6 @@ export function findResolvedLlmProfile(
     return undefined;
   }
   return normalized.profiles.find((profile) => profile.id === trimmedProfileId);
-}
-
-export function syncLegacyApiFromLlmProfiles(config: AgentConfig): AgentConfig {
-  const llmProfiles = normalizeLlmProfilesConfig(config);
-  const defaultProfile = resolveDefaultLlmProfile({
-    api: config.api,
-    llmProfiles,
-  });
-
-  return {
-    ...config,
-    api: {
-      ...config.api,
-      apiKey: defaultProfile.apiKey,
-      apiBase: defaultProfile.apiBase,
-      model: defaultProfile.defaultModel,
-      provider: defaultProfile.provider,
-      maxOutputTokens: normalizePositiveInteger(
-        defaultProfile.maxOutputTokens,
-        normalizePositiveInteger(config.api.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS)
-      ),
-    },
-    llmProfiles,
-  };
-}
-
-export function mirrorLegacyApiUpdateToLlmProfiles(
-  config: AgentConfig,
-  apiUpdates: Partial<AgentConfig['api']>
-): AgentConfig {
-  const normalized = syncLegacyApiFromLlmProfiles(config);
-  const defaultProfile = resolveDefaultLlmProfile({
-    api: normalized.api,
-    llmProfiles: normalized.llmProfiles,
-  });
-
-  return syncLegacyApiFromLlmProfiles({
-    ...normalized,
-    api: {
-      ...normalized.api,
-      ...apiUpdates,
-      provider:
-        apiUpdates.provider !== undefined ? normalizeApiProvider(apiUpdates.provider) : normalized.api.provider,
-      maxOutputTokens: normalizePositiveInteger(
-        apiUpdates.maxOutputTokens,
-        normalizePositiveInteger(normalized.api.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS)
-      ),
-    },
-    llmProfiles: {
-      ...normalized.llmProfiles,
-      profiles: normalized.llmProfiles.profiles.map((profile) =>
-        profile.id === defaultProfile.id
-          ? {
-              ...profile,
-              apiKey:
-                typeof apiUpdates.apiKey === 'string' ? apiUpdates.apiKey.trim() : profile.apiKey,
-              apiBase:
-                typeof apiUpdates.apiBase === 'string' && apiUpdates.apiBase.trim().length > 0
-                  ? apiUpdates.apiBase.trim()
-                  : profile.apiBase,
-              defaultModel:
-                typeof apiUpdates.model === 'string' && apiUpdates.model.trim().length > 0
-                  ? apiUpdates.model.trim()
-                  : profile.defaultModel,
-              provider:
-                apiUpdates.provider !== undefined
-                  ? normalizeApiProvider(apiUpdates.provider)
-                  : profile.provider,
-              maxOutputTokens: normalizePositiveInteger(
-                apiUpdates.maxOutputTokens,
-                normalizePositiveInteger(
-                  profile.maxOutputTokens,
-                  normalizePositiveInteger(normalized.api.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS)
-                )
-              ),
-              updatedAt: new Date().toISOString(),
-            }
-          : profile
-      ),
-    },
-  });
 }
 
 function normalizeProviderOptionsForProvider(
@@ -337,24 +270,27 @@ function normalizeProviderOptionsForProvider(
 
 export function resolveSessionLlmSelection(
   config: {
-    api?: Partial<AgentConfig['api']>;
     llmProfiles?: LlmProfilesConfig | null | undefined;
   },
   selection?: SessionLlmSelection | SessionLlmSelectionInput | null
 ): SessionLlmSelection {
   const llmProfiles = normalizeLlmProfilesConfig(config);
   const defaultProfile = resolveDefaultLlmProfile({
-    api: config.api,
     llmProfiles,
   });
   const requestedProfileId = typeof selection?.profileId === 'string' ? selection.profileId.trim() : '';
   const resolvedProfile =
     llmProfiles.profiles.find((profile) => profile.id === requestedProfileId) ?? defaultProfile;
   const requestedModel = typeof selection?.model === 'string' ? selection.model.trim() : '';
+  const availableModels = getAvailableLlmProfileModels(resolvedProfile);
+  const resolvedModel =
+    requestedModel && availableModels.includes(requestedModel)
+      ? requestedModel
+      : resolvedProfile.defaultModel || availableModels[0] || '';
 
   return {
     profileId: resolvedProfile.id,
-    model: requestedModel || resolvedProfile.defaultModel,
+    model: resolvedModel,
     reasoningPreset: normalizeReasoningPreset(selection?.reasoningPreset),
     providerOptions: normalizeProviderOptionsForProvider(selection?.providerOptions, resolvedProfile.provider),
     updatedAt: normalizeSelectionUpdatedAt(
@@ -366,7 +302,6 @@ export function resolveSessionLlmSelection(
 
 export function applySessionLlmSelectionInput(
   config: {
-    api?: Partial<AgentConfig['api']>;
     llmProfiles?: LlmProfilesConfig | null | undefined;
   },
   currentSelection?: SessionLlmSelection | SessionLlmSelectionInput | null,
@@ -407,7 +342,6 @@ export function applySessionLlmSelectionInput(
 
 export function resolveLlmRuntimeConfig(
   config: {
-    api?: Partial<AgentConfig['api']>;
     llmProfiles?: LlmProfilesConfig | null | undefined;
   },
   selection?: SessionLlmSelection | SessionLlmSelectionInput | null
@@ -417,7 +351,6 @@ export function resolveLlmRuntimeConfig(
   const profile =
     llmProfiles.profiles.find((item) => item.id === resolvedSelection.profileId) ??
     resolveDefaultLlmProfile({
-      api: config.api,
       llmProfiles,
     });
   const capabilities = getResolvedProfileCapabilities(profile);
@@ -438,6 +371,21 @@ export function resolveLlmRuntimeConfig(
   };
 }
 
+export function resolveModelRuntimeBudgetOptions(
+  runtimeConfig: ResolvedLlmRuntimeConfig | undefined
+): {
+  maxOutputTokens?: number;
+  thinkingBudgetTokens?: number;
+} {
+  if (!runtimeConfig) {
+    return {};
+  }
+  return {
+    maxOutputTokens: runtimeConfig.maxOutputTokens,
+    thinkingBudgetTokens: resolveAnthropicThinkingBudgetTokens(runtimeConfig),
+  };
+}
+
 export function createManualLlmIntrospection(
   profile: LlmProviderProfileConfig,
   error?: string
@@ -447,17 +395,13 @@ export function createManualLlmIntrospection(
     profileId: profile.id,
     source: 'manual',
     fetchedAt: new Date().toISOString(),
-    models: profile.defaultModel
-      ? [
-          {
-            id: profile.defaultModel,
-            displayName: profile.defaultModel,
-            provider: profile.provider,
-            supportsReasoningEffort: capabilities.reasoningEffort,
-            supportsThinkingBudget: capabilities.thinkingBudget,
-          },
-        ]
-      : [],
+    models: getAvailableLlmProfileModels(profile).map((model) => ({
+      id: model,
+      displayName: model,
+      provider: profile.provider,
+      supportsReasoningEffort: capabilities.reasoningEffort,
+      supportsThinkingBudget: capabilities.thinkingBudget,
+    })),
     manualModelEntryAllowed: true,
     capabilities,
     error,

@@ -1,29 +1,30 @@
 import OpenAI from 'openai';
 import { llmLogger } from '../../utils/logger.js';
 import { messageTextContent } from '../message-preparation.js';
-import { buildToolProtocolFrames } from '../tool-protocol.js';
-import type { LLMClientConfig, LLMRequestOptions, LLMStreamEvent } from '../runtime-types.js';
+import { prepareToolProtocol } from '../tool-protocol-analyzer.js';
+import { resolveProviderRuntimeBaseUrl } from '../provider-endpoints.js';
+import { normalizeTokenUsage } from '../token-usage.js';
+import type { LLMClientConfig, LLMRequestOptions, LLMStreamEvent, PreparedProviderPayload } from '../runtime-types.js';
 import type {
   LLMResponse,
   Message,
   ResolvedLlmRuntimeConfig,
   TokenUsage,
-  ToolCall,
   ToolSchema,
 } from '../../types.js';
-
-interface StreamingToolCallState {
-  id?: string;
-  name?: string;
-  argumentsText: string;
-  started: boolean;
-}
-
-interface StreamingThinkPrefixState {
-  prefixResolved: boolean;
-  consumedThinkBlocks: boolean;
-  buffer: string;
-}
+import {
+  appendThinkingText,
+  buildToolCallsFromStreamingStates,
+  consumeStreamingThinkPrefix,
+  createStreamingToolCallState,
+  normalizeInlineThinkingFromContent,
+  normalizeOpenAiFinishReason,
+  normalizeStreamingToolCallIndex,
+  parseOpenAiToolCalls,
+  resolveOpenAiReasoningEffort,
+  type StreamingThinkPrefixState,
+  type StreamingToolCallState,
+} from './openai-compatible-utils.js';
 
 export class OpenAICompatibleAdapter {
   private client: OpenAI;
@@ -37,29 +38,31 @@ export class OpenAICompatibleAdapter {
     this.llmRuntime = config.llmRuntime;
     this.client = new OpenAI({
       apiKey: config.apiKey,
-      baseURL: config.apiBase.replace(/\/$/, ''),
+      baseURL: resolveProviderRuntimeBaseUrl('openai', config.apiBase),
     });
   }
 
   async generate(
-    messages: Message[],
+    payload: PreparedProviderPayload,
     tools?: ToolSchema[],
-    systemPrompt?: string,
     options?: LLMRequestOptions
   ): Promise<LLMResponse> {
-    const requestParams = this.buildRequestParams(messages, tools, systemPrompt, options, false);
-    const response = await this.client.chat.completions.create(requestParams as never);
+    const requestParams = this.buildRequestParams(payload, tools, options, false);
+    const response = await this.client.chat.completions.create(requestParams as never, {
+      signal: options?.signal,
+    });
     return this.convertResponse(response as unknown as Record<string, unknown>);
   }
 
   async *generateStream(
-    messages: Message[],
+    payload: PreparedProviderPayload,
     tools?: ToolSchema[],
-    systemPrompt?: string,
     options?: LLMRequestOptions
   ): AsyncGenerator<LLMStreamEvent, LLMResponse, unknown> {
-    const requestParams = this.buildRequestParams(messages, tools, systemPrompt, options, true);
-    const stream = (await this.client.chat.completions.create(requestParams as never)) as unknown as AsyncIterable<
+    const requestParams = this.buildRequestParams(payload, tools, options, true);
+    const stream = (await this.client.chat.completions.create(requestParams as never, {
+      signal: options?.signal,
+    })) as unknown as AsyncIterable<
       Record<string, unknown>
     >;
 
@@ -109,9 +112,8 @@ export class OpenAICompatibleAdapter {
       const rawToolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
       for (const entry of rawToolCalls) {
         const toolCallDelta = (entry ?? {}) as Record<string, unknown>;
-        const index =
-          typeof toolCallDelta.index === 'number' && Number.isFinite(toolCallDelta.index) ? toolCallDelta.index : 0;
-        const state = toolStates.get(index) ?? { argumentsText: '', started: false };
+        const index = normalizeStreamingToolCallIndex(toolCallDelta.index);
+        const state = toolStates.get(index) ?? createStreamingToolCallState();
         const functionDelta =
           toolCallDelta.function && typeof toolCallDelta.function === 'object'
             ? (toolCallDelta.function as Record<string, unknown>)
@@ -123,14 +125,21 @@ export class OpenAICompatibleAdapter {
         if (typeof functionDelta?.name === 'string' && functionDelta.name.trim().length > 0) {
           state.name = functionDelta.name.trim();
         }
-        if (!state.started && state.id && state.name) {
-          state.started = true;
-          yield { type: 'tool_start', data: { id: state.id, name: state.name } };
-        }
-
         if (typeof functionDelta?.arguments === 'string' && functionDelta.arguments.length > 0) {
           state.argumentsText += functionDelta.arguments;
-          yield { type: 'tool_input', data: functionDelta.arguments };
+          if (state.started && state.id) {
+            yield { type: 'tool_input', data: { chunk: functionDelta.arguments, id: state.id, index } };
+          } else {
+            state.pendingArgumentChunks.push(functionDelta.arguments);
+          }
+        }
+        if (!state.started && state.id && state.name) {
+          state.started = true;
+          yield { type: 'tool_start', data: { id: state.id, name: state.name, index } };
+          if (state.pendingArgumentChunks.length > 0) {
+            yield { type: 'tool_input', data: { chunk: state.pendingArgumentChunks.join(''), id: state.id, index } };
+            state.pendingArgumentChunks = [];
+          }
         }
 
         toolStates.set(index, state);
@@ -162,17 +171,24 @@ export class OpenAICompatibleAdapter {
     return response;
   }
 
+  buildPromptEstimationPayload(
+    payload: PreparedProviderPayload,
+    tools?: ToolSchema[],
+    options?: LLMRequestOptions
+  ): unknown {
+    return this.buildRequestParams(payload, tools, options, true);
+  }
+
   private buildRequestParams(
-    messages: Message[],
+    payload: PreparedProviderPayload,
     tools: ToolSchema[] | undefined,
-    systemPrompt: string | undefined,
     options: LLMRequestOptions | undefined,
     stream: boolean
   ): Record<string, unknown> {
     const requestParams: Record<string, unknown> = {
       model: this.model,
       max_tokens: options?.maxTokens ?? this.maxTokens,
-      messages: this.convertMessages(messages, systemPrompt),
+      messages: this.convertMessages(payload.messages, payload.systemPrompt),
       stream,
     };
 
@@ -209,7 +225,7 @@ export class OpenAICompatibleAdapter {
       });
     }
 
-    const protocol = buildToolProtocolFrames(messages);
+    const protocol = prepareToolProtocol(messages);
     if (protocol.assistantToolBundleCount > 0) {
       llmLogger.debug(
         `[OpenAICompatibleAdapter] Replay protocol bundles=${protocol.assistantToolBundleCount} tool_results=${protocol.toolResultMessageCount} max_bundle=${protocol.maxToolResultsPerBundle}`
@@ -225,14 +241,7 @@ export class OpenAICompatibleAdapter {
         continue;
       }
       if (this.hasUnbundledToolCalls(frame.message)) {
-        payload.push(this.convertAssistantMessage({ ...frame.message, toolCalls: undefined }));
-        payload.push({
-          role: 'user',
-          content: this.buildMalformedToolProtocolNotice(
-            'assistant tool_use replay was dropped because aligned tool_result messages were missing'
-          ),
-        });
-        continue;
+        throw new Error('[OpenAICompatibleAdapter] provider payload must not contain unbundled assistant tool calls');
       }
       payload.push(this.convertSingleMessage(frame.message));
     }
@@ -246,11 +255,11 @@ export class OpenAICompatibleAdapter {
     }
 
     if (message.role === 'tool') {
-      return this.convertToolMessage(message);
+      throw new Error('[OpenAICompatibleAdapter] provider payload must not contain unbundled tool_result messages');
     }
 
     if (message.role === 'system') {
-      return { role: 'system', content: messageTextContent(message.content) };
+      throw new Error('[OpenAICompatibleAdapter] provider payload must not contain system role messages');
     }
 
     return {
@@ -264,8 +273,17 @@ export class OpenAICompatibleAdapter {
       role: 'assistant',
     };
     const textContent = messageTextContent(message.content);
-    const replayContent = this.buildAssistantReplayContent(message.thinking, textContent);
-    assistantPayload.content = replayContent.length > 0 ? replayContent : null;
+    const thinking = String(message.thinking ?? '');
+    const replayThinkingAsReasoningContent = this.shouldReplayThinkingAsReasoningContent(message);
+    if (replayThinkingAsReasoningContent) {
+      assistantPayload.reasoning_content = thinking;
+    }
+    const replayContent = this.buildAssistantReplayContent(
+      replayThinkingAsReasoningContent ? undefined : thinking,
+      textContent
+    );
+    assistantPayload.content =
+      replayContent.length > 0 ? replayContent : replayThinkingAsReasoningContent ? '' : null;
     if (message.toolCalls && message.toolCalls.length > 0) {
       assistantPayload.tool_calls = message.toolCalls.map((toolCall) => ({
         id: toolCall.id,
@@ -279,13 +297,30 @@ export class OpenAICompatibleAdapter {
     return assistantPayload;
   }
 
+  private shouldReplayThinkingAsReasoningContent(message?: Message): boolean {
+    const runtime = this.llmRuntime;
+    const metadata =
+      message?.metadata && typeof message.metadata === 'object'
+        ? (message.metadata as Record<string, unknown>)
+        : {};
+    const candidates = [
+      runtime?.profileId,
+      runtime?.model,
+      runtime?.apiBase,
+      metadata.llmProviderProfileId,
+      metadata.llmProvider,
+      metadata.llmModel,
+      this.model,
+    ]
+      .map((value) => String(value ?? '').toLowerCase())
+      .filter(Boolean);
+    return candidates.some((value) => value.includes('deepseek'));
+  }
+
   private convertToolMessage(message: Message): Record<string, unknown> {
     const toolCallId = message.toolCallId?.trim() ?? '';
     if (!toolCallId) {
-      return {
-        role: 'user',
-        content: this.buildMalformedToolProtocolNotice('orphan tool_result replay was converted to user note'),
-      };
+      throw new Error('[OpenAICompatibleAdapter] tool_result replay requires non-empty toolCallId');
     }
     return {
       role: 'tool',
@@ -296,10 +331,6 @@ export class OpenAICompatibleAdapter {
 
   private hasUnbundledToolCalls(message: Message): boolean {
     return message.role === 'assistant' && Array.isArray(message.toolCalls) && message.toolCalls.length > 0;
-  }
-
-  private buildMalformedToolProtocolNotice(reason: string): string {
-    return `[TOOLCALL_FAILED] ${reason}. next_action=Issue fresh tool calls and continue from latest valid state.`;
   }
 
   private buildAssistantReplayContent(thinking: string | undefined, textContent: string): string {
@@ -360,8 +391,8 @@ export class OpenAICompatibleAdapter {
     const inlineThinkNormalized = normalizeInlineThinkingFromContent(rawContent);
     const content = inlineThinkNormalized.content;
     const thinking = appendThinkingText(this.extractReasoningText(message), inlineThinkNormalized.thinking);
-    const toolCalls = this.extractToolCalls(message.tool_calls);
-    const usage = this.extractUsage(response);
+    const toolCalls = parseOpenAiToolCalls(message.tool_calls);
+    const usage = normalizeTokenUsage(response.usage, 'openai');
     const finishReason = normalizeOpenAiFinishReason(choice.finish_reason, toolCalls.length);
 
     llmLogger.info(
@@ -385,19 +416,7 @@ export class OpenAICompatibleAdapter {
     finishReason?: string;
     toolStates: Map<number, StreamingToolCallState>;
   }): LLMResponse {
-    const orderedStates = Array.from(input.toolStates.entries())
-      .sort((left, right) => left[0] - right[0])
-      .map((entry) => entry[1]);
-    const toolCalls: ToolCall[] = orderedStates
-      .filter((state) => state.name)
-      .map((state, index) => ({
-        id: state.id || `openai-tool-${index + 1}`,
-        type: 'function',
-        function: {
-          name: state.name || `tool_${index + 1}`,
-          arguments: parseToolArguments(state.argumentsText),
-        },
-      }));
+    const toolCalls = buildToolCallsFromStreamingStates(input.toolStates);
     const normalizedFinishReason = normalizeOpenAiFinishReason(input.finishReason, toolCalls.length);
 
     return {
@@ -479,226 +498,7 @@ export class OpenAICompatibleAdapter {
     return undefined;
   }
 
-  private extractToolCalls(rawToolCalls: unknown): ToolCall[] {
-    if (!Array.isArray(rawToolCalls)) {
-      return [];
-    }
-
-    return rawToolCalls
-      .map((entry, index) => {
-        if (!entry || typeof entry !== 'object') {
-          return null;
-        }
-        const record = entry as Record<string, unknown>;
-        const fn =
-          record.function && typeof record.function === 'object' ? (record.function as Record<string, unknown>) : {};
-        const name = typeof fn.name === 'string' ? fn.name.trim() : '';
-        if (!name) {
-          return null;
-        }
-        const rawArguments = typeof fn.arguments === 'string' ? fn.arguments : '';
-        return {
-          id: typeof record.id === 'string' && record.id.trim().length > 0 ? record.id.trim() : `openai-tool-${index + 1}`,
-          type: 'function' as const,
-          function: {
-            name,
-            arguments: parseToolArguments(rawArguments),
-          },
-        };
-      })
-      .filter((item): item is ToolCall => item !== null);
-  }
-
   private extractUsage(source: Record<string, unknown>): TokenUsage | undefined {
-    const usage = source.usage;
-    if (!usage || typeof usage !== 'object') {
-      return undefined;
-    }
-    const usageRecord = usage as Record<string, unknown>;
-    const promptTokens = typeof usageRecord.prompt_tokens === 'number' ? usageRecord.prompt_tokens : undefined;
-    const completionTokens =
-      typeof usageRecord.completion_tokens === 'number' ? usageRecord.completion_tokens : undefined;
-    const totalTokens = typeof usageRecord.total_tokens === 'number' ? usageRecord.total_tokens : undefined;
-
-    if (
-      promptTokens === undefined &&
-      completionTokens === undefined &&
-      totalTokens === undefined
-    ) {
-      return undefined;
-    }
-
-    const resolvedPrompt = promptTokens ?? 0;
-    const resolvedCompletion = completionTokens ?? 0;
-    return {
-      promptTokens: resolvedPrompt,
-      completionTokens: resolvedCompletion,
-      totalTokens: totalTokens ?? resolvedPrompt + resolvedCompletion,
-    };
-  }
-}
-
-function resolveOpenAiReasoningEffort(
-  llmRuntime: ResolvedLlmRuntimeConfig | undefined
-): 'low' | 'medium' | 'high' | undefined {
-  if (!llmRuntime || llmRuntime.reasoningPreset === 'off' || llmRuntime.capabilities.reasoningEffort !== true) {
-    return undefined;
-  }
-
-  const override = llmRuntime.providerOptions?.openai?.reasoningEffort;
-  if (override === 'low' || override === 'medium' || override === 'high') {
-    return override;
-  }
-
-  switch (llmRuntime.reasoningPreset) {
-    case 'low':
-      return 'low';
-    case 'medium':
-      return 'medium';
-    case 'high':
-      return 'high';
-    default:
-      return undefined;
-  }
-}
-
-function normalizeOpenAiFinishReason(rawFinishReason: unknown, toolCallCount: number): string {
-  if (typeof rawFinishReason !== 'string' || rawFinishReason.trim().length === 0) {
-    return toolCallCount > 0 ? 'tool_use' : 'end_turn';
-  }
-
-  switch (rawFinishReason) {
-    case 'stop':
-      return 'end_turn';
-    case 'tool_calls':
-    case 'function_call':
-      return 'tool_use';
-    case 'length':
-      return 'max_tokens';
-    default:
-      return rawFinishReason;
-  }
-}
-
-function appendThinkingText(existing: string | undefined, next: string | undefined): string | undefined {
-  const values = [String(existing ?? '').trim(), String(next ?? '').trim()].filter((item) => item.length > 0);
-  return values.length > 0 ? values.join('\n\n') : undefined;
-}
-
-function normalizeInlineThinkingFromContent(content: string): { content: string; thinking?: string } {
-  let remaining = String(content || '');
-  const thinkingParts: string[] = [];
-
-  while (true) {
-    const leadingWhitespaceMatch = remaining.match(/^\s*/u);
-    const leadingWhitespace = leadingWhitespaceMatch?.[0] ?? '';
-    const afterWhitespace = remaining.slice(leadingWhitespace.length);
-    if (!afterWhitespace.startsWith('<think>')) {
-      break;
-    }
-    const closeIndex = afterWhitespace.indexOf('</think>', '<think>'.length);
-    if (closeIndex < 0) {
-      break;
-    }
-    const inner = afterWhitespace.slice('<think>'.length, closeIndex).trim();
-    if (inner.length > 0) {
-      thinkingParts.push(inner);
-    }
-    remaining = afterWhitespace.slice(closeIndex + '</think>'.length);
-  }
-
-  return {
-    content: thinkingParts.length > 0 ? remaining.replace(/^\s+/u, '') : content,
-    thinking: thinkingParts.length > 0 ? thinkingParts.join('\n\n') : undefined,
-  };
-}
-
-function consumeStreamingThinkPrefix(
-  state: StreamingThinkPrefixState,
-  contentDelta: string,
-  finalize: boolean
-): { textDeltas: string[]; thinkingDeltas: string[] } {
-  if (contentDelta.length > 0) {
-    state.buffer += contentDelta;
-  }
-
-  const textDeltas: string[] = [];
-  const thinkingDeltas: string[] = [];
-
-  while (true) {
-    if (state.prefixResolved) {
-      if (state.buffer.length > 0) {
-        textDeltas.push(state.buffer);
-        state.buffer = '';
-      }
-      return { textDeltas, thinkingDeltas };
-    }
-
-    const leadingWhitespaceMatch = state.buffer.match(/^\s*/u);
-    const leadingWhitespace = leadingWhitespaceMatch?.[0] ?? '';
-    const afterWhitespace = state.buffer.slice(leadingWhitespace.length);
-
-    if (afterWhitespace.length === 0) {
-      if (finalize) {
-        state.prefixResolved = true;
-        state.buffer = '';
-      }
-      return { textDeltas, thinkingDeltas };
-    }
-
-    if (afterWhitespace.startsWith('<think>')) {
-      const closeIndex = afterWhitespace.indexOf('</think>', '<think>'.length);
-      if (closeIndex < 0) {
-        if (finalize) {
-          const fallbackText = state.consumedThinkBlocks ? afterWhitespace : state.buffer;
-          if (fallbackText.length > 0) {
-            textDeltas.push(fallbackText);
-          }
-          state.prefixResolved = true;
-          state.buffer = '';
-        }
-        return { textDeltas, thinkingDeltas };
-      }
-
-      const inner = afterWhitespace.slice('<think>'.length, closeIndex).trim();
-      if (inner.length > 0) {
-        thinkingDeltas.push(inner);
-      }
-      state.consumedThinkBlocks = true;
-      state.buffer = afterWhitespace.slice(closeIndex + '</think>'.length);
-      continue;
-    }
-
-    if (!finalize && '<think>'.startsWith(afterWhitespace)) {
-      return { textDeltas, thinkingDeltas };
-    }
-
-    const text = state.consumedThinkBlocks ? afterWhitespace.replace(/^\s+/u, '') : state.buffer;
-    if (text.length > 0) {
-      textDeltas.push(text);
-    }
-    state.prefixResolved = true;
-    state.buffer = '';
-    return { textDeltas, thinkingDeltas };
-  }
-}
-
-function parseToolArguments(rawArguments: string): Record<string, unknown> {
-  const trimmed = rawArguments.trim();
-  if (trimmed.length === 0) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return { value: parsed };
-  } catch (error) {
-    llmLogger.warn(
-      `[OpenAICompatibleAdapter] Failed to parse tool arguments; preserving raw payload. error=${String(error)}`
-    );
-    return { _raw: rawArguments };
+    return normalizeTokenUsage(source.usage, 'openai');
   }
 }

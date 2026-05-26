@@ -1,4 +1,4 @@
-export { Tool, createToolSchema, successResult, errorResult } from './Tool.js';
+export { Tool, createToolSchema, successResult, errorResult, type ToolExecuteOptions } from './Tool.js';
 export { ToolRegistry } from './ToolRegistry.js';
 export { 
   ReadFileTool, 
@@ -30,7 +30,6 @@ export {
   type SubAgentManageToolOptions,
 } from './SubAgentManageTool.js';
 export {
-  UpdatePlanTool,
   RequestUserInputTool,
   FinalizePlanTool,
   createPlanModeTools,
@@ -46,7 +45,24 @@ export {
   WebFetchTool,
   createWebTools,
 } from './WebTools.js';
+export {
+  SendFileToUserTool,
+  createSendFileToUserTool,
+  type SendFileToUserLink,
+  type SendFileToUserLinkIssuer,
+  type SendFileToUserToolOptions,
+} from './SendFileToUserTool.js';
 export { PermissionManager, createPermissionManager } from './PermissionManager.js';
+export {
+  DEFAULT_TOOLSETS,
+  SUBAGENT_PROTECTED_TOOL_NAMES,
+  filterSubAgentToolRegistry,
+  intersectAllowedToolNames,
+  isSubAgentProtectedTool,
+  normalizeAllowedToolNames,
+  normalizeToolName,
+} from './CapabilityCatalog.js';
+export { ToolAccessBase, isPathWithinRealDir, type ToolAccessBaseOptions } from './ToolAccessBase.js';
 export {
   createToolRegistrationState,
   registerToolWithDedupe,

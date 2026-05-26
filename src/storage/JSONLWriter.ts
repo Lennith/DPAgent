@@ -1,22 +1,7 @@
 import * as fs from 'fs';
-import * as path from 'path';
 import * as crypto from 'crypto';
 import type { PersistedMessage } from '../types.js';
-
-// Simple file lock to prevent concurrent writes
-const fileLocks = new Map<string, boolean>();
-
-function acquireLock(filePath: string): boolean {
-  if (fileLocks.get(filePath)) {
-    return false;
-  }
-  fileLocks.set(filePath, true);
-  return true;
-}
-
-function releaseLock(filePath: string): void {
-  fileLocks.delete(filePath);
-}
+import { acquireInMemoryLockOrThrow, releaseInMemoryLock } from './in-memory-lock.js';
 
 export class JSONLWriter {
   private filePath: string;
@@ -26,29 +11,22 @@ export class JSONLWriter {
   }
 
   append(message: PersistedMessage): void {
-    // Wait for lock if another operation is in progress
-    while (!acquireLock(this.filePath)) {
-      // Simple spinlock - in practice, contention should be rare
-      // Consider using async/await with setTimeout for production
-    }
+    acquireInMemoryLockOrThrow(this.filePath);
     try {
       const line = JSON.stringify(message) + '\n';
       fs.appendFileSync(this.filePath, line, 'utf-8');
     } finally {
-      releaseLock(this.filePath);
+      releaseInMemoryLock(this.filePath);
     }
   }
 
   appendAll(messages: PersistedMessage[]): void {
-    // Wait for lock if another operation is in progress
-    while (!acquireLock(this.filePath)) {
-      // Simple spinlock - in practice, contention should be rare
-    }
+    acquireInMemoryLockOrThrow(this.filePath);
     try {
       const lines = messages.map(m => JSON.stringify(m)).join('\n') + '\n';
       fs.appendFileSync(this.filePath, lines, 'utf-8');
     } finally {
-      releaseLock(this.filePath);
+      releaseInMemoryLock(this.filePath);
     }
   }
 

@@ -3,20 +3,34 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { MiniMaxAgent } from '../src/index.js';
+import { DPAgent } from '../src/index.js';
+import {
+  ensureDir,
+  isDirectCliInvocation,
+  parseFlagArgs,
+  resolveOutputRoot,
+  writeJsonArtifact,
+  writeTextArtifact,
+} from './lib/script-cli-utils.js';
+import {
+  detectCompletionMarker,
+  extractToolCalls,
+  extractToolResults,
+  parseStructuredLines,
+  previousRuntimeFromEvaluation,
+  validateRequiredOperations,
+} from './lib/eval-toolcall-context-core.js';
 import type {
   AgentConfig,
   ContextEvent,
   ContextPrecompressEvent,
   ContextRef,
-  MiniMaxRunResult,
+  DPAgentRunResult,
 } from '../src/types.js';
 
 const ROOT = process.cwd();
 const DONE_MARKER = '\u3010\u5b8c\u6210\uff01\u3011';
 const REPORT_END_MARKER = '\u3010\u6c47\u62a5\u7ed3\u675f\uff01\u3011';
-const REQUIRED_MARKERS = [DONE_MARKER, REPORT_END_MARKER];
 
 type RoundMode = 'work' | 'review';
 
@@ -83,8 +97,6 @@ interface RoundEvaluation {
   minToolCalls: number;
   validatedOperations: string[];
   toolValidationFlags: string[];
-  prevToolsExpected?: string;
-  prevToolsActual?: string;
   maxCompressionDurationMs?: number;
   flags: string[];
   ok: boolean;
@@ -94,6 +106,9 @@ interface PreviousRoundRuntime {
   round: number;
   token: string;
   uniqueToolNames: string[];
+  seedCode: string;
+  seedValue: string;
+  status: string;
 }
 
 interface EvalArgs {
@@ -124,10 +139,6 @@ interface SessionReport {
   failureFlagCounts: Record<string, number>;
   maxCompressionDurationMs?: number;
   rounds: RoundEvaluation[];
-}
-
-function ensureDir(dirPath: string): void {
-  fs.mkdirSync(dirPath, { recursive: true });
 }
 
 function padRound(round: number): string {
@@ -162,21 +173,7 @@ function parseBooleanArg(value: string | undefined, fallback: boolean): boolean 
 }
 
 function parseArgs(argv: string[]): EvalArgs {
-  const map = new Map<string, string>();
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
-    if (!token.startsWith('--')) {
-      continue;
-    }
-    const key = token.slice(2);
-    const next = argv[index + 1];
-    if (next && !next.startsWith('--')) {
-      map.set(key, next);
-      index += 1;
-    } else {
-      map.set(key, 'true');
-    }
-  }
+  const map = parseFlagArgs(argv);
 
   const roundsRaw = Number.parseInt(String(map.get('rounds') || '30'), 10);
   const providerRaw = String(map.get('provider') || '').trim().toLowerCase();
@@ -184,9 +181,7 @@ function parseArgs(argv: string[]): EvalArgs {
     rounds: Number.isFinite(roundsRaw) ? Math.max(1, Math.min(30, roundsRaw)) : 30,
     dryRun: parseBooleanArg(map.get('dry-run'), false),
     keepTemp: parseBooleanArg(map.get('keep-temp'), false),
-    outputRoot: path.resolve(
-      String(map.get('output-root') || path.join(ROOT, 'logs', `toolcall-context-session-${timestampSlug()}`))
-    ),
+    outputRoot: resolveOutputRoot(map.get('output-root'), path.join(ROOT, 'logs', `toolcall-context-session-${timestampSlug()}`)),
     configPath: path.resolve(String(map.get('config-path') || path.join(ROOT, 'config.yaml'))),
     provider:
       providerRaw === 'anthropic' || providerRaw === 'openai'
@@ -211,79 +206,8 @@ function uniquePreserveOrder(values: string[]): string[] {
   return out;
 }
 
-function normalizeCompletionMarkerTail(value: string): string {
-  let normalized = String(value || '').replace(/\s+$/u, '');
-  for (;;) {
-    const next = normalized.replace(/(?:\r?\n|\s)*```[^\r\n]*\s*$/u, '').replace(/\s+$/u, '');
-    if (next === normalized) {
-      return normalized;
-    }
-    normalized = next;
-  }
-}
-
-export function detectCompletionMarker(value: string): { matched: boolean; marker?: string; duplicateTail: boolean } {
-  const normalized = normalizeCompletionMarkerTail(value);
-  const marker = REQUIRED_MARKERS.find((item) => normalized.endsWith(item));
-  if (!marker) {
-    return { matched: false, duplicateTail: false };
-  }
-  const prefix = normalized.slice(0, Math.max(0, normalized.length - marker.length));
-  const duplicateTail = REQUIRED_MARKERS.some((item) => prefix.endsWith(item));
-  return {
-    matched: !duplicateTail,
-    marker,
-    duplicateTail,
-  };
-}
-
-export function parseStructuredLines(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  const lines = String(text || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !REQUIRED_MARKERS.includes(line));
-  for (const line of lines) {
-    const normalized = line.replace(/^[-*]\s+/, '');
-    const match = normalized.match(/^(?:\*\*|`)?([A-Z_]+)(?:\*\*|`)?\s*[:=]\s*(.*)$/);
-    if (!match) {
-      continue;
-    }
-    const key = match[1];
-    out[key] = normalizeStructuredValue(match[2].trim());
-  }
-  return out;
-}
-
-function normalizeStructuredValue(value: string): string {
-  let normalized = String(value || '').trim();
-  const backtickWrapped = normalized.match(/^`([^`]*)`(?:\s*\([^)]*\))?$/);
-  if (backtickWrapped) {
-    return backtickWrapped[1].trim();
-  }
-  const boldWrapped = normalized.match(/^\*\*([^*]*)\*\*(?:\s*\([^)]*\))?$/);
-  if (boldWrapped) {
-    return boldWrapped[1].trim();
-  }
-  const trailingDecoratedNote = normalized.match(/^(.*?)(?:\*\*|`)\s*\([^)]*\)\s*$/u);
-  if (trailingDecoratedNote) {
-    normalized = trailingDecoratedNote[1].trim();
-  }
-  normalized = normalized.replace(/(?:\*\*|`)$/u, '');
-  normalized = normalized.replace(/^(?:\*\*|`)/u, '');
-  return normalized;
-}
-
 function compareFields(actual: Record<string, string>, expected: Record<string, string>): boolean {
   return Object.entries(expected).every(([key, value]) => actual[key] === value);
-}
-
-function previewText(value: string, maxChars = 180): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, maxChars - 16))}...(truncated)`;
 }
 
 function createSeeds(): SeedSpec[] {
@@ -364,7 +288,6 @@ function buildWorkRoundSpec(
   const previousPath = previous ? outputPathForRound(workspaceDir, previous.round) : '';
   const requireGrep = round % 5 === 0 || round % 7 === 0;
   const requiredTools = uniquePreserveOrder([
-    'list_directory',
     'read_file',
     requireGrep ? 'grep' : '',
     'write_file',
@@ -384,7 +307,6 @@ function buildWorkRoundSpec(
   const relativePrevious = previousPath ? path.relative(workspaceDir, previousPath).replace(/\\/g, '/') : '';
   const expectedArtifact = renderArtifact(fieldOrder, expectedFields);
   const requiredOperations: RequiredOperation[] = uniquePreserveOrder([
-    'list_seeds',
     'read_seed',
     previousPath ? 'read_previous' : '',
     requireGrep ? 'grep_existing_tokens' : '',
@@ -392,8 +314,6 @@ function buildWorkRoundSpec(
     'verify_output',
   ]).map((label) => {
     switch (label) {
-      case 'list_seeds':
-        return { label, name: 'list_directory', args: { path: 'seeds' } };
       case 'read_seed':
         return { label, name: 'read_file', args: { path: relativeSeed } };
       case 'read_previous':
@@ -412,17 +332,16 @@ function buildWorkRoundSpec(
     `Round ${round} of ${totalRounds}. This is a context continuity work round.`,
     'You must actually use tools and verify against the real workspace. Do not answer from memory alone.',
     'Required workflow:',
-    'Use the exact tool names and paths below. Do not pass `pattern` to `list_directory` or `read_file`, and do not call `list_directory` on file paths.',
-    '1. Use `list_directory` on `seeds`.',
-    `2. Read \`${relativeSeed}\`.`,
+    'Use the exact tool names and paths below. Do not pass `pattern` to `read_file`, and do not replace `read_file` with directory listing on file paths.',
+    `1. Read \`${relativeSeed}\`.`,
     previousPath
-      ? `3. Read \`${relativePrevious}\`.`
-      : '3. There is no previous round file, so use PREV_TOKEN=ROOT00.',
+      ? `2. Read \`${relativePrevious}\`.`
+      : '2. There is no previous round file, so use PREV_TOKEN=ROOT00.',
     requireGrep
-      ? '4. Use `grep` with path exactly `session-files` and pattern exactly `^TOKEN=` before writing the new file.'
-      : '4. You may skip grep this round.',
-    `5. Write \`${relativeOutput}\`.`,
-    `6. Read back \`${relativeOutput}\` to verify it.`,
+      ? '3. Use `grep` with path exactly `session-files` and pattern exactly `^TOKEN=` before writing the new file.'
+      : '3. You may skip grep this round.',
+    `4. Write \`${relativeOutput}\`.`,
+    `5. Read back \`${relativeOutput}\` to verify it.`,
     '',
     'Use exact values from the files. Do not abbreviate, trim, or transform token strings.',
     'From the seed file extract `SEED_CODE` and `SEED_VALUE`.',
@@ -465,50 +384,57 @@ function buildReviewRoundSpec(
   previous: PreviousRoundRuntime
 ): RoundSpec {
   const prevToken = previous.token;
-  const expectedPrevTools = previous.uniqueToolNames.join(',');
   const token = nominalReviewToken(round, seed);
   const outputPath = outputPathForRound(workspaceDir, round);
   const previousPath = outputPathForRound(workspaceDir, previous.round);
-  const fieldOrder = ['ROUND', 'MODE', 'TOKEN', 'REVIEW_OF', 'PREV_TOOLS', 'SEED_VALUE', 'PREV_TOKEN', 'STATUS'];
+  const fieldOrder = [
+    'ROUND',
+    'MODE',
+    'TOKEN',
+    'REVIEW_OF',
+    'PREV_SEED_CODE',
+    'PREV_SEED_VALUE',
+    'SEED_VALUE',
+    'PREV_TOKEN',
+    'STATUS',
+  ];
   const expectedFields: Record<string, string> = {
     ROUND: padRound(round),
     MODE: 'REVIEW',
     TOKEN: token,
     REVIEW_OF: padRound(previous.round),
-    PREV_TOOLS: expectedPrevTools,
+    PREV_SEED_CODE: previous.seedCode,
+    PREV_SEED_VALUE: previous.seedValue,
     SEED_VALUE: seed.value,
     PREV_TOKEN: prevToken,
-    STATUS: 'OK',
+    STATUS: previous.status || 'OK',
   };
   const relativeOutput = path.relative(workspaceDir, outputPath).replace(/\\/g, '/');
   const relativeSeed = path.relative(workspaceDir, seedPath(workspaceDir, seed)).replace(/\\/g, '/');
   const relativePrevious = path.relative(workspaceDir, previousPath).replace(/\\/g, '/');
   const expectedArtifact = renderArtifact(fieldOrder, expectedFields);
   const requiredOperations: RequiredOperation[] = [
-    { label: 'list_session_files', name: 'list_directory', args: { path: 'session-files' } },
     { label: 'read_previous', name: 'read_file', args: { path: relativePrevious } },
     { label: 'read_seed', name: 'read_file', args: { path: relativeSeed } },
     { label: 'write_output', name: 'write_file', args: { path: relativeOutput, content: expectedArtifact } },
     { label: 'verify_output', name: 'read_file', args: { path: relativeOutput } },
   ];
   const prompt = [
-    `Round ${round} of ${totalRounds}. This is a toolcall review round.`,
-    'You must actually use tools for file verification, but PREV_TOOLS must come from the immediately previous round in this same session.',
-    'Do not invent tool names. Report the exact unique tool names from the previous round, comma-separated with ASCII commas and no spaces, in first-seen order.',
-    'PREV_TOOLS is deduplicated by tool name, not a raw tool call trace. If the previous round called `read_file` multiple times, include `read_file` only once.',
-    'PREV_TOOLS must contain only bare tool names. Include `write_file` if the previous round called it. Do not add parentheses, labels, or explanations.',
-    'Example PREV_TOOLS format: list_directory,read_file,grep,write_file',
-    'Example dedupe rule: previous calls `list_directory, read_file, read_file, write_file, read_file` must become `list_directory,read_file,write_file`.',
+    `Round ${round} of ${totalRounds}. This is a context continuity review round.`,
+    'You must actually use tools for file verification and derive prior-round facts from the real workspace, not from loose transcript memory.',
     'Required workflow:',
-    'Use the exact tool names and paths below. Do not pass `pattern` to `list_directory` or `read_file`, and do not call `list_directory` on file paths.',
-    '1. Use `list_directory` on `session-files`.',
-    `2. Read \`${relativePrevious}\`.`,
-    `3. Read \`${relativeSeed}\`.`,
-    `4. Write \`${relativeOutput}\`.`,
-    `5. Read back \`${relativeOutput}\` to verify it.`,
+    'Use the exact tool names and paths below. Do not pass `pattern` to `read_file`, and do not replace `read_file` with directory listing on file paths.',
+    `1. Read \`${relativePrevious}\`.`,
+    `2. Read \`${relativeSeed}\`.`,
+    `3. Write \`${relativeOutput}\`.`,
+    `4. Read back \`${relativeOutput}\` to verify it.`,
     '',
     'From the previous round file extract `TOKEN` and copy that exact value into `PREV_TOKEN`.',
+    'From the previous round file extract `SEED_CODE` and copy it into `PREV_SEED_CODE`.',
+    'From the previous round file extract `SEED_VALUE` and copy it into `PREV_SEED_VALUE`.',
+    'From the previous round file extract `STATUS` and copy it into `STATUS`.',
     'PREV_TOKEN must be the bare token value only; do not append source notes or parenthetical text.',
+    'Do not summarize or reinterpret the previous round. Copy the exact field values from the file.',
     'From the current seed file extract `SEED_VALUE`.',
     `Set \`TOKEN\` exactly to \`${token}\`.`,
     'Create the file with exactly these lines and no extra lines:',
@@ -516,10 +442,11 @@ function buildReviewRoundSpec(
     'MODE=REVIEW',
     `TOKEN=${token}`,
     `REVIEW_OF=${expectedFields.REVIEW_OF}`,
-    'PREV_TOOLS=<exact previous round tool names, comma-separated with no spaces>',
+    'PREV_SEED_CODE=<copy exact previous round SEED_CODE>',
+    'PREV_SEED_VALUE=<copy exact previous round SEED_VALUE>',
     'SEED_VALUE=<from seed file>',
     'PREV_TOKEN=<copy exact previous round TOKEN>',
-    'STATUS=OK',
+    'STATUS=<copy exact previous round STATUS>',
     '',
     ...finalAnswerContractLines(),
   ].join('\n');
@@ -532,7 +459,7 @@ function buildReviewRoundSpec(
     prompt,
     expectedFields,
     expectedArtifact,
-    requiredTools: ['list_directory', 'read_file', 'write_file'],
+    requiredTools: ['read_file', 'write_file'],
     requiredOperations,
     minToolCalls: requiredOperations.length,
     reviewOfRound: previous.round,
@@ -553,7 +480,7 @@ function buildRoundSpec(
   return buildWorkRoundSpec(workspaceDir, totalRounds, round, seed, previous);
 }
 
-function extractTurnEvents(agent: MiniMaxAgent, context: ContextRef, turnId: string): ContextEvent[] {
+function extractTurnEvents(agent: DPAgent, context: ContextRef, turnId: string): ContextEvent[] {
   return agent
     .getContextManager()
     .getEventStore()
@@ -561,123 +488,8 @@ function extractTurnEvents(agent: MiniMaxAgent, context: ContextRef, turnId: str
     .filter((event) => event.turnId === turnId);
 }
 
-export function extractToolCalls(events: ContextEvent[]): ToolCallTrace[] {
-  return events
-    .filter((event) => event.type === 'tool_call')
-    .map((event) => ({
-      name: String(event.data.name ?? '').trim(),
-      toolCallId: String(event.data.toolCallId ?? '').trim() || undefined,
-      args:
-        event.data.args && typeof event.data.args === 'object' && !Array.isArray(event.data.args)
-          ? ({ ...(event.data.args as Record<string, unknown>) } satisfies Record<string, unknown>)
-          : {},
-    }))
-    .filter((item) => item.name.length > 0);
-}
-
-export function extractToolResults(events: ContextEvent[]): ToolResultTrace[] {
-  return events
-    .filter((event) => event.type === 'tool_result')
-    .map((event) => ({
-      name: String(event.data.name ?? '').trim(),
-      toolCallId: String(event.data.toolCallId ?? '').trim() || undefined,
-      content: String(event.data.content ?? ''),
-      contentPreview: previewText(String(event.data.content ?? '').trim(), 140),
-    }));
-}
-
 function readTextIfExists(filePath: string): string {
   return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
-}
-
-function normalizeArgForComparison(key: string, value: unknown): string {
-  const text = typeof value === 'string' ? value : value === undefined ? '' : String(value);
-  return key === 'content' ? normalizeArtifactText(text) : text.trim();
-}
-
-function isToolResultSuccess(result: ToolResultTrace | undefined): boolean {
-  return Boolean(result) && !String(result.content ?? '').trimStart().startsWith('Error:');
-}
-
-export function validateRequiredOperations(
-  toolCalls: ToolCallTrace[],
-  toolResults: ToolResultTrace[],
-  requiredOperations: RequiredOperation[]
-): { validatedOperations: string[]; flags: string[] } {
-  const flags: string[] = [];
-  const validatedOperations: string[] = [];
-  const usedToolCallIndexes = new Set<number>();
-  const matchedIndexesByLabel = new Map<string, number>();
-  const resultById = new Map(
-    toolResults
-      .filter((item): item is ToolResultTrace & { toolCallId: string } => Boolean(item.toolCallId))
-      .map((item) => [item.toolCallId, item] as const)
-  );
-
-  for (const operation of requiredOperations) {
-    let matchedIndex = -1;
-    let failureFlag: string | null = null;
-    let sawNamedCandidate = false;
-    for (let index = 0; index < toolCalls.length; index += 1) {
-      if (usedToolCallIndexes.has(index)) {
-        continue;
-      }
-      const candidate = toolCalls[index];
-      if (candidate.name !== operation.name) {
-        continue;
-      }
-      sawNamedCandidate = true;
-      const matchesArgs = Object.entries(operation.args).every(
-        ([key, expected]) => normalizeArgForComparison(key, candidate.args[key]) === normalizeArgForComparison(key, expected)
-      );
-      if (matchesArgs) {
-        if (!candidate.toolCallId) {
-          failureFlag ??= `tool_result_missing:${operation.label}`;
-          continue;
-        }
-        const matchedResult = resultById.get(candidate.toolCallId);
-        if (!matchedResult) {
-          failureFlag ??= `tool_result_missing:${operation.label}`;
-          continue;
-        }
-        if (!isToolResultSuccess(matchedResult)) {
-          failureFlag ??= `tool_result_error:${operation.label}`;
-          continue;
-        }
-        matchedIndex = index;
-        break;
-      }
-    }
-
-    if (matchedIndex < 0) {
-      flags.push(failureFlag ?? (sawNamedCandidate ? `required_operation_mismatch:${operation.label}` : `required_operation_missing:${operation.label}`));
-      continue;
-    }
-
-    validatedOperations.push(operation.label);
-    usedToolCallIndexes.add(matchedIndex);
-    matchedIndexesByLabel.set(operation.label, matchedIndex);
-  }
-
-  const writeIndex = matchedIndexesByLabel.get('write_output');
-  if (typeof writeIndex === 'number') {
-    for (const [label, matchedIndex] of matchedIndexesByLabel.entries()) {
-      if (label === 'write_output') {
-        continue;
-      }
-      if (label === 'verify_output') {
-        if (matchedIndex <= writeIndex) {
-          flags.push('required_operation_order:verify_output_after_write_output');
-        }
-        continue;
-      }
-      if (matchedIndex >= writeIndex) {
-        flags.push(`required_operation_order:${label}_before_write_output`);
-      }
-    }
-  }
-
-  return { validatedOperations, flags };
 }
 
 function summarizeToolCall(toolCall: ToolCallTrace): string {
@@ -695,7 +507,7 @@ function summarizeToolCall(toolCall: ToolCallTrace): string {
 
 function evaluateRound(
   spec: RoundSpec,
-  result: MiniMaxRunResult,
+  result: DPAgentRunResult,
   events: ContextEvent[],
   previous: PreviousRoundRuntime | null
 ): RoundEvaluation {
@@ -736,16 +548,6 @@ function evaluateRound(
   }
   flags.push(...toolValidation.flags);
 
-  let prevToolsExpected: string | undefined;
-  let prevToolsActual: string | undefined;
-  if (spec.mode === 'review') {
-    prevToolsExpected = previous?.uniqueToolNames.join(',') ?? '';
-    prevToolsActual = responseFields.PREV_TOOLS ?? '';
-    if (prevToolsActual !== prevToolsExpected) {
-      flags.push('previous_round_tool_report_mismatch');
-    }
-  }
-
   return {
     round: spec.round,
     mode: spec.mode,
@@ -770,8 +572,6 @@ function evaluateRound(
     minToolCalls: spec.minToolCalls,
     validatedOperations: toolValidation.validatedOperations,
     toolValidationFlags: toolValidation.flags,
-    prevToolsExpected,
-    prevToolsActual,
     flags,
     ok: flags.length === 0,
   };
@@ -825,10 +625,6 @@ function buildMarkdown(summary: SessionReport): string {
     if (round.flags.length > 0) {
       lines.push(`  flags: ${round.flags.join('; ')}`);
     }
-    if (round.mode === 'review') {
-      lines.push(`  prev_tools_expected: ${round.prevToolsExpected ?? ''}`);
-      lines.push(`  prev_tools_actual: ${round.prevToolsActual ?? ''}`);
-    }
     lines.push(`  validated_operations: ${round.validatedOperations.join(', ') || 'none'}`);
     lines.push(`  output: ${round.outputPath}`);
     if (!round.ok) {
@@ -856,21 +652,6 @@ function writeSeedFixtures(workspaceDir: string, seeds: SeedSpec[]): void {
       'utf8'
     );
   }
-}
-
-export function previousRuntimeFromEvaluation(
-  previous: PreviousRoundRuntime | null,
-  spec: RoundSpec,
-  evaluation: RoundEvaluation
-): PreviousRoundRuntime {
-  const fallbackToken = previous?.token ?? '';
-  const actualToken = evaluation.fileFields.TOKEN || fallbackToken;
-  const actualTools = evaluation.uniqueToolNames.length > 0 ? [...evaluation.uniqueToolNames] : previous ? [...previous.uniqueToolNames] : [];
-  return {
-    round: spec.round,
-    token: actualToken,
-    uniqueToolNames: actualTools,
-  };
 }
 
 async function main(): Promise<void> {
@@ -909,6 +690,9 @@ async function main(): Promise<void> {
           spec.mode === 'review'
             ? ['list_directory', 'read_file', 'write_file']
             : spec.requiredTools,
+        seedCode: spec.expectedFields.SEED_CODE ?? previous?.seedCode ?? '',
+        seedValue: spec.expectedFields.SEED_VALUE ?? previous?.seedValue ?? '',
+        status: spec.expectedFields.STATUS ?? previous?.status ?? '',
       };
       return {
         round,
@@ -922,7 +706,7 @@ async function main(): Promise<void> {
         minToolCalls: spec.minToolCalls,
       };
     });
-    fs.writeFileSync(summaryPath, JSON.stringify({ dryRun: true, workspaceDir, context, rounds }, null, 2), 'utf8');
+    writeJsonArtifact(args.outputRoot, path.basename(summaryPath), { dryRun: true, workspaceDir, context, rounds });
     console.log(`Dry-run plan saved: ${summaryPath}`);
     if (!args.keepTemp) {
       fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -930,7 +714,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const agent = new MiniMaxAgent({
+  const agent = new DPAgent({
     configPath: args.configPath,
     workspaceDir,
     runtimeDataDir,
@@ -1027,8 +811,8 @@ async function main(): Promise<void> {
     rounds: evaluations,
   };
 
-  fs.writeFileSync(summaryPath, JSON.stringify(reportPayload, null, 2), 'utf8');
-  fs.writeFileSync(markdownPath, buildMarkdown(reportPayload), 'utf8');
+  writeJsonArtifact(args.outputRoot, path.basename(summaryPath), reportPayload);
+  writeTextArtifact(args.outputRoot, path.basename(markdownPath), buildMarkdown(reportPayload));
 
   console.log(`Report saved: ${summaryPath}`);
   console.log(`Markdown saved: ${markdownPath}`);
@@ -1046,7 +830,7 @@ async function main(): Promise<void> {
   }
 }
 
-const isMainModule = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMainModule = isDirectCliInvocation(import.meta.url);
 
 if (isMainModule) {
   main()

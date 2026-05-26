@@ -3,52 +3,47 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ConfigManager } from '../../src/config/ConfigManager.js';
-import { WebServer } from '../../src/web/server/WebServer.js';
-
-type RouteHandler = (req: unknown, res: unknown) => void | Promise<void>;
-
-function createAppHarness() {
-  const getRoutes = new Map<string, RouteHandler>();
-  const postRoutes = new Map<string, RouteHandler>();
-  const app = {
-    use: () => undefined,
-    get: (route: string, handler: RouteHandler) => {
-      getRoutes.set(route, handler);
-    },
-    post: (route: string, handler: RouteHandler) => {
-      postRoutes.set(route, handler);
-    },
-    put: () => undefined,
-    patch: () => undefined,
-    delete: () => undefined,
-  };
-  return { app, getRoutes, postRoutes };
-}
-
-function createResponseRecorder() {
-  const recorder = {
-    statusCode: 200,
-    payload: undefined as unknown,
-    status(code: number) {
-      recorder.statusCode = code;
-      return recorder;
-    },
-    json(data: unknown) {
-      recorder.payload = data;
-      return recorder;
-    },
-  };
-  return recorder;
-}
+import { createWebServerDouble } from './helpers/web-server-harness.js';
+import { createResponseRecorder, createRouteAppHarness } from './helpers/web-route-harness.js';
 
 function createBaseConfig() {
-  return {
+  return new ConfigManager({
     api: {
       apiKey: 'test-api-key',
       apiBase: 'https://openai-compatible.local/v1',
       model: 'gpt-4o-mini',
       provider: 'openai' as const,
       maxOutputTokens: 4096,
+    },
+    llmProfiles: {
+      defaultProfileId: 'openai-main',
+      profiles: [
+        {
+          id: 'openai-main',
+          name: 'OpenAI Main',
+          provider: 'openai',
+          apiKey: 'test-api-key',
+          apiBase: 'https://openai-compatible.local/v1',
+          defaultModel: 'gpt-4o-mini',
+          maxOutputTokens: 4096,
+          contextWindowTokens: 65536,
+          enabled: true,
+        },
+      ],
+    },
+    contextBudget: {
+      defaultContextWindowTokens: 57500,
+      compressionTriggerRatio: 0.9,
+      postCompressionTargetRatio: 0.35,
+      minTokensAddedAfterCompression: 16000,
+      compressionMaxChars: 6000,
+      precompressKeepLlmRounds: 5,
+      precompressChunkChars: 60000,
+      precompressRetry: 1,
+      reservedOutputTokens: 16000,
+      reservedReasoningTokens: 0,
+      reservedProtocolTokens: 8000,
+      modelOverrides: {},
     },
     agent: {
       maxSteps: 100,
@@ -58,16 +53,15 @@ function createBaseConfig() {
       completionMarkerEnforcementEnabled: false,
       globalAgentsDir: 'D:/workspace/agents',
       defaultToolset: 'windows-dev',
-      skillWriteMode: 'confirm' as const,
       subAgentMaxParallelPerParent: 4,
       subAgentGlobalMaxParallel: 10,
     },
-  };
+  }).get();
 }
 
-function testConfigRoutesExposeProvider(): void {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, getRoutes } = createAppHarness();
+function testConfigRoutesExposeCanonicalProfiles(): void {
+  const server = createWebServerDouble();
+  const { app, getRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   server.app = app;
   server.wss = { clients: new Set() };
@@ -79,27 +73,270 @@ function testConfigRoutesExposeProvider(): void {
 
   server.setupRoutes();
 
-  const configHandler = getRoutes.get('/api/config');
-  assert.ok(configHandler, 'expected /api/config route');
-  const configRes = createResponseRecorder();
-  configHandler?.({}, configRes);
-  assert.equal((configRes.payload as any).provider, 'openai');
-  assert.equal((configRes.payload as any).api.provider, 'openai');
-  assert.equal((configRes.payload as any).agent.maxSteps, 100);
-  assert.equal((configRes.payload as any).agent.completionMarkerEnforcementEnabled, false);
+  assert.equal(getRoutes.has('/api/config'), false);
 
   const settingsHandler = getRoutes.get('/api/settings');
   assert.ok(settingsHandler, 'expected /api/settings route');
   const settingsRes = createResponseRecorder();
   settingsHandler?.({}, settingsRes);
-  assert.equal((settingsRes.payload as any).api.provider, 'openai');
+  assert.equal((settingsRes.payload as any).llmProfiles.defaultProfileId, 'openai-main');
+  assert.equal((settingsRes.payload as any).llmProfiles.profiles[0].contextWindowTokens, 65536);
+  assert.equal((settingsRes.payload as any).contextBudget.defaultContextWindowTokens, 57500);
+  assert.equal((settingsRes.payload as any).web.sessionShareTtlHours, 24);
   assert.equal((settingsRes.payload as any).agent.maxSteps, 100);
   assert.equal((settingsRes.payload as any).agent.completionMarkerEnforcementEnabled, false);
 }
 
-async function testConfigPostPersistsProvider(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+function testLegacyApiConfigMigratesIntoDefaultLlmProfileOnSave(): void {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minimax-legacy-config-'));
+  const configPath = path.join(rootDir, 'config.yaml');
+  fs.writeFileSync(
+    configPath,
+    [
+      'api:',
+      '  apiKey: legacy-api-key-123456789012345',
+      '  apiBase: https://legacy.example/v1',
+      '  model: legacy-model',
+      '  provider: openai',
+      '  maxOutputTokens: 12345',
+      'agent:',
+      '  workspaceDir: ./workspace',
+      '',
+    ].join('\n'),
+    'utf8'
+  );
+
+  const manager = new ConfigManager();
+  manager.loadFromYaml(configPath);
+  const loaded = manager.get();
+
+  assert.equal(loaded.llmProfiles.defaultProfileId, 'default');
+  assert.equal(loaded.llmProfiles.profiles[0].apiKey, 'legacy-api-key-123456789012345');
+  assert.equal(loaded.llmProfiles.profiles[0].apiBase, 'https://legacy.example/v1');
+  assert.equal(loaded.llmProfiles.profiles[0].defaultModel, 'legacy-model');
+  assert.equal(loaded.llmProfiles.profiles[0].provider, 'openai');
+  assert.equal(loaded.llmProfiles.profiles[0].maxOutputTokens, 12345);
+
+  manager.saveToYaml(configPath);
+  const saved = fs.readFileSync(configPath, 'utf8');
+  assert.doesNotMatch(saved, /^api:/m);
+  assert.match(saved, /apiKey: legacy-api-key-123456789012345/);
+  assert.match(saved, /defaultModel: legacy-model/);
+}
+
+function testSystemRoutesRegisterOnce(): void {
+  const server = createWebServerDouble();
+  const { app, getRouteCounts } = createRouteAppHarness();
+  const config = createBaseConfig();
+  server.app = app;
+  server.wss = { clients: new Set() };
+  server.agent = {
+    getConfig: () => config,
+  };
+  server.hasUsableApiKey = () => true;
+  server.automationRoutes = { register: () => undefined };
+
+  server.setupRoutes();
+
+  assert.equal(getRouteCounts.get('/api/health'), 1);
+  assert.equal(getRouteCounts.has('/api/config'), false);
+  assert.equal(getRouteCounts.get('/api/settings'), 1);
+}
+
+async function testLlmProfilesPutPersistsProfileContextWindowOverride(): Promise<void> {
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
+  const config = createBaseConfig();
+  let refreshRuntimeCalls = 0;
+  let persistedConfig: unknown;
+
+  server.app = app;
+  server.wss = { clients: new Set() };
+  server.agent = {
+    getConfig: () => config,
+    updateConfig: (updates: any) => {
+      if (updates.llmProfiles) {
+        (config as any).llmProfiles = updates.llmProfiles;
+      }
+    },
+  };
+  server.refreshConfigDependentRuntimes = async () => {
+    refreshRuntimeCalls += 1;
+  };
+  server.persistConfigFile = (nextConfig: unknown) => {
+    persistedConfig = nextConfig;
+  };
+  server.refreshGlobalAgentCatalog = () => undefined;
+  server.hasUsableApiKey = () => true;
+  server.automationRoutes = { register: () => undefined };
+
+  server.setupRoutes();
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
+
+  const res = createResponseRecorder();
+  await handler?.(
+    {
+      body: {
+        defaultProfileId: 'openai-main',
+        profiles: [
+          {
+            id: 'openai-main',
+            name: 'OpenAI Main',
+            provider: 'openai',
+            apiBase: 'https://openai-compatible.local/v1',
+            defaultModel: 'gpt-4o-mini',
+            maxOutputTokens: 4096,
+            contextWindowTokens: null,
+            enabled: true,
+          },
+        ],
+      },
+    },
+    res
+  );
+
+  assert.equal(refreshRuntimeCalls, 1);
+  assert.equal(config.llmProfiles.profiles[0].contextWindowTokens, undefined);
+  assert.equal((persistedConfig as any).llmProfiles.profiles[0].contextWindowTokens, undefined);
+  assert.equal((res.payload as any).llmProfiles.profiles[0].contextWindowTokens, undefined);
+}
+
+async function testRemoteAccessSettingsDoNotRewriteProfileApiKeys(): Promise<void> {
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
+  const config = createBaseConfig();
+  let persistedConfig: unknown;
+
+  server.app = app;
+  server.wss = { clients: new Set() };
+  server.agent = {
+    getConfig: () => config,
+    updateConfig: (updates: any) => {
+      if (updates.llmProfiles) {
+        (config as any).llmProfiles = updates.llmProfiles;
+      }
+      if (updates.remoteAccessAuth) {
+        (config as any).remoteAccessAuth = updates.remoteAccessAuth;
+      }
+      if (updates.web) {
+        (config as any).web = updates.web;
+      }
+    },
+    getToolsetRegistry: () => ({
+      get: (name: string) => ({ name }),
+    }),
+  };
+  server.refreshConfigDependentRuntimes = async () => undefined;
+  server.persistConfigFile = (nextConfig: unknown) => {
+    persistedConfig = nextConfig;
+  };
+  server.refreshGlobalAgentCatalog = () => undefined;
+  server.hasUsableApiKey = () => true;
+  server.automationRoutes = { register: () => undefined };
+
+  server.setupRoutes();
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
+
+  const res = createResponseRecorder();
+  await handler?.(
+    {
+      body: {
+        defaultProfileId: 'openai-main',
+        profiles: [
+          {
+            id: 'openai-main',
+            name: 'OpenAI Main',
+            provider: 'openai',
+            apiBase: 'https://openai-compatible.local/v1',
+            defaultModel: 'gpt-4o-mini',
+            maxOutputTokens: 4096,
+            contextWindowTokens: null,
+            enabled: true,
+          },
+        ],
+        remoteAccessAuth: {
+          enabled: true,
+          password: 'temporary-remote-password',
+          sessionTtlMs: 1234,
+          trustProxy: true,
+        },
+      },
+    },
+    res
+  );
+
+  assert.equal((res.payload as any).success, true);
+  assert.equal(config.llmProfiles.profiles[0].apiKey, 'test-api-key');
+  assert.equal((persistedConfig as any).llmProfiles.profiles[0].apiKey, 'test-api-key');
+  assert.equal(typeof (persistedConfig as any).remoteAccessAuth.passwordHash, 'string');
+}
+
+async function testLlmProfilesPutRollsBackContextWindowOverrideWhenRefreshFails(): Promise<void> {
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
+  const config = createBaseConfig();
+  let persistedConfig: unknown;
+  let updateCalls = 0;
+
+  server.app = app;
+  server.wss = { clients: new Set() };
+  server.agent = {
+    getConfig: () => config,
+    updateConfig: (updates: any) => {
+      updateCalls += 1;
+      if (updates.llmProfiles) {
+        (config as any).llmProfiles = updates.llmProfiles;
+      }
+    },
+  };
+  server.refreshConfigDependentRuntimes = async () => {
+    throw new Error('refresh failed');
+  };
+  server.persistConfigFile = (nextConfig: unknown) => {
+    persistedConfig = nextConfig;
+  };
+  server.refreshGlobalAgentCatalog = () => undefined;
+  server.hasUsableApiKey = () => true;
+  server.automationRoutes = { register: () => undefined };
+
+  server.setupRoutes();
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
+
+  const res = createResponseRecorder();
+  await handler?.(
+    {
+      body: {
+        defaultProfileId: 'openai-main',
+        profiles: [
+          {
+            id: 'openai-main',
+            name: 'OpenAI Main',
+            provider: 'openai',
+            apiBase: 'https://openai-compatible.local/v1',
+            defaultModel: 'gpt-4o-mini',
+            maxOutputTokens: 4096,
+            contextWindowTokens: 90000,
+            enabled: true,
+          },
+        ],
+      },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 500);
+  assert.match(String((res.payload as any).error ?? ''), /refresh failed/i);
+  assert.equal(updateCalls, 2);
+  assert.equal(config.llmProfiles.profiles[0].contextWindowTokens, 65536);
+  assert.equal((persistedConfig as any).llmProfiles.profiles[0].contextWindowTokens, 65536);
+}
+
+async function testConfigPostPersistsCanonicalContextBudget(): Promise<void> {
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   let updatePayload: unknown;
   let cleanupCalls = 0;
@@ -114,23 +351,18 @@ async function testConfigPostPersistsProvider(): Promise<void> {
       updatePayload = {
         ...(updatePayload as Record<string, unknown> | undefined),
         ...updates,
-        api: {
-          ...((updatePayload as { api?: Record<string, unknown> } | undefined)?.api ?? {}),
-          ...(updates.api ?? {}),
-        },
         agent: {
           ...((updatePayload as { agent?: Record<string, unknown> } | undefined)?.agent ?? {}),
           ...(updates.agent ?? {}),
         },
       };
-      config.api = {
-        ...config.api,
-        ...updates.api,
-      };
       config.agent = {
         ...config.agent,
         ...updates.agent,
       };
+      if (updates.contextBudget) {
+        (config as any).contextBudget = updates.contextBudget;
+      }
     },
     cleanup: async () => {
       cleanupCalls += 1;
@@ -150,33 +382,147 @@ async function testConfigPostPersistsProvider(): Promise<void> {
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = postRoutes.get('/api/config');
-  assert.ok(handler, 'expected POST /api/config route');
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const res = createResponseRecorder();
   await handler?.(
     {
       body: {
-        provider: 'openai',
         completionMarkerEnforcementEnabled: true,
         maxSteps: 42,
+        contextBudget: {
+          defaultContextWindowTokens: 80000,
+          compressionTriggerRatio: 0.5,
+          precompressKeepLlmRounds: 8,
+          precompressChunkChars: 70000,
+          compressionMaxChars: 9000,
+        },
       },
     },
     res
   );
 
-  assert.equal((updatePayload as any).api.provider, 'openai');
   assert.equal((updatePayload as any).agent.completionMarkerEnforcementEnabled, true);
   assert.equal((updatePayload as any).agent.maxSteps, 42);
-  assert.equal(config.api.provider, 'openai');
+  assert.equal((updatePayload as any).contextBudget.defaultContextWindowTokens, 80000);
+  assert.equal((updatePayload as any).contextBudget.compressionTriggerRatio, 0.5);
+  assert.equal((updatePayload as any).contextBudget.precompressKeepLlmRounds, 8);
+  assert.equal((updatePayload as any).contextBudget.precompressChunkChars, 70000);
+  assert.equal((updatePayload as any).contextBudget.compressionMaxChars, 9000);
   assert.equal(config.agent.completionMarkerEnforcementEnabled, true);
   assert.equal(config.agent.maxSteps, 42);
+  assert.equal((config as any).contextBudget.defaultContextWindowTokens, 80000);
   assert.equal(cleanupCalls, 0);
   assert.equal(refreshRuntimeCalls, 1);
-  assert.equal((persistedConfig as any).api.provider, 'openai');
   assert.equal((persistedConfig as any).agent.completionMarkerEnforcementEnabled, true);
   assert.equal((persistedConfig as any).agent.maxSteps, 42);
+  assert.equal((persistedConfig as any).contextBudget.compressionTriggerRatio, 0.5);
   assert.equal((res.payload as any).success, true);
+}
+
+async function testSettingsPutPersistsProfilesAndAgentSettingsAtomically(): Promise<void> {
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
+  const config = createBaseConfig();
+  let updatePayload: unknown;
+  let refreshRuntimeCalls = 0;
+  let persistedConfig: unknown;
+
+  server.app = app;
+  server.wss = { clients: new Set() };
+  server.agent = {
+    getConfig: () => config,
+    updateConfig: (updates: any) => {
+      updatePayload = updates;
+      if (updates.agent) {
+        config.agent = {
+          ...config.agent,
+          ...updates.agent,
+        };
+      }
+      if (updates.contextBudget) {
+        (config as any).contextBudget = updates.contextBudget;
+      }
+      if (updates.remoteAccessAuth) {
+        (config as any).remoteAccessAuth = updates.remoteAccessAuth;
+      }
+      if (updates.web) {
+        (config as any).web = updates.web;
+      }
+      if (updates.llmProfiles) {
+        (config as any).llmProfiles = updates.llmProfiles;
+      }
+    },
+    getToolsetRegistry: () => ({
+      get: (name: string) => ({ name }),
+    }),
+    reloadSkills: () => undefined,
+  };
+  server.refreshConfigDependentRuntimes = async () => {
+    refreshRuntimeCalls += 1;
+  };
+  server.persistConfigFile = (nextConfig: unknown) => {
+    persistedConfig = nextConfig;
+  };
+  server.refreshGlobalAgentCatalog = () => undefined;
+  server.hasUsableApiKey = () => true;
+  server.automationRoutes = { register: () => undefined };
+
+  server.setupRoutes();
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
+
+  const res = createResponseRecorder();
+  await handler?.(
+    {
+      body: {
+        defaultProfileId: 'openai-main',
+        profiles: [
+          {
+            id: 'openai-main',
+            name: 'OpenAI Main',
+            provider: 'openai',
+            apiBase: 'https://openai-compatible.local/v1',
+            defaultModel: 'gpt-4o-mini',
+            maxOutputTokens: 8192,
+            contextWindowTokens: 90000,
+            enabled: true,
+          },
+        ],
+        maxSteps: 55,
+        contextBudget: {
+          defaultContextWindowTokens: 88000,
+          compressionTriggerRatio: 0.8,
+        },
+        remoteAccessAuth: {
+          enabled: true,
+          password: 'new-secret',
+          sessionTtlMs: 60000,
+          trustProxy: true,
+        },
+        web: {
+          sessionShareTtlHours: 72,
+        },
+      },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.equal((res.payload as any).success, true);
+  assert.equal(refreshRuntimeCalls, 1);
+  assert.equal((updatePayload as any).agent.maxSteps, 55);
+  assert.equal((updatePayload as any).contextBudget.defaultContextWindowTokens, 88000);
+  assert.equal((updatePayload as any).llmProfiles.profiles[0].contextWindowTokens, 90000);
+  assert.equal((updatePayload as any).remoteAccessAuth.enabled, true);
+  assert.equal(typeof (updatePayload as any).remoteAccessAuth.passwordHash, 'string');
+  assert.equal((updatePayload as any).web.sessionShareTtlHours, 72);
+  assert.equal((persistedConfig as any).agent.maxSteps, 55);
+  assert.equal((persistedConfig as any).web.sessionShareTtlHours, 72);
+  assert.equal((persistedConfig as any).llmProfiles.profiles[0].contextWindowTokens, 90000);
+  assert.equal((res.payload as any).llmProfiles.profiles[0].contextWindowTokens, 90000);
+  assert.equal((res.payload as any).web.sessionShareTtlHours, 72);
 }
 
 function testConfigManagerPersistsCompletionMarkerSetting(): void {
@@ -189,6 +535,7 @@ function testConfigManagerPersistsCompletionMarkerSetting(): void {
       } as any,
     });
     writer.saveToYaml(configPath);
+    assert.doesNotMatch(fs.readFileSync(configPath, 'utf8'), /^api:/m);
 
     const reader = new ConfigManager();
     reader.loadFromYaml(configPath);
@@ -199,8 +546,8 @@ function testConfigManagerPersistsCompletionMarkerSetting(): void {
 }
 
 async function testConfigPostRejectsInvalidProvider(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   let updateCalls = 0;
   let cleanupCalls = 0;
@@ -232,14 +579,20 @@ async function testConfigPostRejectsInvalidProvider(): Promise<void> {
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = postRoutes.get('/api/config');
-  assert.ok(handler, 'expected POST /api/config route');
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const res = createResponseRecorder();
   await handler?.(
     {
       body: {
-        provider: 'custom-provider',
+        defaultProfileId: 'openai-main',
+        profiles: [
+          {
+            id: 'openai-main',
+            provider: 'custom-provider',
+          },
+        ],
       },
     },
     res
@@ -256,8 +609,8 @@ async function testConfigPostRejectsInvalidProvider(): Promise<void> {
 }
 
 async function testConfigPostValidationIsAtomic(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   let updateCalls = 0;
   let refreshRuntimeCalls = 0;
@@ -286,8 +639,8 @@ async function testConfigPostValidationIsAtomic(): Promise<void> {
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = postRoutes.get('/api/config');
-  assert.ok(handler, 'expected POST /api/config route');
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const res = createResponseRecorder();
   await handler?.(
@@ -311,9 +664,20 @@ async function testConfigPostValidationIsAtomic(): Promise<void> {
 }
 
 async function testConfigPostRollsBackWhenRefreshFails(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
+  (config as any).remoteAccessAuth = {
+    enabled: true,
+    passwordHash: 'hash',
+    passwordSalt: 'salt',
+    sessionTtlMs: 1234,
+    trustProxy: true,
+  };
+  (config as any).web = {
+    downloadLinkTtlMs: 1000,
+    sessionShareTtlHours: 36,
+  };
   let updateCalls = 0;
   let refreshRuntimeCalls = 0;
   let persistedConfig: unknown;
@@ -341,6 +705,15 @@ async function testConfigPostRollsBackWhenRefreshFails(): Promise<void> {
       if (updates.llmProfiles) {
         (config as any).llmProfiles = updates.llmProfiles;
       }
+      if (Object.prototype.hasOwnProperty.call(updates, 'contextBudget')) {
+        (config as any).contextBudget = updates.contextBudget;
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'remoteAccessAuth')) {
+        (config as any).remoteAccessAuth = updates.remoteAccessAuth;
+      }
+      if (Object.prototype.hasOwnProperty.call(updates, 'web')) {
+        (config as any).web = updates.web;
+      }
     },
     getToolsetRegistry: () => ({
       get: (name: string) => ({ name }),
@@ -363,18 +736,31 @@ async function testConfigPostRollsBackWhenRefreshFails(): Promise<void> {
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = postRoutes.get('/api/config');
-  assert.ok(handler, 'expected POST /api/config route');
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const res = createResponseRecorder();
   await handler?.(
     {
       body: {
-        apiBase: 'https://mutated.example/v1',
-        model: 'mutated-model',
         maxSteps: 77,
         skillsDir: 'D:/mutated-skills',
         globalAgentsDir: 'D:/mutated-agents',
+        contextBudget: {
+          defaultContextWindowTokens: 120000,
+          compressionTriggerRatio: 0.6,
+          precompressKeepLlmRounds: 9,
+          precompressChunkChars: 70000,
+          compressionMaxChars: 9000,
+        },
+        remoteAccessAuth: {
+          enabled: false,
+          sessionTtlMs: 5678,
+          trustProxy: false,
+        },
+        web: {
+          sessionShareTtlHours: 6,
+        },
       },
     },
     res
@@ -386,16 +772,65 @@ async function testConfigPostRollsBackWhenRefreshFails(): Promise<void> {
   assert.equal(refreshRuntimeCalls, 1);
   assert.equal(reloadSkillsCalls, 0);
   assert.equal(refreshGlobalCatalogCalls, 0);
-  assert.equal(config.api.apiBase, 'https://openai-compatible.local/v1');
-  assert.equal(config.api.model, 'gpt-4o-mini');
   assert.equal(config.agent.maxSteps, 100);
-  assert.equal((persistedConfig as any).api.apiBase, 'https://openai-compatible.local/v1');
+  assert.equal(config.agent.skillsDir, undefined);
+  assert.equal((config as any).contextBudget.defaultContextWindowTokens, 57500);
+  assert.equal((config as any).remoteAccessAuth.enabled, true);
+  assert.equal((config as any).remoteAccessAuth.sessionTtlMs, 1234);
+  assert.equal((config as any).remoteAccessAuth.trustProxy, true);
+  assert.equal((config as any).web.sessionShareTtlHours, 36);
   assert.equal((persistedConfig as any).agent.maxSteps, 100);
+  assert.equal((persistedConfig as any).agent.skillsDir, undefined);
+  assert.equal((persistedConfig as any).contextBudget.defaultContextWindowTokens, 57500);
+  assert.equal((persistedConfig as any).remoteAccessAuth.enabled, true);
+  assert.equal((persistedConfig as any).web.sessionShareTtlHours, 36);
+}
+
+async function testSettingsPutRejectsMalformedProfileEntries(): Promise<void> {
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
+  const config = createBaseConfig();
+  let updateCalls = 0;
+
+  server.app = app;
+  server.wss = { clients: new Set() };
+  server.agent = {
+    getConfig: () => config,
+    updateConfig: () => {
+      updateCalls += 1;
+    },
+    getToolsetRegistry: () => ({
+      get: (name: string) => ({ name }),
+    }),
+  };
+  server.refreshConfigDependentRuntimes = async () => undefined;
+  server.persistConfigFile = () => undefined;
+  server.refreshGlobalAgentCatalog = () => undefined;
+  server.hasUsableApiKey = () => true;
+  server.automationRoutes = { register: () => undefined };
+
+  server.setupRoutes();
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
+
+  const res = createResponseRecorder();
+  await handler?.(
+    {
+      body: {
+        profiles: [null],
+      },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 400);
+  assert.match(String((res.payload as any).error ?? ''), /Profile at index 0 must be an object/i);
+  assert.equal(updateCalls, 0);
 }
 
 async function testApiKeyPostRefreshesConfigRuntimesWithoutAgentCleanup(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   let cleanupCalls = 0;
   let refreshRuntimeCalls = 0;
@@ -406,10 +841,9 @@ async function testApiKeyPostRefreshesConfigRuntimesWithoutAgentCleanup(): Promi
   server.agent = {
     getConfig: () => config,
     updateConfig: (updates: any) => {
-      config.api = {
-        ...config.api,
-        ...updates.api,
-      };
+      if (updates.llmProfiles) {
+        (config as any).llmProfiles = updates.llmProfiles;
+      }
     },
     cleanup: async () => {
       cleanupCalls += 1;
@@ -427,43 +861,45 @@ async function testApiKeyPostRefreshesConfigRuntimesWithoutAgentCleanup(): Promi
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = postRoutes.get('/api/settings/apikey');
-  assert.ok(handler, 'expected POST /api/settings/apikey route');
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const res = createResponseRecorder();
   await handler?.(
     {
       body: {
-        apiKey: 'sk-test-api-key-1234567890',
+        defaultProfileId: 'openai-main',
+        profiles: [
+          {
+            id: 'openai-main',
+            apiKey: 'sk-test-api-key-1234567890',
+          },
+        ],
       },
     },
     res
   );
 
-  assert.equal(config.api.apiKey, 'sk-test-api-key-1234567890');
+  assert.equal(config.llmProfiles.profiles[0].apiKey, 'sk-test-api-key-1234567890');
   assert.equal(cleanupCalls, 0);
   assert.equal(refreshRuntimeCalls, 1);
-  assert.equal((persistedConfig as any).api.apiKey, 'sk-test-api-key-1234567890');
+  assert.equal((persistedConfig as any).llmProfiles.profiles[0].apiKey, 'sk-test-api-key-1234567890');
   assert.equal((res.payload as any).success, true);
 }
 
 async function testApiKeyPostRollsBackWhenRefreshFails(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   let refreshRuntimeCalls = 0;
   let persistedConfig: unknown;
-  let bootMissingApiKeySet = false;
+  (server as any).bootMissingApiKey = true;
 
   server.app = app;
   server.wss = { clients: new Set() };
   server.agent = {
     getConfig: () => config,
     updateConfig: (updates: any) => {
-      config.api = {
-        ...config.api,
-        ...updates.api,
-      };
       if (updates.llmProfiles) {
         (config as any).llmProfiles = updates.llmProfiles;
       }
@@ -483,21 +919,24 @@ async function testApiKeyPostRollsBackWhenRefreshFails(): Promise<void> {
     persistedConfig = nextConfig;
   };
   server.hasUsableApiKey = () => true;
-  server.setBootMissingApiKey = (value: boolean) => {
-    bootMissingApiKeySet = value === false;
-  };
   server.refreshGlobalAgentCatalog = () => undefined;
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = postRoutes.get('/api/settings/apikey');
-  assert.ok(handler, 'expected POST /api/settings/apikey route');
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const res = createResponseRecorder();
   await handler?.(
     {
       body: {
-        apiKey: 'sk-mutated-api-key-1234567890',
+        defaultProfileId: 'openai-main',
+        profiles: [
+          {
+            id: 'openai-main',
+            apiKey: 'sk-mutated-api-key-1234567890',
+          },
+        ],
       },
     },
     res
@@ -506,13 +945,13 @@ async function testApiKeyPostRollsBackWhenRefreshFails(): Promise<void> {
   assert.equal(res.statusCode, 500);
   assert.match(String((res.payload as any).error ?? ''), /refresh failed/i);
   assert.equal(refreshRuntimeCalls, 1);
-  assert.equal(config.api.apiKey, 'test-api-key');
-  assert.equal((persistedConfig as any).api.apiKey, 'test-api-key');
-  assert.equal(bootMissingApiKeySet, false);
+  assert.equal(config.llmProfiles.profiles[0].apiKey, 'test-api-key');
+  assert.equal((persistedConfig as any).llmProfiles.profiles[0].apiKey, 'test-api-key');
+  assert.equal((server as any).bootMissingApiKey, true);
 }
 
 async function testConfigRuntimeRefreshDoesNotCancelActiveSessionRuntime(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   let sessionCancelCalls = 0;
   let sessionCleanupCalls = 0;
   let rootCleanupCalls = 0;
@@ -558,6 +997,7 @@ async function testConfigRuntimeRefreshDoesNotCancelActiveSessionRuntime(): Prom
     ],
   ]);
   server.agent = {
+    getConfig: () => createBaseConfig(),
     cleanup: async () => {
       rootCleanupCalls += 1;
     },
@@ -580,9 +1020,39 @@ async function testConfigRuntimeRefreshDoesNotCancelActiveSessionRuntime(): Prom
   assert.equal(server.sessionRuntimes.has('sess-active'), false);
 }
 
+async function testConfigRuntimeRefreshDoesNotFailWhenAsrRefreshFails(): Promise<void> {
+  const server = createWebServerDouble();
+  let rootCleanupCalls = 0;
+  let asrRefreshCalls = 0;
+  server.activeRunContexts = new Map();
+  server.activeRunStatesByContext = new Map();
+  server.cancelingRunIds = new Set();
+  server.sessionRuntimes = new Map();
+  server.agent = {
+    cleanup: async () => {
+      rootCleanupCalls += 1;
+    },
+    getConfig: () => createBaseConfig(),
+  };
+  server.asrRuntime = {
+    refresh: async () => {
+      asrRefreshCalls += 1;
+      throw new Error('asr refresh failed');
+    },
+  };
+
+  await server.refreshConfigDependentRuntimes();
+
+  assert.equal(rootCleanupCalls, 1);
+  assert.equal(asrRefreshCalls, 1);
+}
+
 async function testAutoLoopToggleCannotBypassPendingPlanConfirmation(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  server.activeRunContexts = new Map();
+  server.activeRunStatesByContext = new Map();
+  server.cancelingRunIds = new Set();
+  const { app, postRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   const sessionId = `sess-pending-plan-${Date.now()}`;
   let ensureCalls = 0;
@@ -666,8 +1136,11 @@ async function testAutoLoopToggleCannotBypassPendingPlanConfirmation(): Promise<
 }
 
 async function testAutoLoopPostCannotClearPendingPlanConfirmationDirectly(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  server.activeRunContexts = new Map();
+  server.activeRunStatesByContext = new Map();
+  server.cancelingRunIds = new Set();
+  const { app, postRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   const sessionId = `sess-pending-plan-direct-${Date.now()}`;
   let meta: Record<string, unknown> = {
@@ -716,7 +1189,7 @@ async function testAutoLoopPostCannotClearPendingPlanConfirmationDirectly(): Pro
   server.resolveWorkspaceDirForContext = () => config.agent.workspaceDir;
   server.resolveAgentForContext = () => server.agent;
   server.cleanupSessionRuntime = async () => undefined;
-  server.ensureTodoDrivenAutoLoop = WebServer.prototype.ensureTodoDrivenAutoLoop.bind(server);
+  server.ensureTodoDrivenAutoLoop = server.ensureTodoDrivenAutoLoop.bind(server);
   server.getSessionTodoProtocolState = () => ({
     items: [{ id: 'todo-1', status: 'pending' }],
     unfinishedItems: [{ id: 'todo-1', status: 'pending' }],
@@ -748,14 +1221,20 @@ async function testAutoLoopPostCannotClearPendingPlanConfirmationDirectly(): Pro
 }
 
 function createTodoRouteServerHarness() {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, postRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  server.activeRunContexts = new Map();
+  server.activeRunStatesByContext = new Map();
+  server.cancelingRunIds = new Set();
+  const { app, postRoutes } = createRouteAppHarness();
   const config = createBaseConfig();
   const createCalls: Array<Record<string, unknown>> = [];
   const planSetCalls: Array<Record<string, unknown>> = [];
   const updateCalls: Array<{ id: string; input: Record<string, unknown> }> = [];
   const clearCompletedCalls: Array<Record<string, unknown>> = [];
   const deleteCalls: Array<{ id: string; input: Record<string, unknown> }> = [];
+  const dismissCalls: Array<{ id: string; input: Record<string, unknown> }> = [];
+  const resumeCalls: Array<{ id: string; input: Record<string, unknown> }> = [];
+  const ensureTodoLoopCalls: Array<{ sessionId: string; workspaceDir?: string }> = [];
 
   server.app = app;
   server.wss = { clients: new Set() };
@@ -773,6 +1252,14 @@ function createTodoRouteServerHarness() {
       updateTodo: (id: string, input: Record<string, unknown>) => {
         updateCalls.push({ id, input });
         return { id, ...input };
+      },
+      dismissTodo: (id: string, input: Record<string, unknown>) => {
+        dismissCalls.push({ id, input });
+        return { id, status: 'dismissed', ...input };
+      },
+      resumeTodo: (id: string, input: Record<string, unknown>) => {
+        resumeCalls.push({ id, input });
+        return { id, status: 'pending', ...input };
       },
       listTodos: () => [],
       clearCompletedTodos: (input: Record<string, unknown>) => {
@@ -798,7 +1285,9 @@ function createTodoRouteServerHarness() {
   server.resolveWorkspaceDirForContext = () => config.agent.workspaceDir;
   server.resolveAgentForContext = () => server.agent;
   server.cleanupSessionRuntime = async () => undefined;
-  server.ensureTodoDrivenAutoLoop = () => undefined;
+  server.ensureTodoDrivenAutoLoop = (sessionId: string, workspaceDir?: string) => {
+    ensureTodoLoopCalls.push({ sessionId, workspaceDir });
+  };
   server.getSessionTodoProtocolState = () => ({
     items: [],
     unfinishedItems: [],
@@ -811,7 +1300,17 @@ function createTodoRouteServerHarness() {
   });
 
   server.setupRoutes();
-  return { postRoutes, createCalls, planSetCalls, updateCalls, clearCompletedCalls, deleteCalls };
+  return {
+    postRoutes,
+    createCalls,
+    planSetCalls,
+    updateCalls,
+    clearCompletedCalls,
+    deleteCalls,
+    dismissCalls,
+    resumeCalls,
+    ensureTodoLoopCalls,
+  };
 }
 
 async function testTodoPostRejectsMixedPlanAndStatusFields(): Promise<void> {
@@ -1081,6 +1580,46 @@ async function testTodoPostSupportsClearCompletedAndDeleteActions(): Promise<voi
   assert.equal(updateCalls.length, 0);
 }
 
+async function testTodoPostSupportsUserDismissAndResumeActions(): Promise<void> {
+  const { postRoutes, dismissCalls, resumeCalls, ensureTodoLoopCalls } = createTodoRouteServerHarness();
+  const updateHandler = postRoutes.get('/api/todos/:id');
+  assert.ok(updateHandler, 'expected POST /api/todos/:id route');
+
+  const dismissRes = createResponseRecorder();
+  await updateHandler?.(
+    {
+      params: { id: 'todo-dismiss' },
+      body: {
+        action: 'dismiss',
+        sessionId: 'sess-1',
+      },
+    },
+    dismissRes
+  );
+  assert.equal(dismissRes.statusCode, 200);
+  assert.equal(dismissCalls.length, 1);
+  assert.equal(dismissCalls[0]?.id, 'todo-dismiss');
+  assert.equal(ensureTodoLoopCalls.length, 1);
+  assert.equal(ensureTodoLoopCalls[0]?.sessionId, 'sess-1');
+
+  const resumeRes = createResponseRecorder();
+  await updateHandler?.(
+    {
+      params: { id: 'todo-resume' },
+      body: {
+        action: 'resume',
+        sessionId: 'sess-1',
+      },
+    },
+    resumeRes
+  );
+  assert.equal(resumeRes.statusCode, 200);
+  assert.equal(resumeCalls.length, 1);
+  assert.equal(resumeCalls[0]?.id, 'todo-resume');
+  assert.equal(ensureTodoLoopCalls.length, 2);
+  assert.equal(ensureTodoLoopCalls[1]?.sessionId, 'sess-1');
+}
+
 async function testTodoPostRejectsCamelCaseTodoAliases(): Promise<void> {
   const { postRoutes, planSetCalls, updateCalls } = createTodoRouteServerHarness();
   const createHandler = postRoutes.get('/api/todos');
@@ -1190,14 +1729,21 @@ async function testTodoPostRejectsCrossActionFields(): Promise<void> {
 }
 
 async function runAll(): Promise<void> {
-  testConfigRoutesExposeProvider();
-  await testConfigPostPersistsProvider();
-  await testConfigPostRejectsInvalidProvider();
+  testConfigRoutesExposeCanonicalProfiles();
+  testLegacyApiConfigMigratesIntoDefaultLlmProfileOnSave();
+  testSystemRoutesRegisterOnce();
+  await testLlmProfilesPutPersistsProfileContextWindowOverride();
+  await testRemoteAccessSettingsDoNotRewriteProfileApiKeys();
+  await testLlmProfilesPutRollsBackContextWindowOverrideWhenRefreshFails();
+  await testConfigPostPersistsCanonicalContextBudget();
+  await testSettingsPutPersistsProfilesAndAgentSettingsAtomically();
   await testConfigPostValidationIsAtomic();
   await testConfigPostRollsBackWhenRefreshFails();
+  await testSettingsPutRejectsMalformedProfileEntries();
   await testApiKeyPostRefreshesConfigRuntimesWithoutAgentCleanup();
   await testApiKeyPostRollsBackWhenRefreshFails();
   await testConfigRuntimeRefreshDoesNotCancelActiveSessionRuntime();
+  await testConfigRuntimeRefreshDoesNotFailWhenAsrRefreshFails();
   await testAutoLoopToggleCannotBypassPendingPlanConfirmation();
   await testAutoLoopPostCannotClearPendingPlanConfirmationDirectly();
   await testTodoPostRejectsMixedPlanAndStatusFields();
@@ -1208,6 +1754,7 @@ async function runAll(): Promise<void> {
   await testTodoPostSupportsSnakeCaseToolPayloads();
   await testTodoPostRejectsTaskIdBodyField();
   await testTodoPostSupportsClearCompletedAndDeleteActions();
+  await testTodoPostSupportsUserDismissAndResumeActions();
   await testTodoPostRejectsCamelCaseTodoAliases();
   await testTodoPostRejectsCrossActionFields();
   testConfigManagerPersistsCompletionMarkerSetting();

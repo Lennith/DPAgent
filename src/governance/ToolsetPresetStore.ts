@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { JsonStateStore, nowIso } from '../storage/index.js';
 
 export interface ToolsetPresetRecord {
   scope: 'team' | 'workspace';
@@ -13,17 +14,18 @@ interface ToolsetPresetState {
   workspacePresets: Record<string, ToolsetPresetRecord>;
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
 export class ToolsetPresetStore {
   private readonly filePath: string;
+  private readonly stateStore: JsonStateStore<ToolsetPresetState>;
 
   constructor(baseDir: string) {
     const resolvedBaseDir = path.resolve(baseDir);
     fs.mkdirSync(resolvedBaseDir, { recursive: true });
     this.filePath = path.join(resolvedBaseDir, 'presets.json');
+    this.stateStore = new JsonStateStore<ToolsetPresetState>(this.filePath, {
+      defaultValue: () => ({ workspacePresets: {} }),
+      parseErrorPolicy: 'fallback',
+    });
     if (!fs.existsSync(this.filePath)) {
       this.saveState({ workspacePresets: {} });
     }
@@ -124,21 +126,14 @@ export class ToolsetPresetStore {
   }
 
   private loadState(): ToolsetPresetState {
-    if (!fs.existsSync(this.filePath)) {
-      return { workspacePresets: {} };
-    }
-    try {
-      const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf-8')) as ToolsetPresetState;
-      return {
-        teamPreset: parsed.teamPreset,
-        workspacePresets: parsed.workspacePresets ?? {},
-      };
-    } catch {
-      return { workspacePresets: {} };
-    }
+    const parsed = this.stateStore.read();
+    return {
+      teamPreset: parsed.teamPreset,
+      workspacePresets: parsed.workspacePresets ?? {},
+    };
   }
 
   private saveState(state: ToolsetPresetState): void {
-    fs.writeFileSync(this.filePath, JSON.stringify(state, null, 2), 'utf-8');
+    this.stateStore.write(state);
   }
 }

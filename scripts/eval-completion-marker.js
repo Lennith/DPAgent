@@ -38,7 +38,7 @@ function resolveContextDir(config) {
   if (typeof agent.contextDir === 'string' && agent.contextDir.trim()) {
     return path.resolve(ROOT, agent.contextDir);
   }
-  return path.join(workspaceDir, '.minimax', 'contexts');
+  return path.join(workspaceDir, '.dpagent', 'contexts');
 }
 
 function ensureDir(target) {

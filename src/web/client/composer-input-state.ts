@@ -45,6 +45,18 @@ export function clearComposerInput(
   return setComposerInput(inputBySession, sessionId, '');
 }
 
+export function clearComposerInputIfUnchanged(
+  inputBySession: ComposerInputBySession,
+  sessionId: string | null | undefined,
+  expectedTrimmedValue: string
+): ComposerInputBySession {
+  const current = getComposerInput(inputBySession, sessionId);
+  if (current.trim() !== expectedTrimmedValue) {
+    return inputBySession;
+  }
+  return clearComposerInput(inputBySession, sessionId);
+}
+
 export function removeComposerInput(
   inputBySession: ComposerInputBySession,
   sessionId: string | null | undefined

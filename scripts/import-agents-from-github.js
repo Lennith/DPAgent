@@ -90,39 +90,6 @@ function findAgentDirectories(baseDir) {
   return result;
 }
 
-function sanitizeProfileName(name) {
-  const normalized = String(name).trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9._-]/g, '-');
-  return normalized || 'agent';
-}
-
-function importFromSkillDirectories(repoRoot, targetDir) {
-  const dirs = listDirectories(repoRoot);
-  const importedNames = [];
-
-  for (const dirName of dirs) {
-    const skillPath = path.join(repoRoot, dirName, 'SKILL.md');
-    if (!fs.existsSync(skillPath)) {
-      continue;
-    }
-    let content = '';
-    try {
-      content = fs.readFileSync(skillPath, 'utf-8');
-    } catch {
-      continue;
-    }
-    if (!content.trim()) {
-      continue;
-    }
-    const profileName = sanitizeProfileName(dirName);
-    const profileDir = path.join(targetDir, profileName);
-    fs.mkdirSync(profileDir, { recursive: true });
-    fs.writeFileSync(path.join(profileDir, 'AGENTS.md'), content, 'utf-8');
-    importedNames.push(profileName);
-  }
-
-  return importedNames.sort((a, b) => a.localeCompare(b));
-}
-
 function main() {
   const root = process.cwd();
   const args = parseArgs(process.argv.slice(2));
@@ -141,7 +108,7 @@ function main() {
   }
 
   const targetDir = path.resolve(root, args.target);
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'minimax-agents-import-'));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dpagents-import-'));
 
   try {
     const cloneArgs = ['clone', '--depth', '1'];
@@ -162,20 +129,7 @@ function main() {
     let importedFrom = `profiles under ${args.source}`;
 
     if (incoming.length === 0) {
-      if (args.mode === 'replace' && fs.existsSync(targetDir)) {
-        console.log(`[agents-import] Replace mode enabled, clearing ${targetDir}`);
-        fs.rmSync(targetDir, { recursive: true, force: true });
-      }
-      // Fallback for repositories that publish command skills (e.g. gstack)
-      // instead of agents/<name>/AGENTS.md trees.
-      const importedSkillProfiles = importFromSkillDirectories(tempDir, targetDir);
-      if (importedSkillProfiles.length === 0) {
-        throw new Error(
-          `No agent profile found under ${args.source}, and no skill directories with SKILL.md found at repo root.`
-        );
-      }
-      incoming = importedSkillProfiles;
-      importedFrom = 'root */SKILL.md directories';
+      throw new Error(`No agent profile found under ${args.source}. Expected <name>/AGENTS.md directories.`);
     } else {
       if (args.mode === 'replace' && fs.existsSync(targetDir)) {
         console.log(`[agents-import] Replace mode enabled, clearing ${targetDir}`);

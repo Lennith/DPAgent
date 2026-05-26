@@ -1,7 +1,5 @@
 export { AutomationStore } from './AutomationStore.js';
 export { AutomationScheduler } from './AutomationScheduler.js';
-export { AutomationExecutionService } from './AutomationExecutionService.js';
-export { AutomationRoutes } from './AutomationRoutes.js';
 export {
   computeNextRunAt,
   normalizeAutomationSchedule,

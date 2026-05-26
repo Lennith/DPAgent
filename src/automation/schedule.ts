@@ -1,5 +1,8 @@
 import type { AutomationSchedule } from './types.js';
 
+export const MIN_INTERVAL_SECONDS = 5;
+export const MAX_INTERVAL_SECONDS = 60 * 60 * 24 * 30;
+
 interface ZonedParts {
   minute: number;
   hour: number;
@@ -38,10 +41,16 @@ function assertRange(value: number, label: string, min: number, max: number): nu
 
 function normalizeFrequency(value: unknown): AutomationSchedule['frequency'] {
   const normalized = String(value ?? '').trim();
-  if (normalized === 'hourly' || normalized === 'daily' || normalized === 'weekly') {
+  if (
+    normalized === 'hourly' ||
+    normalized === 'daily' ||
+    normalized === 'weekly' ||
+    normalized === 'once' ||
+    normalized === 'interval'
+  ) {
     return normalized;
   }
-  throw new Error('frequency must be one of: hourly, daily, weekly');
+  throw new Error('frequency must be one of: interval, hourly, daily, weekly');
 }
 
 function getZonedParts(date: Date, timezone: string): ZonedParts {
@@ -67,6 +76,8 @@ function getZonedParts(date: Date, timezone: string): ZonedParts {
 }
 
 function matchesSchedule(parts: ZonedParts, schedule: AutomationSchedule): boolean {
+  if (schedule.frequency === 'once') return false; // never auto-match, caller sets nextRunAt
+  if (schedule.frequency === 'interval') return false; // interval uses direct nextRunAt arithmetic
   if (schedule.frequency === 'hourly') {
     return parts.minute === schedule.minute;
   }
@@ -82,6 +93,20 @@ function matchesSchedule(parts: ZonedParts, schedule: AutomationSchedule): boole
 
 export function normalizeAutomationSchedule(input: Partial<AutomationSchedule>): AutomationSchedule {
   const frequency = normalizeFrequency(input.frequency);
+  if (frequency === 'once') {
+    return { frequency };
+  }
+  if (frequency === 'interval') {
+    return {
+      frequency,
+      intervalSeconds: assertRange(
+        parseInteger(input.intervalSeconds),
+        'intervalSeconds',
+        MIN_INTERVAL_SECONDS,
+        MAX_INTERVAL_SECONDS
+      ),
+    };
+  }
   const minute = assertRange(parseInteger(input.minute), 'minute', 0, 59);
   if (frequency === 'hourly') {
     return {
@@ -132,6 +157,18 @@ export function computeNextRunAt(
   const maxSearchMinutes = Number.isFinite(options?.maxSearchMinutes)
     ? Math.max(1, Math.trunc(options?.maxSearchMinutes as number))
     : 60 * 24 * 8;
+  if (schedule.frequency === 'once') {
+    return from.toISOString();
+  }
+  if (schedule.frequency === 'interval') {
+    const intervalSeconds = assertRange(
+      parseInteger(schedule.intervalSeconds),
+      'intervalSeconds',
+      MIN_INTERVAL_SECONDS,
+      MAX_INTERVAL_SECONDS
+    );
+    return new Date(from.getTime() + intervalSeconds * 1000).toISOString();
+  }
   const base = from.getTime();
   let cursor = Math.floor(base / 60_000) * 60_000;
   if (!inclusive || cursor <= base) {

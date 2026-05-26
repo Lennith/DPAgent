@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
+const yaml = require('js-yaml');
 
 const ROOT = process.cwd();
 const RELEASES_DIR = path.join(ROOT, 'releases');
@@ -13,8 +14,6 @@ const STANDARD_FILES = [
   'package-lock.json',
   'README.md',
   'CONFIG.md',
-  'config.yaml',
-  'skill-list.yaml',
   'start.js',
   'setup.js',
   'init.js',
@@ -24,17 +23,15 @@ const STANDARD_FILES = [
   'scripts/run-with-logs.js',
   'scripts/diagnose.js',
   'scripts/collect-evidence.js',
-  'docs/LOGGING.md',
+  'doc/playbook/logging-guide.md',
 ];
 
 const STANDARD_DIRS = ['dist'];
 
 const EASY_RUN_FILES = [
-  'config.yaml',
-  'skill-list.yaml',
   'start-easy.js',
-  'Run-MiniMax.bat',
-  'docs/WINDOWS_EASY_RUN.md',
+  'Run-DPAgent.bat',
+  'doc/playbook/windows-easy-run-handoff.md',
 ];
 
 const EASY_RUN_DIRS = ['dist', 'agents', 'node_modules'];
@@ -64,7 +61,7 @@ function ensureNodeModules() {
 }
 
 function resolveWindowsRuntimeDir() {
-  const configured = process.env.MINIMAX_WINDOWS_NODE_RUNTIME_DIR;
+  const configured = process.env.DPAGENT_WINDOWS_NODE_RUNTIME_DIR;
   const candidates = [
     configured,
     path.join(ROOT, 'vendor', 'node-win-x64'),
@@ -80,7 +77,7 @@ function resolveWindowsRuntimeDir() {
     [
       'Windows Node runtime not found.',
       'Please place runtime at vendor/node-win-x64 (contains node.exe),',
-      'or set MINIMAX_WINDOWS_NODE_RUNTIME_DIR to that directory.',
+      'or set DPAGENT_WINDOWS_NODE_RUNTIME_DIR to that directory.',
     ].join(' ')
   );
 }
@@ -103,6 +100,96 @@ function copyDirOrThrow(relativePath, targetRoot) {
   const targetPath = path.join(targetRoot, relativePath);
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   fs.cpSync(sourcePath, targetPath, { recursive: true });
+}
+
+function createReleaseConfigTemplate() {
+  return {
+    llmProfiles: {
+      defaultProfileId: 'default',
+      profiles: [
+        {
+          id: 'default',
+          name: 'Default Profile',
+          provider: 'anthropic',
+          apiKey: '',
+          apiBase: 'https://api.minimaxi.com',
+          defaultModel: 'MiniMax-M2.7-highspeed',
+          maxOutputTokens: 32768,
+          enabled: true,
+          capabilities: {
+            modelDiscovery: true,
+            reasoningEffort: false,
+            thinkingBudget: true,
+          },
+        },
+      ],
+    },
+    agent: {
+      maxSteps: 100,
+      tokenLimit: 210000,
+      workspaceDir: './workspace',
+      contextDir: './contexts',
+      runtimeDataDir: './runtime',
+      globalAgentsDir: './agents',
+    },
+    contextBudget: {
+      defaultContextWindowTokens: 230000,
+      compressionTriggerRatio: 0.9,
+      postCompressionTargetRatio: 0.55,
+      minTokensAddedAfterCompression: 0,
+      precompressKeepLlmRounds: 5,
+      precompressChunkChars: 20000,
+      precompressRetry: 1,
+      compressionMaxChars: 6000,
+      reservedOutputTokens: 32768,
+      reservedReasoningTokens: 0,
+      reservedProtocolTokens: 4096,
+      modelOverrides: {},
+    },
+    tools: {
+      enableFileTools: true,
+      enableShell: true,
+      shellType: 'powershell',
+      shellTimeout: 30000,
+    },
+    mcp: {
+      enabled: false,
+      servers: [],
+      connectTimeout: 10,
+      executeTimeout: 60,
+    },
+    retry: {
+      enabled: true,
+      maxRetries: 3,
+      initialDelay: 1,
+      maxDelay: 60,
+      exponentialBase: 2,
+    },
+  };
+}
+
+function writeReleaseConfigTemplate(targetRoot) {
+  const configPath = path.join(targetRoot, 'config.yaml');
+  fs.writeFileSync(configPath, yaml.dump(createReleaseConfigTemplate(), { indent: 2, lineWidth: -1 }), 'utf8');
+  assertReleaseConfigIsSanitized(path.join(targetRoot, 'config.yaml'));
+}
+
+function assertReleaseConfigIsSanitized(configPath) {
+  const content = fs.readFileSync(configPath, 'utf8');
+  const parsed = yaml.load(content) || {};
+  const profiles = Array.isArray(parsed?.llmProfiles?.profiles) ? parsed.llmProfiles.profiles : [];
+  if (!parsed.llmProfiles || profiles.length === 0) {
+    throw new Error(`Release config is missing llmProfiles: ${configPath}`);
+  }
+  if (/\bsk-[A-Za-z0-9_-]{12,}\b/.test(content)) {
+    throw new Error(`Release config contains a secret-looking API key: ${configPath}`);
+  }
+  for (const profile of profiles) {
+    const apiKey = String(profile?.apiKey ?? '').trim();
+    if (apiKey && !/^YOUR_|^PLACEHOLDER_/i.test(apiKey)) {
+      throw new Error(`Release config contains a non-placeholder apiKey in profile ${profile?.id ?? '(unknown)'}`);
+    }
+  }
 }
 
 function createZipFromFolder(sourceFolder, zipPath) {
@@ -143,7 +230,7 @@ function buildRuntimeManifest(nodeRuntimeDir, releaseRoot) {
 }
 
 function buildStandardRelease(stamp, commit) {
-  const releaseName = `minimax-agent-release-${stamp}-${commit}`;
+  const releaseName = `dpagent-release-${stamp}-${commit}`;
   const releaseRoot = path.join(RELEASES_DIR, releaseName);
   const zipPath = `${releaseRoot}.zip`;
 
@@ -153,6 +240,7 @@ function buildStandardRelease(stamp, commit) {
   for (const file of STANDARD_FILES) {
     copyFileOrThrow(file, releaseRoot);
   }
+  writeReleaseConfigTemplate(releaseRoot);
   for (const dir of STANDARD_DIRS) {
     copyDirOrThrow(dir, releaseRoot);
   }
@@ -165,7 +253,7 @@ function buildEasyRunRelease(stamp, commit) {
   ensureNodeModules();
   const nodeRuntimeDir = resolveWindowsRuntimeDir();
 
-  const releaseName = `minimax-agent-windows-easy-run-${stamp}-${commit}`;
+  const releaseName = `dpagent-windows-easy-run-${stamp}-${commit}`;
   const releaseRoot = path.join(RELEASES_DIR, releaseName);
   const zipPath = `${releaseRoot}.zip`;
   fs.rmSync(releaseRoot, { recursive: true, force: true });
@@ -174,6 +262,7 @@ function buildEasyRunRelease(stamp, commit) {
   for (const file of EASY_RUN_FILES) {
     copyFileOrThrow(file, releaseRoot);
   }
+  writeReleaseConfigTemplate(releaseRoot);
   for (const dir of EASY_RUN_DIRS) {
     copyDirOrThrow(dir, releaseRoot);
   }
@@ -207,4 +296,15 @@ function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  STANDARD_FILES,
+  STANDARD_DIRS,
+  EASY_RUN_FILES,
+  EASY_RUN_DIRS,
+  createReleaseConfigTemplate,
+  assertReleaseConfigIsSanitized,
+};

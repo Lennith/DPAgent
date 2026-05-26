@@ -22,7 +22,7 @@ export class ToolResultArtifactTool extends Tool {
   }
 
   get description(): string {
-    return 'Read a bounded line window from a stored tool result artifact in the current session.';
+    return 'Read a bounded line window from a stored tool result artifact in the current session. Defaults to 400 lines and 20000 chars.';
   }
 
   get parameters(): Record<string, unknown> {
@@ -40,8 +40,13 @@ export class ToolResultArtifactTool extends Tool {
         },
         limit: {
           type: 'number',
-          description: 'Optional maximum lines to return. Default 200, maximum 400.',
-          default: 200,
+          description: 'Optional maximum lines to return. Default 400, maximum 400.',
+          default: 400,
+        },
+        max_chars: {
+          type: 'number',
+          description: 'Optional maximum characters to return. Default 20000, maximum 24000.',
+          default: 20000,
         },
       },
       required: ['artifact_id'],
@@ -53,6 +58,7 @@ export class ToolResultArtifactTool extends Tool {
       artifactId: String(args.artifact_id ?? ''),
       offset: this.readNumber(args.offset),
       limit: this.readNumber(args.limit),
+      maxChars: this.readNumber(args.max_chars),
     });
   }
 

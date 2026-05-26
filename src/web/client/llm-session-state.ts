@@ -7,7 +7,7 @@ import type {
   SessionLlmProviderOptionsView,
 } from './app-shell-types.js';
 
-export const DEFAULT_REASONING_PRESET: ReasoningPreset = 'off';
+export const DEFAULT_REASONING_PRESET: ReasoningPreset = 'high';
 export const DEFAULT_SYNTHETIC_SELECTION_UPDATED_AT = '1970-01-01T00:00:00.000Z';
 
 function normalizeSelectionUpdatedAt(value: unknown, fallback: string): string {
@@ -30,7 +30,14 @@ export function createNextSessionLlmSelectionUpdatedAt(previousUpdatedAt?: strin
 }
 
 function normalizeReasoningPreset(value: unknown): ReasoningPreset {
-  return value === 'low' || value === 'medium' || value === 'high' ? value : DEFAULT_REASONING_PRESET;
+  return value === 'off' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max'
+    ? value
+    : DEFAULT_REASONING_PRESET;
 }
 
 function normalizeProviderOptionsForProvider(
@@ -43,7 +50,7 @@ function normalizeProviderOptionsForProvider(
 
   if (provider === 'openai') {
     const effort = providerOptions.openai?.reasoningEffort;
-    if (effort === 'low' || effort === 'medium' || effort === 'high' || effort === null) {
+    if (effort === 'low' || effort === 'medium' || effort === 'high' || effort === 'xhigh' || effort === null) {
       return {
         openai: {
           reasoningEffort: effort,
@@ -62,6 +69,21 @@ function normalizeProviderOptionsForProvider(
     };
   }
   return undefined;
+}
+
+function getAvailableModels(profile: PublicLlmProfile): string[] {
+  const models = new Map<string, string>();
+  const addModel = (model: unknown): void => {
+    const id = typeof model === 'string' ? model.trim() : '';
+    if (id && !models.has(id)) {
+      models.set(id, id);
+    }
+  };
+  if (Array.isArray(profile.availableModels)) {
+    profile.availableModels.forEach(addModel);
+  }
+  addModel(profile.defaultModel);
+  return [...models.values()];
 }
 
 export function resolveDefaultLlmProfile(llmProfiles: LlmProfilesConfigView | null | undefined): PublicLlmProfile | null {
@@ -93,7 +115,7 @@ export function resolveSessionLlmSelectionView(
   const defaultProfile =
     resolveDefaultLlmProfile(llmProfiles) ??
     ({
-      id: 'legacy-default',
+      id: 'default',
       name: 'Default Profile',
       provider: 'anthropic',
       apiBase: '',
@@ -101,7 +123,12 @@ export function resolveSessionLlmSelectionView(
       hasApiKey: false,
     } satisfies PublicLlmProfile);
   const resolvedProfile = resolveLlmProfileById(llmProfiles, selection?.profileId) ?? defaultProfile;
-  const model = String(selection?.model ?? '').trim() || resolvedProfile.defaultModel;
+  const requestedModel = String(selection?.model ?? '').trim();
+  const availableModels = getAvailableModels(resolvedProfile);
+  const model =
+    requestedModel && availableModels.includes(requestedModel)
+      ? requestedModel
+      : resolvedProfile.defaultModel || availableModels[0] || '';
 
   return {
     profileId: resolvedProfile.id,

@@ -436,7 +436,7 @@ async function ensureServer(args) {
         `Port ${args.port} is already in use while expect-existing=false. Stop existing server or use another --port.`
       );
     }
-    await waitForHttpReady(`${baseUrl}/api/config`, 30000);
+    await waitForHttpReady(`${baseUrl}/api/settings`, 30000);
     return { usingExisting: true, child: null, baseUrl };
   }
 
@@ -444,29 +444,62 @@ async function ensureServer(args) {
     throw new Error(`Expected existing dev server on port ${args.port}, but it is not running.`);
   }
 
-  const cliEntry = path.join(ROOT, 'dist', 'cli', 'minimax-agent.js');
+  const cliEntry = path.join(ROOT, 'dist', 'cli', 'dpagent.js');
   if (!fs.existsSync(cliEntry)) {
-    throw new Error('Missing dist/cli/minimax-agent.js. Run npm run build first.');
+    throw new Error('Missing dist/cli/dpagent.js. Run npm run build first.');
   }
   await ensureWebClientBuild();
 
   const child = spawn(process.execPath, [cliEntry, '--no-open'], {
     cwd: args.uxRoot,
-    env: { ...process.env, MINIMAX_PORT: String(args.port) },
+    env: { ...process.env, DPAGENT_PORT: String(args.port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', (chunk) => process.stdout.write(chunk.toString()));
   child.stderr.on('data', (chunk) => process.stderr.write(chunk.toString()));
 
-  await waitForHttpReady(`${baseUrl}/api/config`, 40000);
+  await waitForHttpReady(`${baseUrl}/api/settings`, 40000);
   return { usingExisting: false, child, baseUrl };
 }
 
 async function syncApiKeyToServer(baseUrl, apiKey) {
-  const response = await fetch(`${baseUrl}/api/settings/apikey`, {
-    method: 'POST',
+  const settingsResponse = await fetch(`${baseUrl}/api/settings`);
+  if (!settingsResponse.ok) {
+    throw new Error(`Failed to load settings before setting API key: HTTP ${settingsResponse.status}`);
+  }
+  const settings = await settingsResponse.json();
+  const profiles = Array.isArray(settings?.llmProfiles?.profiles) ? settings.llmProfiles.profiles : [];
+  const defaultProfileId = String(settings?.llmProfiles?.defaultProfileId || profiles[0]?.id || 'default');
+  const nextProfiles = profiles.map((profile) => ({
+    id: String(profile?.id || defaultProfileId),
+    name: String(profile?.name || profile?.id || defaultProfileId),
+    provider: profile?.provider,
+    apiBase: profile?.apiBase,
+    defaultModel: profile?.defaultModel,
+    maxOutputTokens: profile?.maxOutputTokens,
+    contextWindowTokens: profile?.contextWindowTokens,
+    enabled: profile?.enabled !== false,
+    capabilities: profile?.capabilities,
+    apiKey: String(profile?.id || '') === defaultProfileId ? apiKey : undefined,
+  }));
+  if (!nextProfiles.some((profile) => profile.id === defaultProfileId)) {
+    nextProfiles.push({
+      id: defaultProfileId,
+      name: defaultProfileId,
+      provider: 'anthropic',
+      apiBase: 'https://api.minimax.io',
+      defaultModel: 'MiniMax-M2.5',
+      enabled: true,
+      apiKey,
+    });
+  }
+  const response = await fetch(`${baseUrl}/api/settings`, {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey }),
+    body: JSON.stringify({
+      defaultProfileId,
+      profiles: nextProfiles,
+    }),
   });
   if (!response.ok) {
     const text = await response.text();

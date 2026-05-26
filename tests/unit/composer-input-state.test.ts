@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict';
 import {
   clearComposerInput,
+  clearComposerInputIfUnchanged,
   COMPOSER_DRAFT_KEY,
   getComposerInput,
   removeComposerInput,
@@ -72,6 +73,18 @@ function testAutoLoopLikeSessionEventsDoNotPolluteOtherSessionDraft(): void {
   assert.equal(getComposerInput(state, 'sess-b'), 'I am typing in B');
 }
 
+function testAckClearsOnlyMatchingRunningInputDraft(): void {
+  let state: ComposerInputBySession = {};
+  state = setComposerInput(state, 'sess-a', 'queued prompt');
+  state = clearComposerInputIfUnchanged(state, 'sess-a', 'queued prompt');
+  assert.equal(getComposerInput(state, 'sess-a'), '');
+
+  state = setComposerInput(state, 'sess-a', 'queued prompt');
+  state = setComposerInput(state, 'sess-a', 'new edit before ack');
+  state = clearComposerInputIfUnchanged(state, 'sess-a', 'queued prompt');
+  assert.equal(getComposerInput(state, 'sess-a'), 'new edit before ack');
+}
+
 function runAll(): void {
   testResolveComposerInputKeyUsesDraftForEmptySession();
   testSessionInputsAreIsolated();
@@ -79,6 +92,7 @@ function runAll(): void {
   testDraftInputIsIsolatedFromNamedSession();
   testRemoveComposerInputDeletesOnlyTargetSession();
   testAutoLoopLikeSessionEventsDoNotPolluteOtherSessionDraft();
+  testAckClearsOnlyMatchingRunningInputDraft();
   console.log('composer-input-state tests passed');
 }
 

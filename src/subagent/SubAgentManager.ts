@@ -1,135 +1,113 @@
-﻿import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { findAgentProfileByName, resolveAgentPool, type AgentProfile } from '../agents/index.js';
-import { ContextManager } from '../context/index.js';
+import {
+  findAgentProfileByName,
+  isAgentProfileVisibleToSubagentManager,
+  resolveAgentPool,
+  toAgentProfileConfigView,
+  type AgentProfile,
+} from '../agents/AgentProfiles.js';
+import { createStateId, JsonStateStore, nowIso } from '../storage/index.js';
+import { intersectAllowedToolNames, normalizeAllowedToolNames } from '../tools/CapabilityCatalog.js';
 import type {
+  AgentProfileConfig,
   ContextRef,
   SubAgentAssignedAgent,
   SubAgentAssignedAgentProfile,
   SubAgentArtifact,
   SubAgentCreateParams,
   SubAgentLifecycleStatus,
-  SubAgentProviderConfig,
   SubAgentResult,
   SubAgentStatus,
 } from '../types.js';
-import { SubAgentTurnRunner } from './SubAgentTurnRunner.js';
 import type {
   ParentQueueState,
+  SubAgentExecutionOutput,
   SubAgentQueuedTask,
   SubAgentRecord,
   SubAgentRegistryState,
   SubAgentResumeRequest,
 } from './types.js';
+import {
+  applySubAgentHeartbeat,
+  applySubAgentRunningTransition,
+  applySubAgentTerminalTransition,
+  isTerminalSubAgentStatus as isTerminalStatus,
+} from './SubAgentLifecycleReducer.js';
+import { ManagedInterval, ManagedTimeout } from '../runtime/async-primitives.js';
+import {
+  DEFAULT_GLOBAL_MAX_PARALLEL,
+  DEFAULT_MAX_PARALLEL_PER_PARENT,
+  DEFAULT_RESULT_WAIT_TIMEOUT_MS,
+  DEFAULT_TASK_TIMEOUT_MS,
+  HEARTBEAT_PERSIST_TICK_MS,
+  HEARTBEAT_TIMEOUT_MS,
+  MAX_QUEUED_TASKS_PER_PARENT,
+  REGISTRY_VERSION,
+  type ResultWaiter,
+  type SubAgentCreateOrResumeResult,
+  type SubAgentManagerOptions,
+  type WaitResult,
+} from './subagent-manager-contracts.js';
+import { emptyArtifacts, truncate } from './subagent-manager-utils.js';
+import {
+  createSubAgentContextRef,
+  normalizeSubAgentContextRef,
+  subAgentContextKey,
+} from './subagent-context-utils.js';
+import type { SubAgentProgressUpdate } from './SubAgentTurnRunner.js';
+import { SubAgentTaskSettlementService } from './SubAgentTaskSettlementService.js';
 
-const MAX_QUEUED_TASKS_PER_PARENT = 3;
-const DEFAULT_TASK_TIMEOUT_MS = 300000;
-const DEFAULT_RESULT_WAIT_TIMEOUT_MS = 300000;
-const HEARTBEAT_TIMEOUT_MS = 180000;
-const HEARTBEAT_PERSIST_TICK_MS = 2000;
-const DEFAULT_MAX_PARALLEL_PER_PARENT = 4;
-const DEFAULT_GLOBAL_MAX_PARALLEL = 10;
-const REGISTRY_VERSION = 2;
-// REQ-0027: Retry queue settings
-const MAX_RETRY_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 5000;
-
-interface WaitResult {
-  status: SubAgentStatus;
-  result?: SubAgentResult;
-  timedOut?: boolean;
-}
-
-interface ResultWaiter {
-  runSeq: number;
-  resolve: (value: WaitResult) => void;
-  timer: NodeJS.Timeout;
-}
-
-type SubAgentCreateOrResumeResult =
-  | { ok: true; status: SubAgentStatus }
-  | {
-      ok: false;
-      code:
-        | 'invalid_prompt'
-        | 'invalid_subagent_id'
-        | 'subagent_not_found'
-        | 'parent_mismatch'
-        | 'subagent_busy'
-        | 'agent_not_found'
-        | 'queue_full';
-      error: string;
-      status?: SubAgentStatus;
-    };
-
-export interface SubAgentManagerOptions {
-  contextManager: ContextManager;
-  turnRunner: SubAgentTurnRunner;
-  registryFilePath: string;
-  getDefaultWorkspaceDir: () => string;
-  getProviderConfigs: () => SubAgentProviderConfig[] | undefined;
-  getGlobalAgentsDir: () => string | undefined;
-  getMaxParallelPerParent: () => number;
-  getGlobalMaxParallel: () => number;
-  resolveAllowedTools?: (input: {
-    parentContext: ContextRef;
-    workspaceDir?: string;
-    allowedTools?: string[];
-  }) => string[] | undefined;
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-function truncate(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, maxChars - 18))}...(truncated)`;
-}
-
-function isTerminalStatus(status: SubAgentLifecycleStatus): boolean {
-  return (
-    status === 'succeeded' ||
-    status === 'failed' ||
-    status === 'canceled' ||
-    status === 'timeout'
-  );
-}
-
-function emptyArtifacts(): SubAgentArtifact {
-  return {
-    files: [],
-    commands: [],
-    notes: [],
-  };
-}
+export type { SubAgentManagerOptions } from './subagent-manager-contracts.js';
 
 export class SubAgentManager {
   private readonly options: SubAgentManagerOptions;
   private readonly registryFilePath: string;
   private readonly waiters = new Map<string, ResultWaiter[]>();
+  private readonly stateStore: JsonStateStore<SubAgentRegistryState>;
   private readonly state: SubAgentRegistryState;
-  private readonly heartbeatPersistTimer: NodeJS.Timeout;
+  private readonly taskSettlementService: SubAgentTaskSettlementService;
+  private readonly heartbeatPersistTimer = new ManagedInterval();
   private stateDirty = false;
 
   constructor(options: SubAgentManagerOptions) {
     this.options = options;
     this.registryFilePath = path.resolve(options.registryFilePath);
+    this.stateStore = new JsonStateStore<SubAgentRegistryState>(this.registryFilePath, {
+      defaultValue: () => this.createEmptyState(),
+      validate: (value): value is SubAgentRegistryState => this.isValidLoadedState(value),
+      parseErrorPolicy: 'fallback',
+      onInvalid: (filePath) => {
+        try {
+          fs.rmSync(filePath, { force: true });
+        } catch {
+          // keep the hard-cut fallback non-fatal
+        }
+      },
+    });
     this.state = this.loadState();
-    this.heartbeatPersistTimer = setInterval(() => {
+    this.taskSettlementService = new SubAgentTaskSettlementService({
+      getState: () => this.state,
+      removeTaskFromQueue: (parentKey, taskId) => this.removeTaskFromQueue(parentKey, taskId),
+      updateQueuePositions: (parentKey) => this.updateQueuePositions(parentKey),
+      persistState: () => this.persistState(),
+      applyTerminalRecord: (input) => this.applyTerminalRecord(input),
+      writeParentContextResult: (parentContext, result, parentTurnId) =>
+        this.writeParentContextResult(parentContext, result, parentTurnId),
+      writeParentContextIndex: (parentContext, parentTurnId) =>
+        this.writeParentContextIndex(parentContext, parentTurnId),
+      resolveWaiters: (subagentId, runSeq) => this.resolveWaiters(subagentId, runSeq),
+      processAllQueues: () => this.processAllQueues(),
+    });
+    this.heartbeatPersistTimer.start(() => {
       this.flushDirtyState();
-    }, HEARTBEAT_PERSIST_TICK_MS);
-    this.heartbeatPersistTimer.unref?.();
+    }, HEARTBEAT_PERSIST_TICK_MS, { unref: true });
     this.markPendingTasksAsFailedOnStartup();
     this.reconcileStaleTasks();
-    this.processRetryQueue();
   }
 
   shutdown(): void {
-    clearInterval(this.heartbeatPersistTimer);
+    this.heartbeatPersistTimer.clear();
     this.flushDirtyState();
   }
 
@@ -144,28 +122,8 @@ export class SubAgentManager {
       };
     }
 
-    const parentContext = this.normalizeContextRef(request.parentContext);
-
-    // REQ-0009: Context integrity check before subagent spawn
-    const integrityCheck = this.options.contextManager.checkContextIntegrity(parentContext);
-    if (!integrityCheck.valid) {
-      const jumpWarning = integrityCheck.versionChain;
-      const warnMsg = `[SubAgentManager] Context version jump detected for ${parentContext?.scope}/${parentContext?.namespace} :: ` +
-        `jump from v${jumpWarning?.previousVersion} to v${jumpWarning?.currentVersion} (size: ${jumpWarning?.gapSize}). ` +
-        `Subagent spawn may have stale context. Proceeding with warning.`;
-      console.warn(warnMsg);
-    }
-
-    // REQ-0004: Create context checkpoint before sub-agent invocation
-    let checkpointId: string | undefined;
-    try {
-      const checkpointResult = this.options.contextManager.createCheckpoint(parentContext, 'subagent_create');
-      checkpointId = checkpointResult.checkpoint.checkpointId;
-      console.info(`[SubAgentManager] Created checkpoint ${checkpointId} before subagent spawn`);
-    } catch (error) {
-      const cpError = error instanceof Error ? error.message : String(error);
-      console.warn(`[SubAgentManager] Failed to create checkpoint: ${cpError}. Proceeding without checkpoint.`);
-    }
+    const parentTurnId = this.normalizeParentTurnId(request.parentTurnId);
+    const parentContext = this.prepareParentSpawnContext(request.parentContext, parentTurnId);
 
     const workspaceDir = this.resolveWorkspaceDir(request.workspaceDir);
     const selectedAgent = this.resolveAgentSelection(request.agentName, workspaceDir);
@@ -177,13 +135,9 @@ export class SubAgentManager {
       };
     }
     const parentKey = this.contextKey(parentContext);
-    const queue = this.ensureQueue(parentKey);
-    if (queue.queuedTaskIds.length >= MAX_QUEUED_TASKS_PER_PARENT) {
-      return {
-        ok: false,
-        code: 'queue_full',
-        error: `queue_full: parent context already has ${MAX_QUEUED_TASKS_PER_PARENT} queued sub-agent tasks`,
-      };
+    const queueFull = this.rejectIfParentQueueFull(parentKey);
+    if (queueFull) {
+      return queueFull;
     }
 
     const createdAt = nowIso();
@@ -196,6 +150,7 @@ export class SubAgentManager {
       id: subagentId,
       parentContext,
       parentKey,
+      ...(parentTurnId ? { parentTurnId } : {}),
       context: this.createSubAgentContextRef(parentContext, subagentId),
       status: 'queued',
       runSeq: 1,
@@ -206,18 +161,25 @@ export class SubAgentManager {
       providerId: providerSelection.providerId,
       prompt,
       agentName: selectedAgent.agent?.name,
-      allowedTools: this.resolveEffectiveAllowedTools(parentContext, workspaceDir, request.allowedTools),
-      timeoutMs: this.normalizeTimeoutMs(request.timeoutMs, DEFAULT_TASK_TIMEOUT_MS),
+      agentProfile: selectedAgent.profile,
+      agentConfig: selectedAgent.profile?.config,
+      allowedTools: this.resolveEffectiveAllowedTools(
+        parentContext,
+        workspaceDir,
+        this.resolveAgentAllowedTools(request.allowedTools, selectedAgent.profile?.config)
+      ),
+      timeoutMs: this.resolveTaskTimeoutMs(request.timeoutMs, selectedAgent.profile?.config),
       workspaceDir,
       queuePosition: undefined,
       latestResult: undefined,
       lastError: undefined,
+      lifecycleDiagnostic: undefined,
     };
     this.state.records[subagentId] = record;
 
-    if (!providerSelection.available) {
-      this.failRecordImmediately(record, `provider_unavailable:${providerSelection.providerId}`);
-      return { ok: true, status: this.toStatusPayload(record) };
+    const providerUnavailable = this.failIfProviderUnavailable(record, providerSelection);
+    if (providerUnavailable) {
+      return providerUnavailable;
     }
 
     const task = this.buildTask({
@@ -229,15 +191,10 @@ export class SubAgentManager {
       agentProfile: selectedAgent.profile,
       parentKey,
       parentContext,
+      parentTurnId,
       workspaceDir,
     });
-    this.state.tasks[task.taskId] = task;
-
-    this.enqueueTask(task, record);
-    this.persistState();
-    this.writeParentContextIndex(parentContext);
-    this.processAllQueues();
-    return { ok: true, status: this.toStatusPayload(record) };
+    return this.enqueueBuiltTaskAndReturnStatus(task, record, parentContext);
   }
 
   resume(request: SubAgentResumeRequest): SubAgentCreateOrResumeResult {
@@ -260,28 +217,8 @@ export class SubAgentManager {
       };
     }
 
-    const parentContext = this.normalizeContextRef(request.parentContext);
-
-    // REQ-0009: Context integrity check before subagent spawn
-    const integrityCheck = this.options.contextManager.checkContextIntegrity(parentContext);
-    if (!integrityCheck.valid) {
-      const jumpWarning = integrityCheck.versionChain;
-      const warnMsg = `[SubAgentManager] Context version jump detected for ${parentContext?.scope}/${parentContext?.namespace} :: ` +
-        `jump from v${jumpWarning?.previousVersion} to v${jumpWarning?.currentVersion} (size: ${jumpWarning?.gapSize}). ` +
-        `Subagent spawn may have stale context. Proceeding with warning.`;
-      console.warn(warnMsg);
-    }
-
-    // REQ-0004: Create context checkpoint before sub-agent invocation
-    let checkpointId: string | undefined;
-    try {
-      const checkpointResult = this.options.contextManager.createCheckpoint(parentContext, 'subagent_create');
-      checkpointId = checkpointResult.checkpoint.checkpointId;
-      console.info(`[SubAgentManager] Created checkpoint ${checkpointId} before subagent spawn`);
-    } catch (error) {
-      const cpError = error instanceof Error ? error.message : String(error);
-      console.warn(`[SubAgentManager] Failed to create checkpoint: ${cpError}. Proceeding without checkpoint.`);
-    }
+    const parentTurnId = this.normalizeParentTurnId(request.parentTurnId);
+    const parentContext = this.prepareParentSpawnContext(request.parentContext, parentTurnId);
 
     const workspaceDir = this.resolveWorkspaceDir(request.workspaceDir);
     const selectedAgent = this.resolveAgentSelection(request.agentName, workspaceDir);
@@ -319,13 +256,9 @@ export class SubAgentManager {
       };
     }
 
-    const queue = this.ensureQueue(parentKey);
-    if (queue.queuedTaskIds.length >= MAX_QUEUED_TASKS_PER_PARENT) {
-      return {
-        ok: false,
-        code: 'queue_full',
-        error: `queue_full: parent context already has ${MAX_QUEUED_TASKS_PER_PARENT} queued sub-agent tasks`,
-      };
+    const queueFull = this.rejectIfParentQueueFull(parentKey);
+    if (queueFull) {
+      return queueFull;
     }
 
     const nextRunSeq = record.runSeq + 1;
@@ -341,17 +274,29 @@ export class SubAgentManager {
     record.queuePosition = undefined;
     record.latestResult = undefined;
     record.lastError = undefined;
+    record.lifecycleDiagnostic = undefined;
     record.agent = selectedAgent.agent;
     record.providerId = providerSelection.providerId;
+    if (parentTurnId) {
+      record.parentTurnId = parentTurnId;
+    } else {
+      delete record.parentTurnId;
+    }
     record.prompt = prompt;
     record.agentName = selectedAgent.agent?.name;
-    record.allowedTools = this.resolveEffectiveAllowedTools(parentContext, workspaceDir, request.allowedTools);
-    record.timeoutMs = this.normalizeTimeoutMs(request.timeoutMs, DEFAULT_TASK_TIMEOUT_MS);
+    record.agentProfile = selectedAgent.profile;
+    record.agentConfig = selectedAgent.profile?.config;
+    record.allowedTools = this.resolveEffectiveAllowedTools(
+      parentContext,
+      workspaceDir,
+      this.resolveAgentAllowedTools(request.allowedTools, selectedAgent.profile?.config)
+    );
+    record.timeoutMs = this.resolveTaskTimeoutMs(request.timeoutMs, selectedAgent.profile?.config);
     record.workspaceDir = workspaceDir;
 
-    if (!providerSelection.available) {
-      this.failRecordImmediately(record, `provider_unavailable:${providerSelection.providerId}`);
-      return { ok: true, status: this.toStatusPayload(record) };
+    const providerUnavailable = this.failIfProviderUnavailable(record, providerSelection);
+    if (providerUnavailable) {
+      return providerUnavailable;
     }
 
     const task = this.buildTask({
@@ -363,15 +308,10 @@ export class SubAgentManager {
       agentProfile: selectedAgent.profile,
       parentKey,
       parentContext,
+      parentTurnId,
       workspaceDir,
     });
-    this.state.tasks[task.taskId] = task;
-
-    this.enqueueTask(task, record);
-    this.persistState();
-    this.writeParentContextIndex(parentContext);
-    this.processAllQueues();
-    return { ok: true, status: this.toStatusPayload(record) };
+    return this.enqueueBuiltTaskAndReturnStatus(task, record, parentContext);
   }
 
   getStatus(parentContext: ContextRef, subagentId: string): SubAgentStatus | undefined {
@@ -414,12 +354,7 @@ export class SubAgentManager {
     const currentTime = nowIso();
 
     if (!pendingTaskId) {
-      record.status = 'canceled';
-      record.updatedAt = currentTime;
-      record.lastHeartbeatAt = currentTime;
-      record.lastError = 'cancel_requested';
-      record.queuePosition = undefined;
-      record.latestResult = this.createResultPayload({
+      const result = this.applyTerminalRecord({
         record,
         status: 'canceled',
         summary: 'Sub-agent canceled by request.',
@@ -429,8 +364,8 @@ export class SubAgentManager {
         completedAt: currentTime,
       });
       this.persistState();
-      this.writeParentContextResult(record.parentContext, record.latestResult);
-      this.writeParentContextIndex(record.parentContext);
+      this.writeParentContextResult(record.parentContext, result, record.parentTurnId);
+      this.writeParentContextIndex(record.parentContext, record.parentTurnId);
       this.resolveWaiters(record.id, record.runSeq);
       return this.toStatusPayload(record);
     }
@@ -438,12 +373,9 @@ export class SubAgentManager {
     const queue = this.ensureQueue(record.parentKey);
     if (queue.runningTaskIds.includes(pendingTaskId)) {
       this.options.turnRunner.cancelTask(pendingTaskId);
-      record.status = 'canceled';
-      record.updatedAt = currentTime;
-      record.lastHeartbeatAt = currentTime;
-      record.lastError = 'cancel_requested';
-      record.queuePosition = undefined;
-      record.latestResult = this.createResultPayload({
+      this.removeTaskFromQueue(record.parentKey, pendingTaskId);
+      delete this.state.tasks[pendingTaskId];
+      const result = this.applyTerminalRecord({
         record,
         status: 'canceled',
         summary: 'Sub-agent canceled by request.',
@@ -452,10 +384,12 @@ export class SubAgentManager {
         startedAt: record.latestResult?.startedAt,
         completedAt: currentTime,
       });
+      this.updateQueuePositions(record.parentKey);
       this.persistState();
-      this.writeParentContextResult(record.parentContext, record.latestResult);
-      this.writeParentContextIndex(record.parentContext);
+      this.writeParentContextResult(record.parentContext, result, record.parentTurnId);
+      this.writeParentContextIndex(record.parentContext, record.parentTurnId);
       this.resolveWaiters(record.id, record.runSeq);
+      this.processAllQueues();
       return this.toStatusPayload(record);
     }
 
@@ -463,12 +397,7 @@ export class SubAgentManager {
     queue.queuedTaskIds = nextQueued;
     delete this.state.tasks[pendingTaskId];
 
-    record.status = 'canceled';
-    record.updatedAt = currentTime;
-    record.lastHeartbeatAt = currentTime;
-    record.lastError = 'cancel_requested';
-    record.queuePosition = undefined;
-    record.latestResult = this.createResultPayload({
+    const result = this.applyTerminalRecord({
       record,
       status: 'canceled',
       summary: 'Sub-agent canceled before execution.',
@@ -480,12 +409,31 @@ export class SubAgentManager {
 
     this.updateQueuePositions(record.parentKey);
     this.persistState();
-    this.writeParentContextResult(record.parentContext, record.latestResult);
-    this.writeParentContextIndex(record.parentContext);
+    this.writeParentContextResult(record.parentContext, result, record.parentTurnId);
+    this.writeParentContextIndex(record.parentContext, record.parentTurnId);
     this.resolveWaiters(record.id, record.runSeq);
     this.processAllQueues();
 
     return this.toStatusPayload(record);
+  }
+
+  cancelContext(parentContext: ContextRef): number {
+    this.reconcileStaleTasks();
+    const parentKey = this.contextKey(parentContext);
+    const pendingSubagentIds = Object.values(this.state.records)
+      .filter((record) => record.parentKey === parentKey)
+      .filter((record) => !isTerminalStatus(record.status) || Boolean(this.findPendingTaskIdBySubagent(record.id)))
+      .map((record) => record.id);
+
+    let canceledCount = 0;
+    for (const subagentId of pendingSubagentIds) {
+      const beforeStatus = this.state.records[subagentId]?.status;
+      const status = this.cancel(parentContext, subagentId);
+      if (status && beforeStatus !== 'canceled') {
+        canceledCount += 1;
+      }
+    }
+    return canceledCount;
   }
 
   async getResult(
@@ -517,7 +465,7 @@ export class SubAgentManager {
 
     const timeoutMs = this.normalizeTimeoutMs(options.timeoutMs, DEFAULT_RESULT_WAIT_TIMEOUT_MS);
     return await new Promise<WaitResult>((resolve) => {
-      const timer = setTimeout(() => {
+      const timer = new ManagedTimeout().start(() => {
         this.removeWaiter(subagentId, runSeq, resolve);
         const latestRecord = this.state.records[subagentId];
         if (!latestRecord) {
@@ -561,12 +509,7 @@ export class SubAgentManager {
       if (!record) {
         continue;
       }
-      record.status = 'failed';
-      record.queuePosition = undefined;
-      record.updatedAt = nowIso();
-      record.lastHeartbeatAt = record.updatedAt;
-      record.lastError = 'process_restart';
-      record.latestResult = this.createResultPayload({
+      this.applyTerminalRecord({
         record,
         status: 'failed',
         summary: 'Sub-agent execution failed because the service restarted before completion.',
@@ -591,16 +534,17 @@ export class SubAgentManager {
       );
       for (const record of relatedRecords) {
         if (record.latestResult) {
-          this.writeParentContextResult(context, record.latestResult);
+          this.writeParentContextResult(context, record.latestResult, record.parentTurnId);
         }
       }
-      this.writeParentContextIndex(context);
+      this.writeParentContextIndex(context, this.resolvePendingParentTurnId(context));
     }
   }
 
   private reconcileStaleTasks(): void {
     const now = Date.now();
-    const staleTaskIds: string[] = [];
+    const heartbeatStaleDiagnostic = `heartbeat_stale:${HEARTBEAT_TIMEOUT_MS}`;
+    let changed = false;
     for (const [taskId, task] of Object.entries(this.state.tasks)) {
       const queue = this.ensureQueue(task.parentKey);
       if (!queue.runningTaskIds.includes(taskId)) {
@@ -615,162 +559,19 @@ export class SubAgentManager {
       if (now - heartbeatAt <= HEARTBEAT_TIMEOUT_MS) {
         continue;
       }
-      staleTaskIds.push(taskId);
-    }
-    if (staleTaskIds.length === 0) {
-      return;
-    }
-
-    const touchedParentKeys = new Set<string>();
-    for (const taskId of staleTaskIds) {
-      const task = this.state.tasks[taskId];
-      if (!task) {
-        continue;
-      }
-      const record = this.state.records[task.subagentId];
-      touchedParentKeys.add(task.parentKey);
-      this.options.turnRunner.cancelTask(taskId);
-
-      const queue = this.ensureQueue(task.parentKey);
-      queue.runningTaskIds = queue.runningTaskIds.filter((runningId) => runningId !== taskId);
-      queue.queuedTaskIds = queue.queuedTaskIds.filter((queuedId) => queuedId !== taskId);
-      delete this.state.tasks[taskId];
-
-      if (!record) {
-        continue;
-      }
       if (isTerminalStatus(record.status)) {
         continue;
       }
-      const completedAt = nowIso();
-      record.status = 'timeout';
-      record.queuePosition = undefined;
-      record.updatedAt = completedAt;
-      record.lastHeartbeatAt = completedAt;
-      record.lastError = `subagent_heartbeat_timeout:${HEARTBEAT_TIMEOUT_MS}`;
-      record.latestResult = this.createResultPayload({
-        record,
-        status: 'timeout',
-        summary: `Sub-agent heartbeat timed out after ${HEARTBEAT_TIMEOUT_MS}ms (manager reconciliation).`,
-        artifacts: emptyArtifacts(),
-        error: `subagent_heartbeat_timeout:${HEARTBEAT_TIMEOUT_MS}`,
-        startedAt: task.createdAt,
-        completedAt,
-      });
-      this.writeParentContextResult(record.parentContext, record.latestResult);
-      this.writeParentContextIndex(record.parentContext);
-      this.resolveWaiters(record.id, record.runSeq);
-    }
-
-    for (const parentKey of touchedParentKeys) {
-      this.updateQueuePositions(parentKey);
-    }
-    this.processAllQueues();
-    this.persistState();
-  }
-
-
-  // REQ-0027: Retry queue management
-  private addToRetryQueue(record: SubAgentRecord, failureReason: string): void {
-    if ((record.retryCount ?? 0) >= MAX_RETRY_ATTEMPTS) {
-      console.info(`[SubAgentManager] Max retries (${MAX_RETRY_ATTEMPTS}) reached for ${record.id}, not adding to retry queue`);
-      return;
-    }
-    record.retryCount = (record.retryCount ?? 0) + 1;
-    const existingIndex = this.state.retryQueue.findIndex((entry) => entry.subagentId === record.id);
-    if (existingIndex >= 0) {
-      this.state.retryQueue[existingIndex].retryCount = record.retryCount;
-      this.state.retryQueue[existingIndex].lastFailedAt = nowIso();
-      this.state.retryQueue[existingIndex].failureReason = failureReason;
-      this.state.retryQueue[existingIndex].providerId = record.providerId;
-    } else {
-      const task = Object.values(this.state.tasks).find((t) => t.subagentId === record.id);
-      this.state.retryQueue.push({
-        subagentId: record.id,
-        parentContext: record.parentContext,
-        parentKey: record.parentKey,
-        operation: task?.operation ?? 'create',
-        prompt: task?.prompt ?? record.prompt ?? '',
-        providerId: task?.providerId ?? record.providerId,
-        agentName: task?.agentName,
-        allowedTools: task?.allowedTools,
-        timeoutMs: task?.timeoutMs,
-        workspaceDir: task?.workspaceDir,
-        retryCount: record.retryCount,
-        lastFailedAt: nowIso(),
-        failureReason,
-      });
-    }
-    console.info(`[SubAgentManager] Added ${record.id} to retry queue (attempt ${record.retryCount}/${MAX_RETRY_ATTEMPTS})`);
-    this.persistState();
-  }
-
-
-
-
-  private processRetryQueue(): void {
-    const now = Date.now();
-    const toRemove: string[] = [];
-    for (const entry of this.state.retryQueue) {
-      if (entry.retryCount >= MAX_RETRY_ATTEMPTS) {
-        toRemove.push(entry.subagentId);
-        console.warn(`[SubAgentManager] Retry entry ${entry.subagentId} exceeded max attempts, removing`);
-        continue;
+      if (record.lifecycleDiagnostic !== heartbeatStaleDiagnostic) {
+        record.lifecycleDiagnostic = heartbeatStaleDiagnostic;
+        record.updatedAt = nowIso();
+        changed = true;
       }
-      const lastFailedMs = now - new Date(entry.lastFailedAt).getTime();
-      if (lastFailedMs < RETRY_DELAY_MS) {
-        continue;
-      }
-      // Retry: create a new task
-      console.info(`[SubAgentManager] Retrying subagent ${entry.subagentId} (attempt ${entry.retryCount + 1}/${MAX_RETRY_ATTEMPTS})`);
-      const newTaskId = this.generateTaskId();
-      const createdAt = nowIso();
-      const newSubagentId = this.generateSubAgentId();
-      const newRecord: SubAgentRecord = {
-        id: newSubagentId,
-        parentContext: entry.parentContext,
-        parentKey: entry.parentKey,
-        context: this.createSubAgentContextRef(entry.parentContext, newSubagentId),
-        status: 'queued',
-        runSeq: 1,
-        providerId: entry.providerId,
-        prompt: entry.prompt,
-        agentName: entry.agentName,
-        allowedTools: entry.allowedTools,
-        timeoutMs: entry.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS,
-        workspaceDir: entry.workspaceDir,
-        createdAt,
-        updatedAt: createdAt,
-        lastHeartbeatAt: createdAt,
-      };
-      const newTask: SubAgentQueuedTask = {
-        taskId: newTaskId,
-        subagentId: newSubagentId,
-        parentKey: entry.parentKey,
-        parentContext: entry.parentContext,
-        subagentContext: newRecord.context,
-        operation: entry.operation,
-        prompt: entry.prompt,
-        agentName: entry.agentName,
-        providerId: entry.providerId,
-        allowedTools: entry.allowedTools,
-        timeoutMs: entry.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS,
-        workspaceDir: entry.workspaceDir,
-        createdAt,
-      };
-      this.state.records[newSubagentId] = newRecord;
-      this.state.tasks[newTaskId] = newTask;
-      this.state.retryQueue = this.state.retryQueue.filter((e) => e.subagentId !== entry.subagentId);
-      toRemove.push(entry.subagentId);
-      this.enqueueTask(newTask, newRecord);
     }
-    if (toRemove.length > 0) {
-      this.state.retryQueue = this.state.retryQueue.filter((e) => !toRemove.includes(e.subagentId));
+    if (changed) {
       this.persistState();
     }
   }
-
-
 
   private executeTaskSchedulingError(task: SubAgentQueuedTask, reason: string): void {
     this.removeTaskFromQueue(task.parentKey, task.taskId);
@@ -796,8 +597,8 @@ export class SubAgentManager {
       completedAt: nowIso(),
     });
     this.persistState();
-    this.writeParentContextResult(record.parentContext, record.latestResult);
-    this.writeParentContextIndex(record.parentContext);
+    this.writeParentContextResult(record.parentContext, record.latestResult, record.parentTurnId);
+    this.writeParentContextIndex(record.parentContext, record.parentTurnId);
     this.resolveWaiters(record.id, record.runSeq);
   }
 
@@ -808,6 +609,7 @@ export class SubAgentManager {
     record.lastHeartbeatAt = current;
     record.queuePosition = queue.queuedTaskIds.length + 1;
     record.lastError = undefined;
+    record.lifecycleDiagnostic = undefined;
     record.status = 'queued';
     queue.queuedTaskIds.push(task.taskId);
     this.updateQueuePositions(task.parentKey);
@@ -821,11 +623,7 @@ export class SubAgentManager {
 
     const record = this.state.records[task.subagentId];
     if (!record) {
-      this.removeTaskFromQueue(task.parentKey, taskId);
-      delete this.state.tasks[taskId];
-      this.updateQueuePositions(task.parentKey);
-      this.persistState();
-      this.processAllQueues();
+      this.taskSettlementService.settleMissingTask(task, taskId);
       return;
     }
     this.touchHeartbeat(task.subagentId);
@@ -838,36 +636,23 @@ export class SubAgentManager {
     // REQ-0004: Create context checkpoint before sub-agent execution
     // This guards against silent context loss during sub-agent execution
     let checkpointResult: import('../context/ContextManager.js').ContextCheckpointResult | undefined;
-    try {
-      checkpointResult = this.options.contextManager.createCheckpoint(
-        task.parentContext,
-        `subagent:${task.subagentId}:${task.operation}:runSeq${record.runSeq}`
-      );
-    } catch (err) {
-      // Log but don't block task execution if checkpoint fails
-      console.error(`[SubAgentManager] Failed to create checkpoint for task ${task.taskId}:`, err);
+    if (!this.isParentTurnPending(task.parentTurnId ?? record.parentTurnId)) {
+      try {
+        checkpointResult = this.options.contextManager.createCheckpoint(
+          task.parentContext,
+          `subagent:${task.subagentId}:${task.operation}:runSeq${record.runSeq}`
+        );
+      } catch (err) {
+        // Log but don't block task execution if checkpoint fails
+        console.error(`[SubAgentManager] Failed to create checkpoint for task ${task.taskId}:`, err);
+      }
     }
 
-    let output:
-      | {
-          status: SubAgentLifecycleStatus;
-          summary: string;
-          artifacts: SubAgentArtifact;
-          finishReason?: string;
-          usage?: {
-            promptTokens: number;
-            completionTokens: number;
-            totalTokens: number;
-          };
-          error?: string;
-          startedAt: string;
-          completedAt: string;
-        }
-      | undefined;
+    let output: SubAgentExecutionOutput | undefined;
 
     try {
-      output = await this.options.turnRunner.runTask(executionTask, () => {
-        this.touchHeartbeat(task.subagentId);
+      output = await this.options.turnRunner.runTask(executionTask, (update) => {
+        this.handleTaskProgress(task.subagentId, update);
       });
     } catch (error) {
       output = {
@@ -879,12 +664,21 @@ export class SubAgentManager {
         completedAt: nowIso(),
       };
     }
+    const latestRecord = this.state.records[task.subagentId];
+    if (!latestRecord) {
+      this.taskSettlementService.settleMissingTask(task, taskId);
+      return;
+    }
+    const alreadyTerminal = isTerminalStatus(latestRecord.status) &&
+      latestRecord.latestResult?.runSeq === latestRecord.runSeq;
+
     // REQ-0005: Validate context continuity after sub-agent execution
     // If validation fails, perform rollback to checkpoint state
     if (
       checkpointResult?.checkpoint &&
       shouldValidateContextContinuity &&
       output.status !== 'canceled' &&
+      !alreadyTerminal &&
       this.getParentRunningCount(task.parentKey) <= 1
     ) {
       try {
@@ -900,84 +694,45 @@ export class SubAgentManager {
             `Rollback ${validation.rollbackPerformed ? 'performed' : 'failed'}.`
           );
           // Emit a context continuity event for monitoring
-          record.lastError = `context_continuity_violation:${validation.expectedHash}:${validation.actualHash}`;
+          latestRecord.lastError = `context_continuity_violation:${validation.expectedHash}:${validation.actualHash}`;
         }
       } catch (err) {
         console.error(`[SubAgentManager] Failed to validate checkpoint for task ${task.taskId}:`, err);
       }
     }
 
-
-    const latestRecord = this.state.records[task.subagentId];
-    if (!latestRecord) {
-      this.removeTaskFromQueue(task.parentKey, taskId);
-      delete this.state.tasks[taskId];
-      this.updateQueuePositions(task.parentKey);
-      this.persistState();
-      this.processAllQueues();
-      return;
-    }
-
-    const canceledByUser = latestRecord.status === 'canceled' && latestRecord.lastError === 'cancel_requested';
-    if (!canceledByUser) {
-      latestRecord.status = output.status;
-      latestRecord.queuePosition = undefined;
-      latestRecord.updatedAt = nowIso();
-      latestRecord.lastHeartbeatAt = latestRecord.updatedAt;
-      latestRecord.lastError = output.error;
-      latestRecord.latestResult = this.createResultPayload({
-        record: latestRecord,
-        status: output.status,
-        summary: output.summary,
-        artifacts: output.artifacts,
-        finishReason: output.finishReason,
-        usage: output.usage,
-        error: output.error,
-        startedAt: output.startedAt,
-        completedAt: output.completedAt,
-      });
-    } else {
-      latestRecord.queuePosition = undefined;
-      latestRecord.updatedAt = nowIso();
-      latestRecord.lastHeartbeatAt = latestRecord.updatedAt;
-      if (!latestRecord.latestResult || latestRecord.latestResult.runSeq !== latestRecord.runSeq) {
-        latestRecord.latestResult = this.createResultPayload({
-          record: latestRecord,
-          status: 'canceled',
-          summary: 'Sub-agent canceled by request.',
-          artifacts: output.artifacts,
-          finishReason: output.finishReason,
-          usage: output.usage,
-          error: 'cancel_requested',
-          startedAt: output.startedAt,
-          completedAt: output.completedAt,
-        });
-      }
-    }
-
-    this.removeTaskFromQueue(task.parentKey, taskId);
-    delete this.state.tasks[taskId];
-
-    this.updateQueuePositions(task.parentKey);
-    this.persistState();
-
-    if (latestRecord.latestResult) {
-      this.writeParentContextResult(latestRecord.parentContext, latestRecord.latestResult);
-    }
-    this.writeParentContextIndex(latestRecord.parentContext);
-    this.resolveWaiters(latestRecord.id, latestRecord.runSeq);
-
-    this.processAllQueues();
+    this.taskSettlementService.settleCompletedTask({
+      task,
+      taskId,
+      record: latestRecord,
+      output,
+      alreadyTerminal,
+    });
   }
 
-  private touchHeartbeat(subagentId: string): void {
+  private handleTaskProgress(subagentId: string, update?: SubAgentProgressUpdate): void {
+    if (update?.type === 'timeout_warning' && update.timeoutWarning?.threshold === 1) {
+      const timeoutMs = this.state.records[subagentId]?.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
+      this.touchHeartbeat(subagentId, {
+        lifecycleDiagnostic: `task_deadline_exceeded:${timeoutMs}`,
+      });
+      return;
+    }
+    this.touchHeartbeat(subagentId);
+  }
+
+  private touchHeartbeat(subagentId: string, options?: { lifecycleDiagnostic?: string }): void {
     const record = this.state.records[subagentId];
     if (!record || isTerminalStatus(record.status)) {
       return;
     }
     const current = nowIso();
-    record.lastHeartbeatAt = current;
-    record.updatedAt = current;
+    applySubAgentHeartbeat(record, current);
+    if (options?.lifecycleDiagnostic) {
+      record.lifecycleDiagnostic = options.lifecycleDiagnostic;
+    } else if (record.lifecycleDiagnostic?.startsWith('heartbeat_stale:')) {
+      record.lifecycleDiagnostic = undefined;
+    }
     this.markStateDirty();
   }
 
@@ -985,7 +740,7 @@ export class SubAgentManager {
     const queue = this.ensureQueue(parentKey);
     queue.runningTaskIds = queue.runningTaskIds.filter((taskId) => Boolean(this.state.tasks[taskId]));
     const startedTaskIds: string[] = [];
-    const startedParentContexts: ContextRef[] = [];
+    const startedParentContexts: Array<{ context: ContextRef; parentTurnId?: string }> = [];
 
     while (queue.queuedTaskIds.length > 0 && this.canStartMoreForParent(parentKey)) {
       const nextTaskId = queue.queuedTaskIds.shift();
@@ -1000,17 +755,17 @@ export class SubAgentManager {
       queue.runningTaskIds.push(nextTaskId);
       const nextRecord = this.state.records[nextTask.subagentId];
       if (nextRecord) {
-        nextRecord.status = 'running';
-        nextRecord.queuePosition = undefined;
         const current = nowIso();
-        nextRecord.updatedAt = current;
-        nextRecord.lastHeartbeatAt = current;
+        applySubAgentRunningTransition(nextRecord, current);
       }
       if (!nextRecord) {
         this.executeTaskSchedulingError(nextTask, 'subagent_record_missing');
       } else {
         startedTaskIds.push(nextTaskId);
-        startedParentContexts.push(nextRecord.parentContext);
+        startedParentContexts.push({
+          context: nextRecord.parentContext,
+          parentTurnId: nextTask.parentTurnId ?? nextRecord.parentTurnId,
+        });
       }
     }
 
@@ -1018,12 +773,13 @@ export class SubAgentManager {
     this.persistState();
 
     const indexed = new Set<string>();
-    for (const context of startedParentContexts) {
+    for (const startedParent of startedParentContexts) {
+      const context = startedParent.context;
       const key = this.contextKey(context);
       if (indexed.has(key)) {
         continue;
       }
-      this.writeParentContextIndex(context);
+      this.writeParentContextIndex(context, startedParent.parentTurnId);
       indexed.add(key);
     }
     for (const startedTaskId of startedTaskIds) {
@@ -1042,26 +798,28 @@ export class SubAgentManager {
   }
 
   private failRecordImmediately(record: SubAgentRecord, reason: string): void {
-    record.status = 'failed';
-    record.queuePosition = undefined;
-    record.updatedAt = nowIso();
-    record.lastHeartbeatAt = record.updatedAt;
-    record.lastError = reason;
-    record.latestResult = this.createResultPayload({
+    const now = nowIso();
+    const result = this.applyTerminalRecord({
       record,
       status: 'failed',
       summary: `Sub-agent failed before execution: ${reason}`,
       artifacts: emptyArtifacts(),
       error: reason,
-      startedAt: nowIso(),
-      completedAt: nowIso(),
+      startedAt: now,
+      completedAt: now,
     });
-    this.persistState();
-    if (record.latestResult) {
-      this.writeParentContextResult(record.parentContext, record.latestResult);
+    this.taskSettlementService.settleImmediateResult(record, result);
+  }
+
+  private failIfProviderUnavailable(
+    record: SubAgentRecord,
+    providerSelection: { providerId: string; available: boolean }
+  ): SubAgentCreateOrResumeResult | null {
+    if (providerSelection.available) {
+      return null;
     }
-    this.writeParentContextIndex(record.parentContext);
-    this.resolveWaiters(record.id, record.runSeq);
+    this.failRecordImmediately(record, `provider_unavailable:${providerSelection.providerId}`);
+    return { ok: true, status: this.toStatusPayload(record) };
   }
 
   private selectProviderId(input: {
@@ -1095,6 +853,39 @@ export class SubAgentManager {
     return matched.enabled !== false;
   }
 
+  private prepareParentSpawnContext(parentContext: ContextRef, parentTurnId?: string): ContextRef {
+    const normalizedParentContext = this.normalizeContextRef(parentContext);
+    this.warnOnParentContextIntegrityJump(normalizedParentContext);
+    if (!this.isParentTurnPending(parentTurnId)) {
+      this.createParentSpawnCheckpoint(normalizedParentContext);
+    }
+    return normalizedParentContext;
+  }
+
+  private warnOnParentContextIntegrityJump(parentContext: ContextRef): void {
+    // REQ-0009: Context integrity check before subagent spawn
+    const integrityCheck = this.options.contextManager.checkContextIntegrity(parentContext);
+    if (integrityCheck.valid) {
+      return;
+    }
+    const jumpWarning = integrityCheck.versionChain;
+    const warnMsg = `[SubAgentManager] Context version jump detected for ${parentContext?.scope}/${parentContext?.namespace} :: ` +
+      `jump from v${jumpWarning?.previousVersion} to v${jumpWarning?.currentVersion} (size: ${jumpWarning?.gapSize}). ` +
+      `Subagent spawn may have stale context. Proceeding with warning.`;
+    console.warn(warnMsg);
+  }
+
+  private createParentSpawnCheckpoint(parentContext: ContextRef): void {
+    // REQ-0004: Create context checkpoint before sub-agent invocation
+    try {
+      const checkpointResult = this.options.contextManager.createCheckpoint(parentContext, 'subagent_create');
+      console.info(`[SubAgentManager] Created checkpoint ${checkpointResult.checkpoint.checkpointId} before subagent spawn`);
+    } catch (error) {
+      const cpError = error instanceof Error ? error.message : String(error);
+      console.warn(`[SubAgentManager] Failed to create checkpoint: ${cpError}. Proceeding without checkpoint.`);
+    }
+  }
+
   private buildTask(input: {
     subagentId: string;
     operation: 'create' | 'resume';
@@ -1105,24 +896,45 @@ export class SubAgentManager {
     agentProfile?: SubAgentAssignedAgentProfile;
     parentKey: string;
     parentContext: ContextRef;
+    parentTurnId?: string;
   }): SubAgentQueuedTask {
-    const timeoutMs = this.normalizeTimeoutMs(input.request.timeoutMs, DEFAULT_TASK_TIMEOUT_MS);
+    const agentConfig = input.agentProfile?.config;
+    const timeoutMs = this.resolveTaskTimeoutMs(input.request.timeoutMs, agentConfig);
     return {
       taskId: this.generateTaskId(),
       subagentId: input.subagentId,
       parentKey: input.parentKey,
       parentContext: input.parentContext,
+      ...(input.parentTurnId ? { parentTurnId: input.parentTurnId } : {}),
       subagentContext: input.context,
       operation: input.operation,
       prompt: String(input.request.prompt ?? '').trim(),
       agentName: String(input.request.agentName ?? '').trim() || undefined,
       agentProfile: input.agentProfile,
+      agentConfig,
       providerId: input.providerId,
-      allowedTools: this.resolveEffectiveAllowedTools(input.parentContext, input.workspaceDir, input.request.allowedTools),
+      allowedTools: this.resolveEffectiveAllowedTools(
+        input.parentContext,
+        input.workspaceDir,
+        this.resolveAgentAllowedTools(input.request.allowedTools, agentConfig)
+      ),
       timeoutMs,
       workspaceDir: input.workspaceDir,
       createdAt: nowIso(),
     };
+  }
+
+  private enqueueBuiltTaskAndReturnStatus(
+    task: SubAgentQueuedTask,
+    record: SubAgentRecord,
+    parentContext: ContextRef
+  ): SubAgentCreateOrResumeResult {
+    this.state.tasks[task.taskId] = task;
+    this.enqueueTask(task, record);
+    this.persistState();
+    this.writeParentContextIndex(parentContext, task.parentTurnId ?? record.parentTurnId);
+    this.processAllQueues();
+    return { ok: true, status: this.toStatusPayload(record) };
   }
 
   private resolveWorkspaceDir(value?: string): string {
@@ -1138,16 +950,19 @@ export class SubAgentManager {
       globalAgentsDir: this.options.getGlobalAgentsDir(),
       workspaceDir,
       includeWorkspace: true,
-    });
+    }).filter(isAgentProfileVisibleToSubagentManager);
   }
 
-  private toAssignedAgent(profile: Pick<AgentProfile, 'name' | 'source' | 'description' | 'path' | 'mtime'>): SubAgentAssignedAgent {
+  private toAssignedAgent(
+    profile: Pick<AgentProfile, 'name' | 'source' | 'description' | 'path' | 'mtime' | 'config' | 'configWarnings' | 'configPath'>
+  ): SubAgentAssignedAgent {
     return {
       name: profile.name,
       source: profile.source,
       description: profile.description,
       path: profile.path,
       mtime: profile.mtime,
+      config: toAgentProfileConfigView(profile.config, profile.configWarnings, profile.configPath),
     };
   }
 
@@ -1184,7 +999,7 @@ export class SubAgentManager {
   private toStatusPayload(record: SubAgentRecord): SubAgentStatus {
     const queue = this.ensureQueue(record.parentKey);
     const running = queue.runningTaskIds.some((taskId) => this.state.tasks[taskId]?.subagentId === record.id);
-    const effectiveAllowedTools = this.resolveEffectiveAllowedTools(
+    const effectiveAllowedTools = this.resolveEffectiveAllowedToolsForStatus(
       record.parentContext,
       record.workspaceDir,
       record.allowedTools
@@ -1204,8 +1019,10 @@ export class SubAgentManager {
       lastHeartbeatAt: record.lastHeartbeatAt,
       latestResult: record.latestResult,
       lastError: record.lastError,
+      lifecycleDiagnostic: record.lifecycleDiagnostic,
       prompt: record.prompt,
       providerId: record.providerId,
+      agentConfig: record.agentConfig,
       allowedTools: record.allowedTools,
       effectiveAllowedTools,
       workspaceDir: record.workspaceDir,
@@ -1246,7 +1063,46 @@ export class SubAgentManager {
     };
   }
 
-  private writeParentContextResult(parentContext: ContextRef, result: SubAgentResult): void {
+  private applyTerminalRecord(input: {
+    record: SubAgentRecord;
+    status: SubAgentLifecycleStatus;
+    summary: string;
+    artifacts: SubAgentArtifact;
+    finishReason?: string;
+    usage?: {
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+    };
+    error?: string;
+    startedAt?: string;
+    completedAt?: string;
+  }): SubAgentResult {
+    if (!isTerminalStatus(input.status)) {
+      throw new Error(`subagent_non_terminal_result:${input.status}`);
+    }
+    const completedAt = input.completedAt ?? nowIso();
+    const result = this.createResultPayload({
+      record: input.record,
+      status: input.status,
+      summary: input.summary,
+      artifacts: input.artifacts,
+      finishReason: input.finishReason,
+      usage: input.usage,
+      error: input.error,
+      startedAt: input.startedAt,
+      completedAt,
+    });
+    applySubAgentTerminalTransition(input.record, {
+      status: input.status as Extract<SubAgentLifecycleStatus, 'succeeded' | 'failed' | 'canceled' | 'timeout'>,
+      nowIso: completedAt,
+      error: input.error,
+      result,
+    });
+    return result;
+  }
+
+  private writeParentContextResult(parentContext: ContextRef, result: SubAgentResult, parentTurnId?: string): void {
     const key = `subagent.${result.subagentId}.latest`;
     const value = JSON.stringify({
       subagentId: result.subagentId,
@@ -1260,10 +1116,15 @@ export class SubAgentManager {
       startedAt: result.startedAt ?? null,
       completedAt: result.completedAt ?? null,
     });
-    this.safeWriteContext(parentContext, key, value);
+    this.safeWriteContext(
+      parentContext,
+      key,
+      value,
+      parentTurnId ?? this.state.records[result.subagentId]?.parentTurnId
+    );
   }
 
-  private writeParentContextIndex(parentContext: ContextRef): void {
+  private writeParentContextIndex(parentContext: ContextRef, parentTurnId?: string): void {
     const parentKey = this.contextKey(parentContext);
     const entries = Object.values(this.state.records)
       .filter((record) => record.parentKey === parentKey)
@@ -1284,15 +1145,52 @@ export class SubAgentManager {
       total: entries.length,
       subagents: entries,
     });
-    this.safeWriteContext(parentContext, 'subagent.index', value);
+    this.safeWriteContext(
+      parentContext,
+      'subagent.index',
+      value,
+      parentTurnId ?? this.resolvePendingParentTurnId(parentContext)
+    );
   }
 
-  private safeWriteContext(parentContext: ContextRef, key: string, value: string): void {
+  private safeWriteContext(parentContext: ContextRef, key: string, value: string, parentTurnId?: string): void {
     try {
-      this.options.contextManager.writeNow(parentContext, key, truncate(value, 8000));
+      const truncated = truncate(value, 8000);
+      const pendingParentTurnId = this.resolvePendingParentTurnId(parentContext, parentTurnId);
+      if (pendingParentTurnId) {
+        this.options.contextManager.recordContextPatch(pendingParentTurnId, {
+          op: 'set',
+          key,
+          value: truncated,
+          source: 'subagent',
+        });
+        return;
+      }
+      this.options.contextManager.writeNow(parentContext, key, truncated);
     } catch {
       // ignore writeback errors to keep scheduler path stable
     }
+  }
+
+  private normalizeParentTurnId(turnId: string | null | undefined): string | undefined {
+    const normalized = String(turnId ?? '').trim();
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  private isParentTurnPending(turnId: string | null | undefined): boolean {
+    return this.options.contextManager.hasPendingTurn(this.normalizeParentTurnId(turnId));
+  }
+
+  private resolvePendingParentTurnId(parentContext: ContextRef, preferredTurnId?: string): string | undefined {
+    const normalizedPreferred = this.normalizeParentTurnId(preferredTurnId);
+    if (this.isParentTurnPending(normalizedPreferred)) {
+      return normalizedPreferred;
+    }
+    const parentKey = this.contextKey(parentContext);
+    const pendingRecord = Object.values(this.state.records)
+      .filter((record) => record.parentKey === parentKey && this.isParentTurnPending(record.parentTurnId))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+    return this.normalizeParentTurnId(pendingRecord?.parentTurnId);
   }
 
   private resolveWaiters(subagentId: string, runSeq: number): void {
@@ -1323,7 +1221,7 @@ export class SubAgentManager {
 
     const statusPayload = this.toStatusPayload(record);
     for (const waiter of resolved) {
-      clearTimeout(waiter.timer);
+      waiter.timer.clear();
       waiter.resolve({
         status: statusPayload,
         result: record.latestResult,
@@ -1405,17 +1303,10 @@ export class SubAgentManager {
   }
 
   private normalizeAllowedTools(allowedTools?: string[]): string[] | undefined {
-    if (!allowedTools || allowedTools.length === 0) {
+    if (allowedTools === undefined) {
       return undefined;
     }
-    const normalized = Array.from(
-      new Set(
-        allowedTools
-          .map((value) => String(value ?? '').trim().toLowerCase())
-          .filter((value) => value.length > 0 && value !== 'context_manage' && value !== 'subagent_manage')
-      )
-    );
-    return normalized.length > 0 ? normalized : undefined;
+    return normalizeAllowedToolNames(allowedTools, { preserveEmpty: true });
   }
 
   private resolveEffectiveAllowedTools(
@@ -1433,12 +1324,33 @@ export class SubAgentManager {
       return normalized;
     }
     return Array.from(
-      new Set(
-        resolved
-          .map((value) => String(value ?? '').trim().toLowerCase())
-          .filter((value) => value.length > 0 && value !== 'context_manage' && value !== 'subagent_manage')
-      )
+      new Set(normalizeAllowedToolNames(resolved, { preserveEmpty: true }) ?? [])
     );
+  }
+
+  private resolveEffectiveAllowedToolsForStatus(
+    parentContext: ContextRef,
+    workspaceDir: string | undefined,
+    allowedTools?: string[]
+  ): string[] | undefined {
+    try {
+      return this.resolveEffectiveAllowedTools(parentContext, workspaceDir, allowedTools);
+    } catch {
+      return this.normalizeAllowedTools(allowedTools);
+    }
+  }
+
+  private resolveAgentAllowedTools(
+    requestAllowedTools: string[] | undefined,
+    agentConfig: AgentProfileConfig | undefined
+  ): string[] | undefined {
+    void agentConfig;
+    return intersectAllowedToolNames(requestAllowedTools, undefined, { preserveEmpty: true });
+  }
+
+  private resolveTaskTimeoutMs(value: number | undefined, agentConfig: AgentProfileConfig | undefined): number {
+    void agentConfig;
+    return this.normalizeTimeoutMs(value, DEFAULT_TASK_TIMEOUT_MS);
   }
 
   private normalizeTimeoutMs(value: number | undefined, fallback: number): number {
@@ -1449,31 +1361,19 @@ export class SubAgentManager {
     if (rounded <= 0) {
       return fallback;
     }
-    return Math.min(rounded, 60 * 60 * 1000);
+    return Math.min(rounded, DEFAULT_TASK_TIMEOUT_MS);
   }
 
   private normalizeContextRef(ref: ContextRef): ContextRef {
-    const scope = ref.scope;
-    if (scope !== 'session' && scope !== 'workspace' && scope !== 'global') {
-      throw new Error(`Invalid context scope: ${String(scope)}`);
-    }
-    const namespace = String(ref.namespace ?? '').trim();
-    if (!namespace) {
-      throw new Error('context.namespace cannot be empty');
-    }
-    return { scope, namespace };
+    return normalizeSubAgentContextRef(ref);
   }
 
   private contextKey(ref: ContextRef): string {
-    const normalized = this.normalizeContextRef(ref);
-    return `${normalized.scope}:${normalized.namespace}`;
+    return subAgentContextKey(ref);
   }
 
   private createSubAgentContextRef(parentContext: ContextRef, subagentId: string): ContextRef {
-    return {
-      scope: 'global',
-      namespace: `sub:${parentContext.namespace}:${subagentId}`,
-    };
+    return createSubAgentContextRef(parentContext, subagentId);
   }
 
   private getMaxParallelPerParent(): number {
@@ -1549,35 +1449,31 @@ export class SubAgentManager {
     return created;
   }
 
+  private rejectIfParentQueueFull(parentKey: string): SubAgentCreateOrResumeResult | null {
+    const queue = this.ensureQueue(parentKey);
+    if (queue.queuedTaskIds.length < MAX_QUEUED_TASKS_PER_PARENT) {
+      return null;
+    }
+    return {
+      ok: false,
+      code: 'queue_full',
+      error: `queue_full: parent context already has ${MAX_QUEUED_TASKS_PER_PARENT} queued sub-agent tasks`,
+    };
+  }
+
   private persistState(): void {
-    const dir = path.dirname(this.registryFilePath);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this.registryFilePath, JSON.stringify(this.state, null, 2), 'utf-8');
+    this.stateStore.write(this.state);
     this.stateDirty = false;
   }
 
   private loadState(): SubAgentRegistryState {
-    if (!fs.existsSync(this.registryFilePath)) {
-      return this.createEmptyState();
-    }
-    try {
-      const raw = fs.readFileSync(this.registryFilePath, 'utf-8');
-      const parsed = JSON.parse(raw) as unknown;
-      if (!this.isValidLoadedState(parsed)) {
-        this.resetRegistryFile();
-        return this.createEmptyState();
-      }
-      return {
-        version: REGISTRY_VERSION,
-        records: parsed.records ?? {},
-        tasks: parsed.tasks ?? {},
-        queues: parsed.queues ?? {},
-        retryQueue: parsed.retryQueue ?? [],
-      };
-    } catch {
-      this.resetRegistryFile();
-      return this.createEmptyState();
-    }
+    const parsed = this.stateStore.read();
+    return {
+      version: REGISTRY_VERSION,
+      records: parsed.records ?? {},
+      tasks: parsed.tasks ?? {},
+      queues: parsed.queues ?? {},
+    };
   }
 
   private isValidLoadedState(value: unknown): value is SubAgentRegistryState {
@@ -1597,9 +1493,6 @@ export class SubAgentManager {
     if (!parsed.queues || typeof parsed.queues !== 'object') {
       return false;
     }
-    if (!Array.isArray(parsed.retryQueue)) {
-      return false;
-    }
     for (const queue of Object.values(parsed.queues)) {
       if (!queue || typeof queue !== 'object') {
         return false;
@@ -1614,30 +1507,21 @@ export class SubAgentManager {
     return true;
   }
 
-  private resetRegistryFile(): void {
-    try {
-      fs.rmSync(this.registryFilePath, { force: true });
-    } catch {
-      // ignore hard-cut cleanup failures
-    }
-  }
-
   private createEmptyState(): SubAgentRegistryState {
     return {
       version: REGISTRY_VERSION,
       records: {},
       tasks: {},
       queues: {},
-      retryQueue: [],
     };
   }
 
   private generateSubAgentId(): string {
-    return `suba-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    return createStateId('suba', 3);
   }
 
   private generateTaskId(): string {
-    return `subtask-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    return createStateId('subtask', 4);
   }
 }
 

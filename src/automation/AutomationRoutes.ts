@@ -12,6 +12,26 @@ interface AutomationRoutesDeps {
   getConfig: () => AgentConfig;
 }
 
+interface AutomationScheduleRouteInput {
+  frequency?: string;
+  intervalSeconds?: number;
+  minute?: number;
+  hour?: number;
+  weekday?: number;
+}
+
+interface AutomationJobRouteInput {
+  name?: string;
+  prompt?: string;
+  workspaceDir?: string;
+  skills?: string[];
+  agentName?: string | null;
+  schedule?: AutomationScheduleRouteInput;
+  timezone?: string;
+  enabled?: boolean;
+  llmSelection?: SessionLlmSelectionInput;
+}
+
 export class AutomationRoutes {
   private readonly store: AutomationStore;
   private readonly executionService: AutomationExecutionService;
@@ -28,7 +48,7 @@ export class AutomationRoutes {
   register(app: Express): void {
     app.get('/api/automations', (_req: Request, res: Response) => {
       try {
-        const items = this.store.listJobs();
+        const items = this.store.listJobs().filter((item) => !item.systemTask);
         res.json({ items });
       } catch (error) {
         res.status(500).json({ error: String(error) });
@@ -37,34 +57,16 @@ export class AutomationRoutes {
 
     app.post('/api/automations', (req: Request, res: Response) => {
       try {
-        const body = req.body as {
-          name?: string;
-          prompt?: string;
-          workspaceDir?: string;
-          skills?: string[];
-          schedule?: {
-            frequency?: string;
-            minute?: number;
-            hour?: number;
-            weekday?: number;
-          };
-          timezone?: string;
-          enabled?: boolean;
-          llmSelection?: SessionLlmSelectionInput;
-        };
+        const body = req.body as AutomationJobRouteInput;
         const llmSelection = this.resolveAutomationLlmSelection(body.llmSelection);
         const timezone = normalizeAutomationTimezone(body.timezone);
-        const schedule = normalizeAutomationSchedule({
-          frequency: body.schedule?.frequency as 'hourly' | 'daily' | 'weekly',
-          minute: body.schedule?.minute,
-          hour: body.schedule?.hour,
-          weekday: body.schedule?.weekday,
-        });
+        const schedule = this.resolveAutomationSchedule(body.schedule);
         const item = this.store.createJob({
           name: String(body.name ?? '').trim(),
           prompt: String(body.prompt ?? '').trim(),
           workspaceDir: String(body.workspaceDir ?? '').trim() || this.getDefaultWorkspaceDir(),
-          skills: Array.isArray(body.skills) ? body.skills : [],
+          skills: this.resolveAutomationSkills(body.skills),
+          agentName: this.normalizeAutomationAgentName(body.agentName),
           llmSelection,
           schedule,
           timezone,
@@ -81,35 +83,17 @@ export class AutomationRoutes {
     app.put('/api/automations/:id', (req: Request, res: Response) => {
       try {
         const id = String(req.params.id ?? '').trim();
-        const existing = this.store.getJob(id);
+        const existing = this.getMutableAutomationJobOrRespond(id, res);
         if (!existing) {
-          res.status(404).json({ error: `automation not found: ${id}` });
           return;
         }
-        if (existing.readOnly) {
-          res.status(403).json({ error: 'system automation is read-only' });
-          return;
-        }
-        const body = req.body as {
-          name?: string;
-          prompt?: string;
-          workspaceDir?: string;
-          skills?: string[];
-          schedule?: {
-            frequency?: string;
-            minute?: number;
-            hour?: number;
-            weekday?: number;
-          };
-          timezone?: string;
-          enabled?: boolean;
-          llmSelection?: SessionLlmSelectionInput;
-        };
+        const body = req.body as AutomationJobRouteInput;
         const patch: {
           name?: string;
           prompt?: string;
           workspaceDir?: string;
           skills?: string[];
+          agentName?: string;
           llmSelection?: AutomationJob['llmSelection'];
           schedule?: AutomationJob['schedule'];
           timezone?: string;
@@ -125,18 +109,16 @@ export class AutomationRoutes {
           patch.workspaceDir = String(body.workspaceDir ?? '').trim();
         }
         if (body.skills !== undefined) {
-          patch.skills = Array.isArray(body.skills) ? body.skills : [];
+          patch.skills = this.resolveAutomationSkills(body.skills);
+        }
+        if (body.agentName !== undefined) {
+          patch.agentName = this.normalizeAutomationAgentName(body.agentName);
         }
         if (body.llmSelection !== undefined) {
           patch.llmSelection = this.resolveAutomationLlmSelection(body.llmSelection, existing.llmSelection);
         }
         if (body.schedule !== undefined) {
-          patch.schedule = normalizeAutomationSchedule({
-            frequency: body.schedule?.frequency as 'hourly' | 'daily' | 'weekly',
-            minute: body.schedule?.minute,
-            hour: body.schedule?.hour,
-            weekday: body.schedule?.weekday,
-          });
+          patch.schedule = this.resolveAutomationSchedule(body.schedule);
         }
         if (body.timezone !== undefined) {
           patch.timezone = normalizeAutomationTimezone(body.timezone);
@@ -154,13 +136,8 @@ export class AutomationRoutes {
     app.delete('/api/automations/:id', (req: Request, res: Response) => {
       try {
         const id = String(req.params.id ?? '').trim();
-        const existing = this.store.getJob(id);
+        const existing = this.getMutableAutomationJobOrRespond(id, res);
         if (!existing) {
-          res.status(404).json({ error: `automation not found: ${id}` });
-          return;
-        }
-        if (existing.readOnly) {
-          res.status(403).json({ error: 'system automation is read-only' });
           return;
         }
         const success = this.store.deleteJob(id);
@@ -175,13 +152,8 @@ export class AutomationRoutes {
         const id = String(req.params.id ?? '').trim();
         const body = req.body as { enabled?: boolean };
         const enabled = body.enabled === true;
-        const job = this.store.getJob(id);
+        const job = this.getMutableAutomationJobOrRespond(id, res);
         if (!job) {
-          res.status(404).json({ error: `automation not found: ${id}` });
-          return;
-        }
-        if (job.readOnly) {
-          res.status(403).json({ error: 'system automation is read-only' });
           return;
         }
         const item = this.store.updateJob(id, {
@@ -210,7 +182,11 @@ export class AutomationRoutes {
         const id = String(req.params.id ?? '').trim();
         const job = this.store.getJob(id);
         if (!job) {
-          res.status(404).json({ error: `automation not found: ${id}` });
+          this.sendAutomationNotFound(res, id);
+          return;
+        }
+        if (job.systemTask) {
+          this.sendAutomationNotFound(res, id);
           return;
         }
         const run = await this.executionService.executeJob(job, new Date().toISOString(), {
@@ -248,7 +224,7 @@ export class AutomationRoutes {
         }
         const job = this.store.getJob(jobId);
         if (!job) {
-          res.status(404).json({ error: `automation not found: ${jobId}` });
+          this.sendAutomationNotFound(res, jobId);
           return;
         }
         const result = await this.executionService.saveManualCorrectionFromSession({
@@ -260,6 +236,33 @@ export class AutomationRoutes {
       } catch (error) {
         res.status(400).json({ error: String(error) });
       }
+    });
+  }
+
+  private getMutableAutomationJobOrRespond(id: string, res: Response): AutomationJob | undefined {
+    const job = this.store.getJob(id);
+    if (!job) {
+      this.sendAutomationNotFound(res, id);
+      return undefined;
+    }
+    if (job.readOnly) {
+      res.status(403).json({ error: 'system automation is read-only' });
+      return undefined;
+    }
+    return job;
+  }
+
+  private sendAutomationNotFound(res: Response, id: string): void {
+    res.status(404).json({ error: `automation not found: ${id}` });
+  }
+
+  private resolveAutomationSchedule(input?: AutomationScheduleRouteInput): AutomationJob['schedule'] {
+    return normalizeAutomationSchedule({
+      frequency: input?.frequency as AutomationJob['schedule']['frequency'],
+      intervalSeconds: input?.intervalSeconds,
+      minute: input?.minute,
+      hour: input?.hour,
+      weekday: input?.weekday,
     });
   }
 
@@ -281,6 +284,15 @@ export class AutomationRoutes {
       throw new Error(`Unknown llmSelection.profileId: ${profileId}`);
     }
     return applySessionLlmSelectionInput(this.getConfig(), current, input ?? {});
+  }
+
+  private normalizeAutomationAgentName(value: unknown): string | undefined {
+    const normalized = String(value ?? '').trim();
+    return normalized.length > 0 ? normalized : undefined;
+  }
+
+  private resolveAutomationSkills(skills: unknown): string[] {
+    return Array.isArray(skills) ? skills.map((item) => String(item ?? '')) : [];
   }
 }
 

@@ -1,47 +1,6 @@
 import * as assert from 'node:assert/strict';
-import { WebServer } from '../../src/web/server/WebServer.js';
-
-type RouteHandler = (req: unknown, res: unknown) => void | Promise<void>;
-
-function createAppHarness() {
-  const getRoutes = new Map<string, RouteHandler>();
-  const postRoutes = new Map<string, RouteHandler>();
-  const putRoutes = new Map<string, RouteHandler>();
-  const patchRoutes = new Map<string, RouteHandler>();
-  const app = {
-    use: () => undefined,
-    get: (route: string, handler: RouteHandler) => {
-      getRoutes.set(route, handler);
-    },
-    post: (route: string, handler: RouteHandler) => {
-      postRoutes.set(route, handler);
-    },
-    put: (route: string, handler: RouteHandler) => {
-      putRoutes.set(route, handler);
-    },
-    patch: (route: string, handler: RouteHandler) => {
-      patchRoutes.set(route, handler);
-    },
-    delete: () => undefined,
-  };
-  return { app, getRoutes, postRoutes, putRoutes, patchRoutes };
-}
-
-function createResponseRecorder() {
-  const recorder = {
-    statusCode: 200,
-    payload: undefined as unknown,
-    status(code: number) {
-      recorder.statusCode = code;
-      return recorder;
-    },
-    json(data: unknown) {
-      recorder.payload = data;
-      return recorder;
-    },
-  };
-  return recorder;
-}
+import { createWebServerDouble } from './helpers/web-server-harness.js';
+import { createResponseRecorder, createRouteAppHarness } from './helpers/web-route-harness.js';
 
 function createConfig() {
   return {
@@ -62,6 +21,7 @@ function createConfig() {
           apiKey: 'anthropic-key',
           apiBase: 'https://anthropic.local',
           defaultModel: 'claude-3-7-sonnet-20250219',
+          availableModels: ['claude-3-7-sonnet-20250219'],
           maxOutputTokens: 4096,
           enabled: true,
         },
@@ -72,6 +32,7 @@ function createConfig() {
           apiKey: 'openai-key',
           apiBase: 'https://openai.local/v1',
           defaultModel: 'gpt-4.1-mini',
+          availableModels: ['gpt-4.1-mini', 'gpt-4.1'],
           maxOutputTokens: 2048,
           enabled: true,
         },
@@ -84,7 +45,6 @@ function createConfig() {
       runtimeDataDir: 'D:/workspace/runtime',
       globalAgentsDir: 'D:/workspace/agents',
       defaultToolset: 'windows-dev',
-      skillWriteMode: 'confirm' as const,
       subAgentMaxParallelPerParent: 4,
       subAgentGlobalMaxParallel: 10,
     },
@@ -114,8 +74,11 @@ function createSessionMeta() {
 }
 
 function createServerHarness() {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, getRoutes, postRoutes, putRoutes, patchRoutes } = createAppHarness();
+  const server = createWebServerDouble();
+  server.activeRunContexts = new Map();
+  server.activeRunStatesByContext = new Map();
+  server.cancelingRunIds = new Set();
+  const { app, getRoutes, postRoutes, putRoutes, patchRoutes } = createRouteAppHarness();
   const config = createConfig();
   let sessionMeta = createSessionMeta();
   let persistedConfig: unknown = null;
@@ -228,24 +191,29 @@ function createServerHarness() {
   };
 }
 
-function testGetLlmProfilesRouteExposesProfilesAndLegacyMirror(): void {
+function testGetLlmProfilesRouteExposesProfilesOnly(): void {
   const harness = createServerHarness();
-  const handler = harness.getRoutes.get('/api/llm-profiles');
-  assert.ok(handler, 'expected GET /api/llm-profiles route');
+  assert.equal(harness.getRoutes.has('/api/llm-profiles'), false);
+  const handler = harness.getRoutes.get('/api/settings');
+  assert.ok(handler, 'expected GET /api/settings route');
 
   const res = createResponseRecorder();
   handler?.({}, res);
 
-  assert.equal((res.payload as any).defaultProfileId, 'anthropic-default');
-  assert.equal((res.payload as any).profiles.length, 2);
-  assert.equal((res.payload as any).profiles[0].hasApiKey, true);
-  assert.equal((res.payload as any).legacyApiMirror.provider, 'anthropic');
+  assert.equal((res.payload as any).llmProfiles.defaultProfileId, 'anthropic-default');
+  assert.equal((res.payload as any).llmProfiles.profiles.length, 2);
+  assert.equal((res.payload as any).llmProfiles.profiles[0].hasApiKey, true);
+  assert.deepEqual((res.payload as any).llmProfiles.profiles[1].availableModels, [
+    'gpt-4.1-mini',
+    'gpt-4.1',
+  ]);
 }
 
 async function testPutLlmProfilesRejectsDuplicateIdsAndUnknownDefault(): Promise<void> {
   const harness = createServerHarness();
-  const handler = harness.putRoutes.get('/api/llm-profiles');
-  assert.ok(handler, 'expected PUT /api/llm-profiles route');
+  assert.equal(harness.putRoutes.has('/api/llm-profiles'), false);
+  const handler = harness.putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const duplicateRes = createResponseRecorder();
   await handler?.(
@@ -395,8 +363,8 @@ async function testPatchSessionLlmSelectionRequiresValidUpdatedAt(): Promise<voi
 
 async function testPutLlmProfilesPersistsUpdatedDefaultProfile(): Promise<void> {
   const harness = createServerHarness();
-  const handler = harness.putRoutes.get('/api/llm-profiles');
-  assert.ok(handler, 'expected PUT /api/llm-profiles route');
+  const handler = harness.putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
 
   const res = createResponseRecorder();
   await handler?.(
@@ -415,14 +383,18 @@ async function testPutLlmProfilesPersistsUpdatedDefaultProfile(): Promise<void> 
   assert.equal((res.payload as any).success, true);
   assert.equal(harness.config.api.provider, 'openai');
   assert.equal(harness.config.api.model, 'gpt-4.1-mini');
+  assert.deepEqual(harness.config.llmProfiles.profiles[1].availableModels, [
+    'gpt-4.1-mini',
+    'gpt-4.1',
+  ]);
   assert.equal((harness.getPersistedConfig as () => unknown)(), harness.config);
   assert.equal(harness.getRefreshConfigDependentRuntimeCount(), 1);
 }
 
 async function testPutLlmProfilesRollsBackWhenRefreshFails(): Promise<void> {
   const harness = createServerHarness();
-  const handler = harness.putRoutes.get('/api/llm-profiles');
-  assert.ok(handler, 'expected PUT /api/llm-profiles route');
+  const handler = harness.putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
   harness.server.refreshConfigDependentRuntimes = async () => {
     throw new Error('refresh failed');
   };
@@ -441,7 +413,7 @@ async function testPutLlmProfilesRollsBackWhenRefreshFails(): Promise<void> {
     res
   );
 
-  assert.equal(res.statusCode, 400);
+  assert.equal(res.statusCode, 500);
   assert.match(String((res.payload as any).error ?? ''), /refresh failed/i);
   assert.equal(harness.config.llmProfiles.defaultProfileId, 'anthropic-default');
   assert.equal(harness.config.api.provider, 'anthropic');
@@ -505,7 +477,7 @@ async function testDiscoverModelsRouteAcceptsDraftWithoutPersisting(): Promise<v
 }
 
 async function runAll(): Promise<void> {
-  testGetLlmProfilesRouteExposesProfilesAndLegacyMirror();
+  testGetLlmProfilesRouteExposesProfilesOnly();
   await testPutLlmProfilesRejectsDuplicateIdsAndUnknownDefault();
   await testPatchSessionLlmSelectionClearsStaleProviderOptionsOnProfileChange();
   await testPatchSessionLlmSelectionRejectsStaleUpdatedAt();

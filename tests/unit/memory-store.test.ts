@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MemoryStore } from '../../src/memory/index.js';
+import { MemoryStore } from '../../src/memory/MemoryStore.js';
 
 function createHarness(): { tempDir: string; workspaceDir: string; store: MemoryStore } {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-store-'));
@@ -89,6 +89,25 @@ function runAll(): void {
 
     const coexistEntries = harness.store.listEntries({ workspaceDir: harness.workspaceDir, includeUser: true });
     assert.equal(coexistEntries.length, 2);
+
+    const userMemory = harness.store.writeMemory({
+      scope: 'user',
+      title: 'User preference',
+      content: 'Prefer concise release notes.',
+    });
+    assert.equal(
+      harness.store.replaceEntry(userMemory.id, {
+        workspaceDir: harness.workspaceDir,
+        includeUser: false,
+        content: 'Should not update through workspace-only replacement.',
+      }),
+      null
+    );
+    const unchangedUserMemory = harness.store.readEntry(userMemory.id, {
+      workspaceDir: harness.workspaceDir,
+      includeUser: true,
+    });
+    assert.equal(unchangedUserMemory?.content, 'Prefer concise release notes.');
 
     console.log('memory-store tests passed');
   } finally {

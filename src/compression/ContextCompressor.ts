@@ -12,11 +12,9 @@ export interface CompressionResult {
 
 export class ContextCompressor {
   private llmClient: LLMRuntime;
-  private targetRatio: number;
 
-  constructor(llmClient: LLMRuntime, targetRatio: number = 0.3) {
+  constructor(llmClient: LLMRuntime, _targetRatio: number = 0.3) {
     this.llmClient = llmClient;
-    this.targetRatio = targetRatio;
   }
 
   private async generateCompressedContent(prompt: string, maxTokens: number = 4000): Promise<string> {

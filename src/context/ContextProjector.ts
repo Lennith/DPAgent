@@ -1,7 +1,6 @@
 import {
-  buildAgentProfileReferenceTag,
   parseAgentProfilePrompt,
-} from '../agents/index.js';
+} from '../agents/AgentProfiles.js';
 import type {
   ContentBlock,
   ContextEvent,
@@ -32,17 +31,23 @@ interface TurnState {
 }
 
 interface ConversationReplayTurnState {
-  userMessages: string[];
+  userMessages: Array<{ content: string; createdAt?: string }>;
   lastAssistantMessage?: string;
+  lastAssistantMessageCreatedAt?: string;
   finalOutput?: string;
+  finalOutputCreatedAt?: string;
   cancelled?: boolean;
   replayOnly?: boolean;
   compactionSummary?: string;
-  compactionMessage?: Message;
-  orderedMessages: Message[];
+  compactionMessage?: TimestampedConversationMessage;
+  orderedMessages: TimestampedConversationMessage[];
   pendingAssistantIndex?: number;
   hasToolProtocol: boolean;
 }
+
+export type TimestampedConversationMessage = Message & {
+  createdAt?: string;
+};
 
 function toStringSafe(value: unknown): string {
   if (typeof value === 'string') {
@@ -247,7 +252,7 @@ export class ContextProjector {
     };
   }
 
-  buildSystemSegment(projection: ContextProjection, meta?: ContextNamespaceMeta): string {
+  buildSystemSegment(projection: ContextProjection, _meta?: ContextNamespaceMeta): string {
     const lines: string[] = [];
     lines.push('## Context Snapshot');
     lines.push(`scope=${projection.scope}`);
@@ -265,24 +270,6 @@ export class ContextProjector {
       if (keys.length > 30) {
         lines.push(`- ...(${keys.length - 30} more)`);
       }
-    }
-
-    const activeAgentSource = meta?.agentInjectionState?.lastProfileSource;
-    const activeAgentName = String(meta?.agentInjectionState?.lastProfileName ?? '').trim();
-    const activeAgentPath = String(meta?.agentInjectionState?.lastProfilePath ?? '').trim();
-    if ((activeAgentSource === 'workspace' || activeAgentSource === 'global') && activeAgentName && activeAgentPath) {
-      lines.push('');
-      lines.push('### Active Agent');
-      lines.push(`- source: ${activeAgentSource}`);
-      lines.push(`- name: ${activeAgentName}`);
-      lines.push(`- path: ${truncate(activeAgentPath, 220)}`);
-      lines.push(
-        `- ref: ${buildAgentProfileReferenceTag({
-          source: activeAgentSource,
-          name: activeAgentName,
-          path: activeAgentPath,
-        })}`
-      );
     }
 
     lines.push('');
@@ -329,6 +316,18 @@ export class ContextProjector {
       includeInterruptedCheckpoints?: boolean;
     }
   ): Message[] {
+    return this.toConversationMessagesWithTimestamps(events, options).map((message) =>
+      this.stripConversationMessageTimestamp(message)
+    );
+  }
+
+  toConversationMessagesWithTimestamps(
+    events: ContextEvent[],
+    options?: {
+      preserveAgentProfileRefs?: boolean;
+      includeInterruptedCheckpoints?: boolean;
+    }
+  ): TimestampedConversationMessage[] {
     const turnOrder: string[] = [];
     const turnState = new Map<string, ConversationReplayTurnState>();
 
@@ -359,10 +358,14 @@ export class ContextProjector {
         }
         const normalized = content.trim();
         if (normalized.length > 0) {
-          turn.userMessages.push(normalized);
+          turn.userMessages.push({
+            content: normalized,
+            createdAt: event.timestamp,
+          });
           turn.orderedMessages.push({
             role: 'user',
             content: normalized,
+            createdAt: event.timestamp,
           });
         }
         continue;
@@ -370,20 +373,22 @@ export class ContextProjector {
       if (event.type === 'assistant_message') {
         const normalized = toStringSafe(event.data.content).trim();
         const contentBlocks = this.cloneContentBlocks(event.data.contentBlocks);
-        const thinking = toStringSafe(event.data.thinking).trim();
+        const thinking = toStringSafe(event.data.thinking);
         const thinkingSignature = toStringSafe(event.data.thinkingSignature).trim();
         const llmProviderProfileId = toStringSafe(event.data.llmProviderProfileId).trim();
         const llmProvider = toStringSafe(event.data.llmProvider).trim();
         const llmModel = toStringSafe(event.data.llmModel).trim();
         const thinkingComplete = event.data.thinkingComplete === true;
-        if (normalized.length === 0 && !contentBlocks && thinking.length === 0) {
+        if (normalized.length === 0 && !contentBlocks && thinking.trim().length === 0) {
           continue;
         }
         turn.lastAssistantMessage = normalized;
+        turn.lastAssistantMessageCreatedAt = event.timestamp;
         turn.pendingAssistantIndex = turn.orderedMessages.length;
         turn.orderedMessages.push({
           role: 'assistant',
           content: contentBlocks ?? normalized,
+          createdAt: event.timestamp,
           thinking: thinking || undefined,
           thinkingSignature: thinkingSignature || undefined,
           metadata:
@@ -415,6 +420,7 @@ export class ContextProjector {
           assistantMessage = {
             role: 'assistant',
             content: '',
+            createdAt: event.timestamp,
           };
           turn.orderedMessages.push(assistantMessage);
         }
@@ -442,6 +448,7 @@ export class ContextProjector {
         turn.orderedMessages.push({
           role: 'tool',
           content: normalized,
+          createdAt: event.timestamp,
           name: name || undefined,
           toolCallId: toolCallId || undefined,
           metadata:
@@ -456,9 +463,10 @@ export class ContextProjector {
       if (event.type === 'context_compaction') {
         const summary = toStringSafe(event.data.summary).trim();
         if (summary.length > 0) {
-          const compactionMessage: Message = {
+          const compactionMessage: TimestampedConversationMessage = {
             role: 'assistant',
             content: summary,
+            createdAt: event.timestamp,
             metadata: {
               compressed: true,
               contextCompaction: {
@@ -491,11 +499,12 @@ export class ContextProjector {
         const finalOutput = isCancelled ? '' : toStringSafe(event.data.finalOutput).trim();
         if (finalOutput.length > 0) {
           turn.finalOutput = finalOutput;
+          turn.finalOutputCreatedAt = event.timestamp;
         }
       }
     }
 
-    const out: Message[] = [];
+    const out: TimestampedConversationMessage[] = [];
     for (const turnId of turnOrder) {
       const turn = turnState.get(turnId);
       if (!turn) {
@@ -515,21 +524,19 @@ export class ContextProjector {
             },
           });
         }
-        for (const content of turn.userMessages) {
+        for (const userMessage of turn.userMessages) {
           out.push({
             role: 'user',
-            content,
+            content: userMessage.content,
+            createdAt: userMessage.createdAt,
           });
         }
         if (turn.cancelled) {
           continue;
         }
-        const assistantContent = turn.finalOutput?.trim() || turn.lastAssistantMessage?.trim() || '';
-        if (assistantContent.length > 0) {
-          out.push({
-            role: 'assistant',
-            content: assistantContent,
-          });
+        const assistantMessage = this.buildFinalAssistantReplayMessage(turn);
+        if (assistantMessage) {
+          out.push(assistantMessage);
         }
         continue;
       }
@@ -545,27 +552,20 @@ export class ContextProjector {
         out.length = 0;
       }
 
-      const orderedMessages: Message[] = turn.orderedMessages.map((message): Message => ({
-        ...message,
-        content: Array.isArray(message.content) ? this.cloneContentBlocks(message.content) ?? [] : message.content,
-        toolCalls: message.toolCalls?.map((toolCall) => ({
-          id: toolCall.id,
-          type: toolCall.type,
-          function: {
-            name: toolCall.function.name,
-            arguments: { ...toolCall.function.arguments },
-          },
-        })),
-      }));
+      const orderedMessages: TimestampedConversationMessage[] = turn.orderedMessages.map((message) =>
+        this.cloneTimestampedConversationMessage(message)
+      );
       const assistantContent = turn.finalOutput?.trim();
       if (assistantContent) {
         const lastMessage = orderedMessages[orderedMessages.length - 1];
         if (lastMessage?.role === 'assistant' && (!lastMessage.toolCalls || lastMessage.toolCalls.length === 0)) {
           lastMessage.content = assistantContent;
+          lastMessage.createdAt = turn.finalOutputCreatedAt ?? lastMessage.createdAt;
         } else {
           orderedMessages.push({
             role: 'assistant',
             content: assistantContent,
+            createdAt: turn.finalOutputCreatedAt,
           });
         }
       }
@@ -573,6 +573,70 @@ export class ContextProjector {
     }
 
     return out;
+  }
+
+  private buildFinalAssistantReplayMessage(turn: ConversationReplayTurnState): TimestampedConversationMessage | null {
+    const assistantContent = turn.finalOutput?.trim() || turn.lastAssistantMessage?.trim() || '';
+    if (!assistantContent) {
+      return null;
+    }
+
+    const source = [...turn.orderedMessages]
+      .reverse()
+      .find((message) => message.role === 'assistant' && (!message.toolCalls || message.toolCalls.length === 0));
+    if (!source) {
+      return {
+        role: 'assistant',
+        content: assistantContent,
+        createdAt: turn.finalOutputCreatedAt ?? turn.lastAssistantMessageCreatedAt,
+      };
+    }
+
+    const cloned = this.cloneTimestampedConversationMessage(source);
+    const result: TimestampedConversationMessage = {
+      role: 'assistant',
+      content: assistantContent,
+      createdAt: turn.finalOutputCreatedAt ?? cloned.createdAt,
+    };
+    if (cloned.thinking) result.thinking = cloned.thinking;
+    if (cloned.thinkingSignature) result.thinkingSignature = cloned.thinkingSignature;
+    if (cloned.toolCalls) result.toolCalls = cloned.toolCalls;
+    if (cloned.metadata) result.metadata = cloned.metadata;
+    return result;
+  }
+
+  private stripConversationMessageTimestamp(message: TimestampedConversationMessage): Message {
+    const { createdAt: _createdAt, ...withoutTimestamp } = message;
+    return this.cloneConversationMessage(withoutTimestamp as Message);
+  }
+
+  private cloneTimestampedConversationMessage(message: TimestampedConversationMessage): TimestampedConversationMessage {
+    const cloned = this.cloneConversationMessage(message);
+    return {
+      ...cloned,
+      createdAt: message.createdAt,
+    };
+  }
+
+  private cloneConversationMessage(message: Message): Message {
+    const cloned: Message = {
+      ...message,
+      content: Array.isArray(message.content) ? this.cloneContentBlocks(message.content) ?? [] : message.content,
+    };
+    if (message.metadata) {
+      cloned.metadata = { ...message.metadata };
+    }
+    if (message.toolCalls) {
+      cloned.toolCalls = message.toolCalls.map((toolCall) => ({
+        id: toolCall.id,
+        type: toolCall.type,
+        function: {
+          name: toolCall.function.name,
+          arguments: { ...toolCall.function.arguments },
+        },
+      }));
+    }
+    return cloned;
   }
 
   private cloneContentBlocks(value: unknown): ContentBlock[] | undefined {

@@ -1,13 +1,16 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 import { useI18n } from '../../i18n/index.js';
 import type {
-  LlmProfileIntrospectionView,
   LlmProfilesConfigView,
   SessionLlmSelectionPatch,
   SessionLlmSelectionView,
 } from '../../app-shell-types.js';
 import { resolveLlmProfileById } from '../../llm-session-state.js';
+import {
+  resolveSessionLlmPopoverPosition,
+  type SessionLlmPopoverPosition,
+} from './session-llm-popover-position.js';
 
 interface SessionLlmBarProps {
   sessionId?: string | null;
@@ -15,9 +18,19 @@ interface SessionLlmBarProps {
   selection: SessionLlmSelectionView;
   disabled: boolean;
   onChange: (patch: SessionLlmSelectionPatch) => void;
+  shareActive?: boolean;
+  shareDisabled?: boolean;
+  onToggleShare?: () => void;
 }
 
-const REASONING_PRESETS: Array<SessionLlmSelectionView['reasoningPreset']> = ['off', 'low', 'medium', 'high'];
+const REASONING_PRESETS: Array<SessionLlmSelectionView['reasoningPreset']> = [
+  'off',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
 
 function ChevronDown({ className = '' }: { className?: string }) {
   return (
@@ -28,22 +41,50 @@ function ChevronDown({ className = '' }: { className?: string }) {
   );
 }
 
+function ShareIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="M8.6 10.6 15.4 6.4M8.6 13.4l6.8 4.2" />
+    </svg>
+  );
+}
+
+function getAvailableModels(profile: NonNullable<LlmProfilesConfigView['profiles'][number]>): Array<[string, string]> {
+  const models = new Map<string, string>();
+  const addModel = (model: unknown): void => {
+    const id = typeof model === 'string' ? model.trim() : '';
+    if (id && !models.has(id)) {
+      models.set(id, id);
+    }
+  };
+  if (Array.isArray(profile.availableModels)) {
+    profile.availableModels.forEach(addModel);
+  }
+  addModel(profile.defaultModel);
+  return [...models.entries()];
+}
+
 export function SessionLlmBar({
   llmProfiles,
   selection,
   disabled,
   onChange,
+  shareActive = false,
+  shareDisabled = false,
+  onToggleShare,
 }: SessionLlmBarProps) {
   const theme = useThemeConfig();
   const { t } = useI18n();
   const [panelOpen, setPanelOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [loadingProfileId, setLoadingProfileId] = useState<string | null>(null);
-  const [introspectionByProfile, setIntrospectionByProfile] = useState<Record<string, LlmProfileIntrospectionView>>({});
   const [modelInput, setModelInput] = useState(selection.model);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [reasoningDropdownOpen, setReasoningDropdownOpen] = useState(false);
+  const [popoverPosition, setPopoverPosition] = useState<SessionLlmPopoverPosition | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const [thinkingBudgetInput, setThinkingBudgetInput] = useState(
@@ -54,36 +95,24 @@ export function SessionLlmBar({
     () => resolveLlmProfileById(llmProfiles, selection.profileId),
     [llmProfiles, selection.profileId]
   );
-  const introspection = currentProfile ? introspectionByProfile[currentProfile.id] : undefined;
   const supportsReasoning = Boolean(
     currentProfile?.capabilities?.reasoningEffort || currentProfile?.capabilities?.thinkingBudget
   );
   const canTuneThinkingBudget = Boolean(currentProfile?.capabilities?.thinkingBudget);
   const canTuneReasoningEffort = Boolean(currentProfile?.capabilities?.reasoningEffort);
   const modelOptions = useMemo(() => {
-    const discovered = introspection?.models ?? [];
-    const next = new Map<string, string>();
-    for (const model of discovered) {
-      next.set(model.id, model.displayName || model.id);
-    }
-    if (selection.model) {
-      next.set(selection.model, selection.model);
-    }
-    if (currentProfile?.defaultModel) {
-      next.set(currentProfile.defaultModel, currentProfile.defaultModel);
-    }
-    return [...next.entries()];
-  }, [currentProfile?.defaultModel, introspection?.models, selection.model]);
+    return currentProfile ? getAvailableModels(currentProfile) : [];
+  }, [currentProfile]);
   const profileOptions = llmProfiles?.profiles ?? [];
   const visibleModelOptions = useMemo(() => {
     const query = modelInput.trim().toLowerCase();
-    if (!query) {
+    if (!query || modelInput === selection.model) {
       return modelOptions;
     }
     return modelOptions.filter(([value, label]) => {
       return value.toLowerCase().includes(query) || label.toLowerCase().includes(query);
     });
-  }, [modelInput, modelOptions]);
+  }, [modelInput, modelOptions, selection.model]);
 
   useEffect(() => {
     setModelInput(selection.model);
@@ -93,12 +122,39 @@ export function SessionLlmBar({
     setThinkingBudgetInput(selection.providerOptions?.anthropic?.thinkingBudgetTokens?.toString() ?? '');
   }, [selection.providerOptions?.anthropic?.thinkingBudgetTokens]);
 
-  useEffect(() => {
-    if (!currentProfile || introspectionByProfile[currentProfile.id]) {
+  const updatePopoverPosition = useCallback((): void => {
+    const root = popoverRef.current;
+    const trigger = root?.querySelector<HTMLButtonElement>('.session-llm-trigger');
+    const anchor = root?.closest<HTMLElement>('.chat-composer-card') ?? root?.closest<HTMLElement>('.chat-panel-shell');
+    if (!root || !trigger || !anchor) {
       return;
     }
-    void discoverModels(currentProfile.id);
-  }, [currentProfile, introspectionByProfile]);
+    setPopoverPosition(
+      resolveSessionLlmPopoverPosition({
+        triggerRect: trigger.getBoundingClientRect(),
+        anchorRect: anchor.getBoundingClientRect(),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      })
+    );
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!panelOpen) {
+      setPopoverPosition(null);
+      return;
+    }
+
+    updatePopoverPosition();
+    window.addEventListener('resize', updatePopoverPosition);
+    window.addEventListener('scroll', updatePopoverPosition, true);
+    window.visualViewport?.addEventListener('resize', updatePopoverPosition);
+    return () => {
+      window.removeEventListener('resize', updatePopoverPosition);
+      window.removeEventListener('scroll', updatePopoverPosition, true);
+      window.visualViewport?.removeEventListener('resize', updatePopoverPosition);
+    };
+  }, [panelOpen, updatePopoverPosition]);
 
   useEffect(() => {
     const handleMouseDown = (event: MouseEvent): void => {
@@ -116,53 +172,6 @@ export function SessionLlmBar({
     document.addEventListener('mousedown', handleMouseDown);
     return () => document.removeEventListener('mousedown', handleMouseDown);
   }, [panelOpen]);
-
-  async function discoverModels(profileId: string): Promise<void> {
-    setLoadingProfileId(profileId);
-    try {
-      const response = await fetch(`/api/llm-profiles/${profileId}/discover-models`, {
-        method: 'POST',
-      });
-      if (!response.ok) {
-        throw new Error(`status=${response.status}`);
-      }
-      const payload = (await response.json()) as LlmProfileIntrospectionView;
-      setIntrospectionByProfile((prev) => ({
-        ...prev,
-        [profileId]: payload,
-      }));
-    } catch (error) {
-      setIntrospectionByProfile((prev) => ({
-        ...prev,
-        [profileId]: {
-          profileId,
-          source: 'manual',
-          fetchedAt: new Date().toISOString(),
-          models: [],
-          manualModelEntryAllowed: true,
-          capabilities: {
-            modelDiscovery: false,
-            reasoningEffort: Boolean(currentProfile?.capabilities?.reasoningEffort),
-            thinkingBudget: Boolean(currentProfile?.capabilities?.thinkingBudget),
-          },
-          error: error instanceof Error ? error.message : String(error),
-        },
-      }));
-    } finally {
-      setLoadingProfileId((prev) => (prev === profileId ? null : prev));
-    }
-  }
-
-  const commitModelInput = (): void => {
-    const trimmed = modelInput.trim();
-    if (!trimmed || trimmed === selection.model) {
-      setModelInput(selection.model);
-      setModelDropdownOpen(false);
-      return;
-    }
-    setModelDropdownOpen(false);
-    onChange({ model: trimmed });
-  };
 
   const commitThinkingBudgetInput = (): void => {
     if (!canTuneThinkingBudget) {
@@ -214,7 +223,7 @@ export function SessionLlmBar({
   };
 
   return (
-    <div ref={popoverRef} className="session-llm-control relative inline-flex min-w-0" data-testid="session-llm-compact">
+    <div ref={popoverRef} className="session-llm-control relative inline-flex min-w-0 items-center gap-2" data-testid="session-llm-compact">
       <button
         type="button"
         onClick={() => setPanelOpen((prev) => !prev)}
@@ -244,11 +253,35 @@ export function SessionLlmBar({
         <ChevronDown className={panelOpen ? 'rotate-[225deg]' : ''} />
       </button>
 
+      {onToggleShare && (
+        <button
+          type="button"
+          onClick={onToggleShare}
+          disabled={shareDisabled}
+          className="session-share-button inline-flex shrink-0 items-center justify-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60"
+          style={{
+            borderColor: shareActive ? theme.colors.primary.DEFAULT : theme.colors.border.DEFAULT,
+            backgroundColor: shareActive ? `${theme.colors.primary.DEFAULT}22` : theme.colors.bg.secondary,
+            color: shareActive ? theme.colors.primary.DEFAULT : theme.colors.text.secondary,
+            boxShadow: shareActive ? theme.shadows.glow : theme.shadows.sm,
+          }}
+          data-testid="session-share-button"
+          title={shareActive ? t('app.share.revoke') : t('app.share.button')}
+        >
+          <ShareIcon />
+          <span className="session-share-label">{t('app.share.button')}</span>
+        </button>
+      )}
+
       {panelOpen && (
         <div
-          className="session-llm-popover absolute bottom-full right-0 z-[80] mb-3 w-[min(720px,calc(100vw-2rem))] overflow-visible rounded-[1.35rem] border p-3"
+          className="session-llm-popover fixed z-[80] overflow-visible rounded-[1.35rem] border p-3"
           data-testid="session-llm-popover"
           style={{
+            left: popoverPosition ? `${popoverPosition.left}px` : 0,
+            bottom: popoverPosition ? `${popoverPosition.bottom}px` : 0,
+            width: popoverPosition ? `${popoverPosition.width}px` : 'auto',
+            visibility: popoverPosition ? 'visible' : 'hidden',
             borderColor: theme.colors.border.DEFAULT,
             backgroundColor: theme.colors.bg.secondary,
             boxShadow: theme.shadows.xl,
@@ -332,23 +365,13 @@ export function SessionLlmBar({
                   data-testid="session-llm-model-input"
                   value={modelInput}
                   disabled={disabled}
+                  readOnly
                   onFocus={() => {
                     setProfileDropdownOpen(false);
                     setReasoningDropdownOpen(false);
                     setModelDropdownOpen(true);
                   }}
-                  onChange={(event) => {
-                    setModelInput(event.target.value);
-                    setProfileDropdownOpen(false);
-                    setModelDropdownOpen(true);
-                    setReasoningDropdownOpen(false);
-                  }}
-                  onBlur={commitModelInput}
                   onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault();
-                      commitModelInput();
-                    }
                     if (event.key === 'Escape') {
                       setModelDropdownOpen(false);
                       setModelInput(selection.model);
@@ -480,20 +503,6 @@ export function SessionLlmBar({
             >
               {advancedOpen ? t('app.llm.hideAdvanced') : t('app.llm.showAdvanced')}
             </button>
-            <button
-              type="button"
-              onClick={() => void discoverModels(currentProfile.id)}
-              disabled={disabled || loadingProfileId === currentProfile.id}
-              className="rounded-xl border px-3 py-2 text-xs font-medium transition-colors"
-              style={{
-                borderColor: theme.colors.border.DEFAULT,
-                backgroundColor: theme.colors.bg.tertiary,
-                color: theme.colors.text.secondary,
-                opacity: disabled || loadingProfileId === currentProfile.id ? 0.6 : 1,
-              }}
-            >
-              {loadingProfileId === currentProfile.id ? t('app.llm.discovering') : t('app.llm.discover')}
-            </button>
           </div>
 
           {advancedOpen && (
@@ -504,21 +513,6 @@ export function SessionLlmBar({
                 backgroundColor: theme.colors.bg.primary,
               }}
             >
-              <div className="md:col-span-3">
-                <div className="mb-1 text-xs font-medium" style={{ color: theme.colors.text.secondary }}>
-                  {t('app.llm.discoveryStatus')}
-                </div>
-                <div className="text-xs leading-5" style={{ color: theme.colors.text.muted }}>
-                  {introspection
-                    ? t('app.llm.discoverySummary', {
-                        source: introspection.source,
-                        count: introspection.models.length,
-                      })
-                    : t('app.llm.discoveryPending')}
-                  {introspection?.error ? ` ${introspection.error}` : ''}
-                </div>
-              </div>
-
               {canTuneReasoningEffort && (
                 <div>
                   <label className="mb-1 block text-xs font-medium" style={{ color: theme.colors.text.secondary }}>
@@ -549,6 +543,7 @@ export function SessionLlmBar({
                     <option value="low">{t('app.llm.reasoningPreset.low')}</option>
                     <option value="medium">{t('app.llm.reasoningPreset.medium')}</option>
                     <option value="high">{t('app.llm.reasoningPreset.high')}</option>
+                    <option value="xhigh">{t('app.llm.reasoningPreset.xhigh')}</option>
                   </select>
                 </div>
               )}

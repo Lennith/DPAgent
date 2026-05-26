@@ -5,9 +5,12 @@ import type {
   ContextRef,
   MemoryTriggerEvent,
   PlanInputRequest,
+  RunOwner,
   RunTerminalState,
   SkillTriggerEvent,
   ResolvedLlmRuntimeConfig,
+  SessionInteractionState,
+  SessionOrigin,
 } from '../../types.js';
 import {
   createCallbackEventMessageFactory,
@@ -18,6 +21,9 @@ export interface CallbackEventDispatcherScope {
   runId: string;
   context: ContextRef;
   llmRuntime?: ResolvedLlmRuntimeConfig;
+  origin?: SessionOrigin;
+  owner?: RunOwner;
+  interactionState?: SessionInteractionState;
 }
 
 export interface ContextUtilizationDispatchPayload {
@@ -25,6 +31,11 @@ export interface ContextUtilizationDispatchPayload {
   ratio: number;
   usedChars: number;
   limitChars: number;
+  usedTokens?: number;
+  limitTokens?: number;
+  source?: string;
+  anchorPromptTokens?: number;
+  deltaEstimatedTokens?: number;
   triggerRatio?: number;
   isWarning: boolean;
   message?: string;
@@ -37,6 +48,8 @@ export interface ContextPrecompressDispatchPayload {
   ratio: number;
   usedChars: number;
   limitChars: number;
+  usedTokens?: number;
+  limitTokens?: number;
   progressPercent?: number;
   chunkIndex?: number;
   chunkTotal?: number;
@@ -46,6 +59,7 @@ export interface ContextPrecompressDispatchPayload {
   willRetriggerImmediately?: boolean;
   willRetriggerNextTurn?: boolean;
   providerPayloadCharsAfter?: number;
+  providerPayloadTokensAfter?: number;
 }
 
 export interface ContextOverflowDispatchPayload {
@@ -53,6 +67,8 @@ export interface ContextOverflowDispatchPayload {
   error: string;
   stage: ContextOverflowEvent['stage'];
   checkpointId: ContextOverflowEvent['contextOverflowSnapshotPath'] | null;
+  usedTokens?: number;
+  limitTokens?: number;
 }
 
 export function createCallbackEventDispatcher(
@@ -97,6 +113,9 @@ export function createCallbackEventDispatcher(
     },
     planInputRequested(request: PlanInputRequest): void {
       emit(messages.planInputRequested(request));
+    },
+    runningInputInserted(itemId: string): void {
+      emit(messages.runningInputInserted(itemId));
     },
     complete(content: string, completionMarkerStats?: CompletionMarkerStats | null): void {
       emit(messages.complete(content, completionMarkerStats));

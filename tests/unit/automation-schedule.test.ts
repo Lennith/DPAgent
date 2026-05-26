@@ -24,7 +24,19 @@ async function testNormalizeSchedule(): Promise<void> {
       weekday: 1,
     }
   );
+  assert.deepEqual(normalizeAutomationSchedule({ frequency: 'interval', intervalSeconds: 90 }), {
+    frequency: 'interval',
+    intervalSeconds: 90,
+  });
   assert.throws(() => normalizeAutomationSchedule({ frequency: 'daily', minute: 0 }), /hour/);
+  assert.throws(
+    () => normalizeAutomationSchedule({ frequency: 'interval', intervalSeconds: 4 }),
+    /intervalSeconds/
+  );
+  assert.throws(
+    () => normalizeAutomationSchedule({ frequency: 'interval', intervalSeconds: 60 * 60 * 24 * 31 }),
+    /intervalSeconds/
+  );
   assert.throws(() => normalizeAutomationSchedule({ frequency: 'monthly' as never, minute: 0 }), /frequency/);
 }
 
@@ -66,12 +78,22 @@ async function testComputeNextRunAtWeekly(): Promise<void> {
   assert.equal(nextB, '2026-01-08T08:00:00.000Z');
 }
 
+async function testComputeNextRunAtInterval(): Promise<void> {
+  const schedule = normalizeAutomationSchedule({ frequency: 'interval', intervalSeconds: 90 });
+  const nextA = computeNextRunAt(schedule, 'UTC', new Date('2026-01-01T00:00:10.000Z'));
+  assert.equal(nextA, '2026-01-01T00:01:40.000Z');
+
+  const nextB = computeNextRunAt(schedule, 'Asia/Shanghai', new Date('2026-01-01T00:00:10.250Z'));
+  assert.equal(nextB, '2026-01-01T00:01:40.250Z');
+}
+
 async function runAll(): Promise<void> {
   await testNormalizeSchedule();
   await testNormalizeTimezone();
   await testComputeNextRunAtHourly();
   await testComputeNextRunAtDaily();
   await testComputeNextRunAtWeekly();
+  await testComputeNextRunAtInterval();
   console.log('automation-schedule tests passed');
 }
 

@@ -1,79 +1,76 @@
-import React, { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useTheme, useThemeConfig } from './providers/ThemeProvider.js';
-import { useI18n } from '../i18n/index.js';
+import { useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
+import { useThemeConfig } from './providers/ThemeProvider.js';
+import { useI18n, type TranslationKey } from '../i18n/index.js';
 import type {
   LlmProfileIntrospectionView,
   LlmProfilesConfigView,
-  PublicLlmProfile,
+  PublicSettingsView,
+  AgentListItemView,
+  AgentProfileConfigView,
 } from '../app-shell-types.js';
+import {
+  createDefaultSettingsDraft,
+  createSettingsDraftFromResponse,
+  buildAgentSettingsPayload,
+  settingsDraftReducer,
+  type SettingsDraft,
+} from './config-modal-settings-draft.js';
+import {
+  buildAvailableModelOptions,
+  createEditableProfiles,
+  createEmptyProfile,
+  normalizeAvailableModels,
+  profileDraftToDiscoveryPayload,
+  profileDraftToSavePayload,
+  type EditableProfile,
+  type EditableProfileUpdater,
+} from './config-modal-profile-draft.js';
+import {
+  agentConfigDraftToPayload,
+  createAgentConfigDraft,
+  type AgentConfigDraft,
+} from './config-modal-agent-draft.js';
+import { ConfigModalProvidersTab } from './config-modal-providers-tab.js';
+import { ConfigModalAgentsTab } from './config-modal-agents-tab.js';
+import { ConfigModalSkillsTab } from './config-modal-skills-tab.js';
+import { ConfigModalGovernanceTab } from './config-modal-governance-tab.js';
+import { ConfigModalOtherTab } from './config-modal-other-tab.js';
 
 // ConfigModal owns the settings shell, provider profile editor, capability paths, and governance tab.
 // Major edit points: profile draft state, auto model discovery, responsive modal chrome, and tab bodies.
+type ConfigModalTabId = 'providers' | 'skills' | 'agents' | 'governance' | 'other';
+
 interface ConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
   llmProfiles?: LlmProfilesConfigView | null;
   onSaved?: () => void | Promise<void>;
   governanceSlot?: ReactNode;
+  initialSettings?: PublicSettingsView | null;
+  initialActiveTab?: ConfigModalTabId;
+  initialAgentItems?: AgentListItemView[];
 }
 
-interface SettingsResponse {
-  llmProfiles?: LlmProfilesConfigView;
-  api?: {
-    hasApiKey?: boolean;
-  };
-  agent?: {
-    skillsDir?: string;
-    globalAgentsDir?: string;
-    completionMarkerEnforcementEnabled?: boolean;
-    maxSteps?: number;
-  };
-}
-
-interface SaveLlmProfilesResponse extends LlmProfilesConfigView {
+interface SaveSettingsResponse extends PublicSettingsView {
   success?: boolean;
-}
-
-interface EditableProfile extends Omit<PublicLlmProfile, 'hasApiKey'> {
-  hasApiKey: boolean;
-  apiKeyInput: string;
-  clearApiKey: boolean;
 }
 
 type SettingsLoadState = 'idle' | 'loading' | 'ready' | 'error';
 type ModelDiscoveryStatus = 'idle' | 'waiting' | 'loading' | 'success' | 'error';
 
 const LOAD_SETTINGS_ERROR = '__config_load_failed__';
-const DEFAULT_MAX_OUTPUT_TOKENS = 32768;
 
-function createEditableProfiles(llmProfiles: LlmProfilesConfigView | null | undefined): EditableProfile[] {
-  return (llmProfiles?.profiles ?? []).map((profile) => ({
-    ...profile,
-    apiKeyInput: '',
-    clearApiKey: false,
-  }));
-}
-
-function createEmptyProfile(index: number): EditableProfile {
-  const id = `profile-${index + 1}-${Math.random().toString(36).slice(2, 8)}`;
-  return {
-    id,
-    name: `Profile ${index + 1}`,
-    provider: 'anthropic',
-    apiBase: 'https://api.minimaxi.com',
-    defaultModel: 'MiniMax-M2.7',
-    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-    enabled: true,
-    capabilities: {
-      modelDiscovery: true,
-      reasoningEffort: false,
-      thinkingBudget: true,
-    },
-    hasApiKey: false,
-    apiKeyInput: '',
-    clearApiKey: false,
-  };
-}
+const CONFIG_MODAL_TABS: ReadonlyArray<{
+  id: ConfigModalTabId;
+  testId: string;
+  labelKey: TranslationKey;
+}> = [
+  { id: 'providers', testId: 'config-tab-providers', labelKey: 'config.providerCenter.tabProviders' },
+  { id: 'skills', testId: 'config-tab-skills', labelKey: 'config.tab.skills' },
+  { id: 'agents', testId: 'config-tab-agents', labelKey: 'config.tab.agents' },
+  { id: 'governance', testId: 'config-tab-governance', labelKey: 'config.tab.governance' },
+  { id: 'other', testId: 'config-tab-other', labelKey: 'config.tab.other' },
+];
 
 export function ConfigModal({
   isOpen,
@@ -81,33 +78,94 @@ export function ConfigModal({
   llmProfiles = null,
   onSaved,
   governanceSlot,
+  initialSettings = null,
+  initialActiveTab = 'providers',
+  initialAgentItems = [],
 }: ConfigModalProps) {
-  const { theme: activeTheme, setTheme } = useTheme();
   const theme = useThemeConfig();
-  const { locale, setLocale, t } = useI18n();
-  const [profiles, setProfiles] = useState<EditableProfile[]>(() =>
+  const { t } = useI18n();
+  const [profiles, setProfilesState] = useState<EditableProfile[]>(() =>
     createEditableProfiles(llmProfiles)
   );
+  const profilesRef = useRef<EditableProfile[]>(profiles);
+  const setProfiles = (updater: EditableProfileUpdater): void => {
+    const nextProfiles =
+      typeof updater === 'function' ? updater(profilesRef.current) : updater;
+    profilesRef.current = nextProfiles;
+    setProfilesState(nextProfiles);
+  };
   const [selectedProfileId, setSelectedProfileId] = useState(
     llmProfiles?.profiles[0]?.id ?? ''
   );
   const [defaultProfileId, setDefaultProfileId] = useState(
     llmProfiles?.defaultProfileId ?? llmProfiles?.profiles[0]?.id ?? ''
   );
-  const [skillsDir, setSkillsDir] = useState('');
-  const [initialSkillsDir, setInitialSkillsDir] = useState('');
-  const [globalAgentsDir, setGlobalAgentsDir] = useState('');
-  const [initialGlobalAgentsDir, setInitialGlobalAgentsDir] = useState('');
-  const [completionMarkerEnforcementEnabled, setCompletionMarkerEnforcementEnabled] =
-    useState(false);
-  const [
-    initialCompletionMarkerEnforcementEnabled,
-    setInitialCompletionMarkerEnforcementEnabled,
-  ] = useState(false);
-  const [maxSteps, setMaxSteps] = useState(100);
-  const [initialMaxSteps, setInitialMaxSteps] = useState(100);
-  const [activeTab, setActiveTab] = useState<'providers' | 'skills' | 'governance' | 'other'>('providers');
-  const [settingsLoadState, setSettingsLoadState] = useState<SettingsLoadState>('idle');
+  const [settingsDraftState, dispatchSettingsDraft] = useReducer(
+    settingsDraftReducer,
+    initialSettings,
+    (seedSettings) => {
+      const nextDraft =
+        seedSettings == null
+          ? createDefaultSettingsDraft()
+          : createSettingsDraftFromResponse(seedSettings);
+      return {
+        initial: nextDraft,
+        draft: nextDraft,
+      };
+    }
+  );
+  const settingsDraft = settingsDraftState.draft;
+  const {
+    skillsDir,
+    globalAgentsDir,
+    completionMarkerEnforcementEnabled,
+    maxSteps,
+    authEnabled,
+    authConfigured,
+    authPassword,
+    authSessionTtlMs,
+    authTrustProxy,
+    sessionShareTtlHours,
+    ctxReplayMinRounds,
+    ctxReplayMaxRounds,
+    ctxReplayBudgetRatio,
+    ctxWindowTokens,
+    ctxPrecompressTriggerRatio,
+    ctxPrecompressKeepLlmRounds,
+    ctxPrecompressChunkTokens,
+    ctxCompressionMaxTokens,
+  } = settingsDraft;
+  const patchSettingsDraft = (patch: Partial<SettingsDraft>): void => {
+    dispatchSettingsDraft({ type: 'patch', patch });
+  };
+  const setSkillsDir = (value: string): void => patchSettingsDraft({ skillsDir: value });
+  const setGlobalAgentsDir = (value: string): void => patchSettingsDraft({ globalAgentsDir: value });
+  const setCompletionMarkerEnforcementEnabled = (value: boolean): void =>
+    patchSettingsDraft({ completionMarkerEnforcementEnabled: value });
+  const setMaxSteps = (value: number): void => patchSettingsDraft({ maxSteps: value });
+  const setAuthEnabled = (value: boolean): void => patchSettingsDraft({ authEnabled: value });
+  const setAuthPassword = (value: string): void => patchSettingsDraft({ authPassword: value });
+  const setAuthClearPassword = (value: boolean): void => patchSettingsDraft({ authClearPassword: value });
+  const setAuthSessionTtlMs = (value: number): void => patchSettingsDraft({ authSessionTtlMs: value });
+  const setAuthTrustProxy = (value: boolean): void => patchSettingsDraft({ authTrustProxy: value });
+  const setSessionShareTtlHours = (value: number): void =>
+    patchSettingsDraft({ sessionShareTtlHours: value });
+  const setCtxReplayMinRounds = (value: number): void => patchSettingsDraft({ ctxReplayMinRounds: value });
+  const setCtxReplayMaxRounds = (value: number): void => patchSettingsDraft({ ctxReplayMaxRounds: value });
+  const setCtxReplayBudgetRatio = (value: number): void => patchSettingsDraft({ ctxReplayBudgetRatio: value });
+  const setCtxWindowTokens = (value: number): void => patchSettingsDraft({ ctxWindowTokens: value });
+  const setCtxPrecompressTriggerRatio = (value: number): void => patchSettingsDraft({ ctxPrecompressTriggerRatio: value });
+  const setCtxPrecompressKeepLlmRounds = (value: number): void => patchSettingsDraft({ ctxPrecompressKeepLlmRounds: value });
+  const setCtxPrecompressChunkTokens = (value: number): void =>
+    patchSettingsDraft({ ctxPrecompressChunkTokens: value });
+  const setCtxCompressionMaxTokens = (value: number): void =>
+    patchSettingsDraft({ ctxCompressionMaxTokens: value });
+  const [activeTab, setActiveTab] = useState<'providers' | 'skills' | 'agents' | 'governance' | 'other'>(
+    initialActiveTab
+  );
+  const [settingsLoadState, setSettingsLoadState] = useState<SettingsLoadState>(
+    initialSettings == null ? 'idle' : 'ready'
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelDiscoveryStatusByProfile, setModelDiscoveryStatusByProfile] = useState<
@@ -117,6 +175,16 @@ export function ConfigModal({
   const [introspectionByProfile, setIntrospectionByProfile] = useState<
     Record<string, LlmProfileIntrospectionView>
   >({});
+  const [agentItems, setAgentItems] = useState<AgentListItemView[]>(initialAgentItems);
+  const [selectedAgentName, setSelectedAgentName] = useState(initialAgentItems[0]?.name ?? '');
+  const [agentConfigDraft, setAgentConfigDraft] = useState<AgentConfigDraft>(() =>
+    createAgentConfigDraft(initialAgentItems[0]?.config)
+  );
+  const [manualModelInputByProfile, setManualModelInputByProfile] = useState<Record<string, string>>({});
+  const [agentModelOptionsOpen, setAgentModelOptionsOpen] = useState(false);
+  const [agentConfigLoading, setAgentConfigLoading] = useState(false);
+  const [agentConfigSaving, setAgentConfigSaving] = useState(false);
+  const [agentConfigError, setAgentConfigError] = useState<string | null>(null);
 
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? null,
@@ -125,26 +193,65 @@ export function ConfigModal({
   const selectedIntrospection = selectedProfile
     ? introspectionByProfile[selectedProfile.id]
     : undefined;
-  const selectedModelOptions = useMemo(() => {
-    const options = new Map<string, string>();
-    for (const model of selectedIntrospection?.models ?? []) {
-      options.set(model.id, model.displayName || model.id);
-    }
-    if (selectedProfile?.defaultModel) {
-      options.set(selectedProfile.defaultModel, selectedProfile.defaultModel);
-    }
-    return [...options.entries()];
-  }, [selectedIntrospection?.models, selectedProfile?.defaultModel]);
   const selectedDiscoveryStatus = selectedProfile
     ? modelDiscoveryStatusByProfile[selectedProfile.id] ?? 'idle'
     : 'idle';
   const selectedAdvancedOpen = selectedProfile
     ? advancedOpenByProfile[selectedProfile.id] === true
     : false;
+  const selectedAvailableModels = useMemo(
+    () => normalizeAvailableModels(selectedProfile?.availableModels, selectedProfile?.defaultModel ?? ''),
+    [selectedProfile?.availableModels, selectedProfile?.defaultModel]
+  );
+  const selectedDiscoveryCandidates = useMemo(() => {
+    const existing = new Set(selectedAvailableModels);
+    return (selectedIntrospection?.models ?? [])
+      .map((model) => ({
+        id: String(model.id ?? '').trim(),
+        label: String(model.displayName || model.id || '').trim(),
+      }))
+      .filter((model) => model.id.length > 0)
+      .map((model) => ({
+        ...model,
+        added: existing.has(model.id),
+      }));
+  }, [selectedAvailableModels, selectedIntrospection?.models]);
+  const selectedManualModelInput = selectedProfile
+    ? manualModelInputByProfile[selectedProfile.id] ?? ''
+    : '';
+  const selectedAgentItem = useMemo(
+    () => agentItems.find((agent) => agent.name === selectedAgentName) ?? agentItems[0] ?? null,
+    [agentItems, selectedAgentName]
+  );
+  const agentSelectedProfileId = agentConfigDraft.llmProfileId.trim() || defaultProfileId;
+  const agentSelectedProfile = useMemo(
+    () => profiles.find((item) => item.id === agentSelectedProfileId) ?? profiles[0] ?? null,
+    [agentSelectedProfileId, profiles]
+  );
+  const agentModelOptions = useMemo(
+    () =>
+      buildAvailableModelOptions(
+        agentSelectedProfile
+      ),
+    [agentSelectedProfile]
+  );
+  const agentModelPlaceholder = useMemo(() => {
+    return agentSelectedProfile?.defaultModel
+      ? `${t('config.agentConfig.model.inherit')}: ${agentSelectedProfile.defaultModel}`
+      : t('config.agentConfig.inherit');
+  }, [agentSelectedProfile?.defaultModel, t]);
 
   useEffect(() => {
     if (!isOpen) {
-      setSettingsLoadState('idle');
+      setSettingsLoadState(initialSettings == null ? 'idle' : 'ready');
+      setError(null);
+      setAgentConfigError(null);
+      return;
+    }
+
+    if (initialSettings != null) {
+      dispatchSettingsDraft({ type: 'reset', value: createSettingsDraftFromResponse(initialSettings) });
+      setSettingsLoadState('ready');
       setError(null);
       return;
     }
@@ -182,29 +289,17 @@ export function ConfigModal({
         if (!response.ok) {
           throw new Error(`Failed to load settings: ${response.status}`);
         }
-        return response.json() as Promise<SettingsResponse>;
+        return response.json() as Promise<PublicSettingsView>;
       })
       .then((settings) => {
         if (canceled) {
           return;
         }
         applyPersistedProfiles(settings.llmProfiles ?? llmProfiles);
-        const nextSkillsDir = String(settings.agent?.skillsDir ?? '');
-        const nextGlobalAgentsDir = String(settings.agent?.globalAgentsDir ?? '');
-        const nextCompletionMarkerEnforcementEnabled =
-          settings.agent?.completionMarkerEnforcementEnabled === true;
-        const nextMaxSteps =
-          typeof settings.agent?.maxSteps === 'number' && Number.isFinite(settings.agent.maxSteps)
-            ? Math.max(1, Math.floor(settings.agent.maxSteps))
-            : 100;
-        setSkillsDir(nextSkillsDir);
-        setInitialSkillsDir(nextSkillsDir);
-        setGlobalAgentsDir(nextGlobalAgentsDir);
-        setInitialGlobalAgentsDir(nextGlobalAgentsDir);
-        setCompletionMarkerEnforcementEnabled(nextCompletionMarkerEnforcementEnabled);
-        setInitialCompletionMarkerEnforcementEnabled(nextCompletionMarkerEnforcementEnabled);
-        setMaxSteps(nextMaxSteps);
-        setInitialMaxSteps(nextMaxSteps);
+        dispatchSettingsDraft({
+          type: 'reset',
+          value: createSettingsDraftFromResponse(settings),
+        });
         setSettingsLoadState('ready');
       })
       .catch((fetchError) => {
@@ -219,7 +314,53 @@ export function ConfigModal({
     return () => {
       canceled = true;
     };
-  }, [isOpen, llmProfiles]);
+  }, [initialSettings, isOpen, llmProfiles]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    let canceled = false;
+    setAgentConfigLoading(true);
+    setAgentConfigError(null);
+    void fetch('/api/agents')
+      .then((response) => response.json())
+      .then((payload: { agents?: AgentListItemView[] }) => {
+        if (canceled) {
+          return;
+        }
+        const agents = Array.isArray(payload.agents)
+          ? payload.agents.filter((agent) => agent.source === 'global')
+          : [];
+        setAgentItems(agents);
+        setSelectedAgentName((current) =>
+          agents.some((agent) => agent.name === current) ? current : agents[0]?.name ?? ''
+        );
+      })
+      .catch((loadError) => {
+        if (!canceled) {
+          setAgentItems([]);
+          setAgentConfigError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      })
+      .finally(() => {
+        if (!canceled) {
+          setAgentConfigLoading(false);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!selectedAgentItem) {
+      setAgentConfigDraft(createAgentConfigDraft());
+      return;
+    }
+    setAgentConfigDraft(createAgentConfigDraft(selectedAgentItem.config));
+    setAgentConfigError(null);
+  }, [selectedAgentItem?.name]);
 
   const handleProfileChange = (patch: Partial<EditableProfile>): void => {
     if (!selectedProfile) {
@@ -229,6 +370,7 @@ export function ConfigModal({
       patch.provider !== undefined ||
       patch.apiBase !== undefined ||
       patch.apiKeyInput !== undefined ||
+      patch.apiKeyEditing !== undefined ||
       patch.clearApiKey !== undefined;
     setProfiles((prev) =>
       prev.map((profile) =>
@@ -246,6 +388,60 @@ export function ConfigModal({
         [selectedProfile.id]: 'waiting',
       }));
     }
+  };
+
+  const updateSelectedProfileModels = (models: string[], defaultModel?: string): void => {
+    if (!selectedProfile) {
+      return;
+    }
+    const normalized = normalizeAvailableModels(models, defaultModel ?? selectedProfile.defaultModel);
+    const nextDefault =
+      defaultModel && normalized.includes(defaultModel)
+        ? defaultModel
+        : normalized.includes(selectedProfile.defaultModel)
+          ? selectedProfile.defaultModel
+          : normalized[0] ?? selectedProfile.defaultModel;
+    handleProfileChange({
+      availableModels: normalized,
+      defaultModel: nextDefault,
+    });
+  };
+
+  const handleAddAvailableModel = (model: string): void => {
+    const trimmed = model.trim();
+    if (!selectedProfile || !trimmed) {
+      return;
+    }
+    const nextModels = normalizeAvailableModels(
+      [...selectedAvailableModels, trimmed],
+      selectedProfile.defaultModel || trimmed
+    );
+    updateSelectedProfileModels(nextModels, selectedProfile.defaultModel || trimmed);
+    setManualModelInputByProfile((prev) => ({
+      ...prev,
+      [selectedProfile.id]: '',
+    }));
+  };
+
+  const handleRemoveAvailableModel = (model: string): void => {
+    if (!selectedProfile) {
+      return;
+    }
+    const remaining = selectedAvailableModels.filter((item) => item !== model);
+    if (remaining.length === 0) {
+      return;
+    }
+    updateSelectedProfileModels(remaining, selectedProfile.defaultModel === model ? remaining[0] : selectedProfile.defaultModel);
+  };
+
+  const handleSetDefaultAvailableModel = (model: string): void => {
+    if (!selectedProfile || !selectedAvailableModels.includes(model)) {
+      return;
+    }
+    handleProfileChange({
+      defaultModel: model,
+      availableModels: selectedAvailableModels,
+    });
   };
 
   const handleAddProfile = (): void => {
@@ -288,22 +484,7 @@ export function ConfigModal({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          profile: {
-            id: profile.id,
-            name: profile.name,
-            provider: profile.provider,
-            apiBase: profile.apiBase,
-            defaultModel: profile.defaultModel,
-            maxOutputTokens: profile.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-            enabled: profile.enabled,
-            capabilities: {
-              ...(profile.capabilities ?? {}),
-              modelDiscovery: true,
-            },
-            ...(profile.apiKeyInput.trim().length > 0
-              ? { apiKey: profile.apiKeyInput.trim() }
-              : {}),
-          },
+          profile: profileDraftToDiscoveryPayload(profile),
         }),
       });
       if (!response.ok) {
@@ -341,6 +522,49 @@ export function ConfigModal({
         ...prev,
         [profile.id]: 'error',
       }));
+    }
+  };
+
+  const handleAgentDraftChange = (patch: Partial<AgentConfigDraft>): void => {
+    setAgentConfigDraft((prev) => ({ ...prev, ...patch }));
+  };
+
+  const handleSaveAgentConfig = async (): Promise<void> => {
+    if (!selectedAgentItem || agentConfigSaving) {
+      return;
+    }
+    setAgentConfigSaving(true);
+    setAgentConfigError(null);
+    try {
+      const response = await fetch(`/api/agents/${encodeURIComponent(selectedAgentItem.name)}/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: agentConfigDraftToPayload(agentConfigDraft) }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error || `status=${response.status}`);
+      }
+      const payload = (await response.json()) as {
+        name: string;
+        config: AgentProfileConfigView;
+      };
+      setAgentItems((prev) =>
+        prev.map((agent) =>
+          agent.name === payload.name
+            ? {
+                ...agent,
+                config: payload.config,
+                description: payload.config.description || agent.description,
+              }
+            : agent
+        )
+      );
+      setAgentConfigDraft(createAgentConfigDraft(payload.config));
+    } catch (saveError) {
+      setAgentConfigError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setAgentConfigSaving(false);
     }
   };
 
@@ -386,51 +610,34 @@ export function ConfigModal({
 
     setSaving(true);
     setError(null);
-    let profilesSaved = false;
-    let agentSettingsSaveAttempted = false;
-    let agentSettingsSaved = false;
 
     try {
-      if (profiles.length === 0) {
+      const profilesSnapshot = profilesRef.current;
+      if (profilesSnapshot.length === 0) {
         throw new Error(t('config.providerCenter.errorMissingProfiles'));
       }
 
-      const profileResponse = await fetch('/api/llm-profiles', {
+      const settingsResponse = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          defaultProfileId: defaultProfileId || profiles[0].id,
-          profiles: profiles.map((profile) => ({
-            id: profile.id,
-            name: profile.name,
-            provider: profile.provider,
-            apiBase: profile.apiBase,
-            defaultModel: profile.defaultModel,
-            maxOutputTokens: profile.maxOutputTokens,
-            enabled: profile.enabled,
-            capabilities: {
-              ...(profile.capabilities ?? {}),
-              modelDiscovery: true,
-            },
-            ...(profile.apiKeyInput.trim().length > 0
-              ? { apiKey: profile.apiKeyInput.trim() }
-              : {}),
-            ...(profile.clearApiKey ? { clearApiKey: true } : {}),
-          })),
+          defaultProfileId: defaultProfileId || profilesSnapshot[0].id,
+          profiles: profilesSnapshot.map(profileDraftToSavePayload),
+          ...buildAgentSettingsPayload(settingsDraft),
         }),
       });
 
-      if (!profileResponse.ok) {
-        const payload = (await profileResponse.json().catch(() => ({}))) as {
+      if (!settingsResponse.ok) {
+        const payload = (await settingsResponse.json().catch(() => ({}))) as {
           error?: string;
         };
         throw new Error(payload.error || t('config.error.saveApi'));
       }
 
-      const savedProfiles = (await profileResponse.json()) as SaveLlmProfilesResponse;
+      const savedSettings = (await settingsResponse.json()) as SaveSettingsResponse;
       const nextPersistedProfiles: LlmProfilesConfigView = {
-        defaultProfileId: savedProfiles.defaultProfileId,
-        profiles: savedProfiles.profiles,
+        defaultProfileId: savedSettings.llmProfiles.defaultProfileId,
+        profiles: savedSettings.llmProfiles.profiles,
       };
       const nextEditableProfiles = createEditableProfiles(nextPersistedProfiles);
       setProfiles(nextEditableProfiles);
@@ -450,50 +657,12 @@ export function ConfigModal({
           )
         )
       );
-      profilesSaved = true;
-
-      const agentSettingsChanged =
-        skillsDir !== initialSkillsDir ||
-        globalAgentsDir !== initialGlobalAgentsDir ||
-        completionMarkerEnforcementEnabled !== initialCompletionMarkerEnforcementEnabled ||
-        maxSteps !== initialMaxSteps;
-      if (agentSettingsChanged) {
-        agentSettingsSaveAttempted = true;
-        const agentResponse = await fetch('/api/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            skillsDir,
-            globalAgentsDir,
-            completionMarkerEnforcementEnabled,
-            maxSteps,
-          }),
-        });
-        if (!agentResponse.ok) {
-          throw new Error(t('config.error.saveAgent'));
-        }
-        agentSettingsSaved = true;
-        setInitialSkillsDir(skillsDir);
-        setInitialGlobalAgentsDir(globalAgentsDir);
-        setInitialCompletionMarkerEnforcementEnabled(completionMarkerEnforcementEnabled);
-        setInitialMaxSteps(maxSteps);
-      }
+      dispatchSettingsDraft({ type: 'reset', value: createSettingsDraftFromResponse(savedSettings) });
 
       await onSaved?.();
       onClose();
     } catch (saveError) {
-      if (profilesSaved && agentSettingsSaveAttempted && !agentSettingsSaved) {
-        try {
-          await onSaved?.();
-        } catch (refreshError) {
-          console.error(refreshError);
-        }
-        const message =
-          saveError instanceof Error ? saveError.message : t('config.error.unknown');
-        setError(t('config.providerCenter.partialSaveAgent', { message }));
-      } else {
-        setError(saveError instanceof Error ? saveError.message : t('config.error.unknown'));
-      }
+      setError(saveError instanceof Error ? saveError.message : t('config.error.unknown'));
     } finally {
       setSaving(false);
     }
@@ -544,72 +713,26 @@ export function ConfigModal({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
-        <div className="mb-3 flex gap-1 rounded-lg p-1" style={{ backgroundColor: theme.colors.bg.tertiary }}>
-          <button
-            type="button"
-            data-testid="config-tab-providers"
-            onClick={() => setActiveTab('providers')}
-            className="flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-all"
-            style={{
-              backgroundColor:
-                activeTab === 'providers' ? theme.colors.bg.secondary : 'transparent',
-              color:
-                activeTab === 'providers'
-                  ? theme.colors.text.primary
-                  : theme.colors.text.secondary,
-            }}
-          >
-            {t('config.providerCenter.tabProviders')}
-          </button>
-          <button
-            type="button"
-            data-testid="config-tab-skills"
-            onClick={() => setActiveTab('skills')}
-            className="flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-all"
-            style={{
-              backgroundColor:
-                activeTab === 'skills' ? theme.colors.bg.secondary : 'transparent',
-              color:
-                activeTab === 'skills'
-                  ? theme.colors.text.primary
-                  : theme.colors.text.secondary,
-            }}
-          >
-            {t('config.tab.skills')}
-          </button>
-          <button
-            type="button"
-            data-testid="config-tab-governance"
-            onClick={() => setActiveTab('governance')}
-            className="flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-all"
-            style={{
-              backgroundColor:
-                activeTab === 'governance' ? theme.colors.bg.secondary : 'transparent',
-              color:
-                activeTab === 'governance'
-                  ? theme.colors.text.primary
-                  : theme.colors.text.secondary,
-            }}
-          >
-            {t('config.tab.governance')}
-          </button>
-          <button
-            type="button"
-            data-testid="config-tab-other"
-            onClick={() => setActiveTab('other')}
-            className="flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-all"
-            style={{
-              backgroundColor:
-                activeTab === 'other' ? theme.colors.bg.secondary : 'transparent',
-              color:
-                activeTab === 'other'
-                  ? theme.colors.text.primary
-                  : theme.colors.text.secondary,
-            }}
-          >
-            {t('config.tab.other')}
-          </button>
-        </div>
+          <div className="mb-3 flex gap-1 rounded-lg p-1" style={{ backgroundColor: theme.colors.bg.tertiary }}>
+            {CONFIG_MODAL_TABS.map((tab) => {
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  data-testid={tab.testId}
+                  onClick={() => setActiveTab(tab.id)}
+                  className="flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-all"
+                  style={{
+                    backgroundColor: isActive ? theme.colors.bg.secondary : 'transparent',
+                    color: isActive ? theme.colors.text.primary : theme.colors.text.secondary,
+                  }}
+                >
+                  {t(tab.labelKey)}
+                </button>
+              );
+            })}
+          </div>
 
         {showLoadingHint && (
           <div
@@ -626,506 +749,103 @@ export function ConfigModal({
         )}
 
         {activeTab === 'providers' ? (
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[240px_minmax(0,1fr)]">
-            <div
-              className="rounded-2xl border p-3"
-              style={{
-                borderColor: theme.colors.border.DEFAULT,
-                backgroundColor: theme.colors.bg.primary,
-              }}
-            >
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <div className="text-sm font-medium" style={{ color: theme.colors.text.primary }}>
-                  {t('config.providerCenter.profiles')}
-                </div>
-                <button
-                  type="button"
-                  onClick={handleAddProfile}
-                  disabled={settingsControlsDisabled}
-                  className="rounded-lg border px-2.5 py-1.5 text-xs transition-colors"
-                  style={{
-                    borderColor: theme.colors.border.DEFAULT,
-                    backgroundColor: theme.colors.bg.tertiary,
-                    color: theme.colors.text.secondary,
-                    opacity: settingsControlsDisabled ? 0.6 : 1,
-                  }}
-                >
-                  {t('config.providerCenter.addProfile')}
-                </button>
-              </div>
-
-              <div className="space-y-2">
-                {profiles.map((profile) => {
-                  const active = profile.id === selectedProfile?.id;
-                  return (
-                    <button
-                      key={profile.id}
-                      type="button"
-                      onClick={() => setSelectedProfileId(profile.id)}
-                      data-testid="config-provider-profile-row"
-                      className="flex w-full min-w-0 items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors"
-                      style={{
-                        borderColor: active
-                          ? theme.colors.primary.DEFAULT
-                          : theme.colors.border.DEFAULT,
-                        backgroundColor: active
-                          ? theme.colors.bg.secondary
-                          : theme.colors.bg.tertiary,
-                      }}
-                    >
-                      <div className="flex min-w-0 flex-1 items-center gap-2">
-                        <span
-                          className="shrink-0 text-sm font-medium"
-                          style={{ color: theme.colors.text.primary }}
-                        >
-                          {profile.name}
-                        </span>
-                        <span className="shrink-0 text-xs" style={{ color: theme.colors.text.muted }}>
-                          {profile.provider === 'openai'
-                            ? t('config.provider.openai')
-                            : t('config.provider.anthropic')}
-                        </span>
-                        <span className="min-w-0 truncate text-xs" style={{ color: theme.colors.text.muted }}>
-                          {profile.defaultModel}
-                        </span>
-                      </div>
-                      {defaultProfileId === profile.id && (
-                        <span
-                          className="shrink-0 rounded-full px-2 py-0.5 text-[10px]"
-                          style={{
-                            backgroundColor: theme.colors.primary.DEFAULT,
-                            color: theme.colors.text.inverse,
-                          }}
-                        >
-                          {t('config.providerCenter.defaultProfile')}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div
-              className="rounded-2xl border p-3"
-              style={{
-                borderColor: theme.colors.border.DEFAULT,
-                backgroundColor: theme.colors.bg.primary,
-              }}
-            >
-              {selectedProfile ? (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div
-                        className="text-lg font-semibold"
-                        style={{ color: theme.colors.text.primary }}
-                      >
-                        {selectedProfile.name}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <label
-                        className="flex items-center gap-2 text-sm"
-                        style={{ color: theme.colors.text.secondary }}
-                      >
-                        <input
-                          type="radio"
-                          checked={defaultProfileId === selectedProfile.id}
-                          onChange={() => setDefaultProfileId(selectedProfile.id)}
-                          disabled={settingsControlsDisabled}
-                        />
-                        {t('config.providerCenter.useAsDefault')}
-                      </label>
-                      <button
-                        type="button"
-                        onClick={handleRemoveProfile}
-                        disabled={profiles.length <= 1 || settingsControlsDisabled}
-                        className="rounded-lg border px-3 py-2 text-sm transition-colors"
-                        style={{
-                          borderColor: theme.colors.border.DEFAULT,
-                          backgroundColor: theme.colors.bg.tertiary,
-                          color: theme.colors.text.secondary,
-                          opacity:
-                            profiles.length <= 1 || settingsControlsDisabled ? 0.45 : 1,
-                        }}
-                      >
-                        {t('config.providerCenter.removeProfile')}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <div>
-                      <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                        {t('config.providerCenter.profileName')}
-                      </label>
-                      <input
-                        value={selectedProfile.name}
-                        onChange={(event) =>
-                          handleProfileChange({ name: event.target.value })
-                        }
-                        disabled={settingsControlsDisabled}
-                        className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                        style={{
-                          backgroundColor: theme.colors.bg.tertiary,
-                          borderColor: theme.colors.border.DEFAULT,
-                          color: theme.colors.text.primary,
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                        {t('config.provider')}
-                      </label>
-                      <select
-                        value={selectedProfile.provider}
-                        onChange={(event) =>
-                          handleProfileChange({
-                            provider:
-                              event.target.value === 'openai' ? 'openai' : 'anthropic',
-                          })
-                        }
-                        disabled={settingsControlsDisabled}
-                        className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                        style={{
-                          backgroundColor: theme.colors.bg.tertiary,
-                          borderColor: theme.colors.border.DEFAULT,
-                          color: theme.colors.text.primary,
-                        }}
-                      >
-                        <option value="anthropic">{t('config.provider.anthropic')}</option>
-                        <option value="openai">{t('config.provider.openai')}</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                        {t('config.apiBase')}
-                      </label>
-                      <input
-                        value={selectedProfile.apiBase}
-                        onChange={(event) =>
-                          handleProfileChange({ apiBase: event.target.value })
-                        }
-                        disabled={settingsControlsDisabled}
-                        className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                        style={{
-                          backgroundColor: theme.colors.bg.tertiary,
-                          borderColor: theme.colors.border.DEFAULT,
-                          color: theme.colors.text.primary,
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                        {t('config.model')}
-                      </label>
-                      <input
-                        list="config-model-options"
-                        value={selectedProfile.defaultModel}
-                        onChange={(event) =>
-                          handleProfileChange({ defaultModel: event.target.value })
-                        }
-                        disabled={settingsControlsDisabled}
-                        className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                        style={{
-                          backgroundColor: theme.colors.bg.tertiary,
-                          borderColor: theme.colors.border.DEFAULT,
-                          color: theme.colors.text.primary,
-                        }}
-                      />
-                      <datalist id="config-model-options">
-                        {selectedModelOptions.map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </datalist>
-                      <div className="mt-1 truncate text-xs" style={{ color: theme.colors.text.muted }}>
-                        {selectedDiscoveryStatus === 'loading'
-                          ? t('config.providerCenter.discovering')
-                          : selectedIntrospection?.models.length
-                            ? t('config.providerCenter.discoverySummary', {
-                                source: selectedIntrospection.source,
-                                count: selectedIntrospection.models.length,
-                              })
-                            : selectedIntrospection?.error
-                              ? t('config.providerCenter.discoveryFailed')
-                              : t('config.providerCenter.discoveryAutoHint')}
-                      </div>
-                    </div>
-                    <div>
-                      <label
-                        className="mb-1 flex items-center gap-2 text-sm"
-                        style={{ color: theme.colors.text.secondary }}
-                      >
-                        {t('config.apiKey.label')}
-                        {selectedProfile.hasApiKey && !selectedProfile.clearApiKey && (
-                          <span className="rounded-full bg-green-500 px-2 py-0.5 text-xs text-white">
-                            {t('config.apiKey.configured')}
-                          </span>
-                        )}
-                      </label>
-                      <input
-                        type="password"
-                        value={selectedProfile.apiKeyInput}
-                        onChange={(event) =>
-                          handleProfileChange({
-                            apiKeyInput: event.target.value,
-                            clearApiKey: false,
-                          })
-                        }
-                        placeholder={
-                          selectedProfile.hasApiKey && !selectedProfile.clearApiKey
-                            ? t('config.apiKey.placeholderConfigured')
-                            : t('config.apiKey.placeholderGeneric')
-                        }
-                        disabled={settingsControlsDisabled}
-                        className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                        style={{
-                          backgroundColor: theme.colors.bg.tertiary,
-                          borderColor: theme.colors.border.DEFAULT,
-                          color: theme.colors.text.primary,
-                        }}
-                      />
-                      <div className="mt-2 flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleProfileChange({
-                              apiKeyInput: '',
-                              clearApiKey: true,
-                              hasApiKey: false,
-                            })
-                          }
-                          disabled={settingsControlsDisabled}
-                          className="rounded-lg border px-2.5 py-1.5 text-xs transition-colors"
-                          style={{
-                            borderColor: theme.colors.border.DEFAULT,
-                            backgroundColor: theme.colors.bg.tertiary,
-                            color: theme.colors.text.secondary,
-                            opacity: settingsControlsDisabled ? 0.6 : 1,
-                          }}
-                        >
-                          {t('config.providerCenter.clearStoredKey')}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <details
-                    data-testid="config-provider-advanced"
-                    open={selectedAdvancedOpen}
-                    onToggle={(event) => {
-                      const open = event.currentTarget.open;
-                      setAdvancedOpenByProfile((prev) => ({
-                        ...prev,
-                        [selectedProfile.id]: open,
-                      }));
-                    }}
-                    className="rounded-2xl border p-3"
-                    style={{
-                      borderColor: theme.colors.border.DEFAULT,
-                      backgroundColor: theme.colors.bg.secondary,
-                    }}
-                  >
-                    <summary
-                      className="cursor-pointer text-sm font-medium"
-                      style={{ color: theme.colors.text.secondary }}
-                    >
-                      {t('config.providerCenter.advancedParameters')}
-                    </summary>
-                    <div className="mt-3 max-w-md">
-                      <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                        {t('config.providerCenter.outputLimit')}
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        value={selectedProfile.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS}
-                        onChange={(event) =>
-                          handleProfileChange({
-                            maxOutputTokens:
-                              Number.parseInt(event.target.value, 10) || DEFAULT_MAX_OUTPUT_TOKENS,
-                          })
-                        }
-                        disabled={settingsControlsDisabled}
-                        className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                        style={{
-                          backgroundColor: theme.colors.bg.tertiary,
-                          borderColor: theme.colors.border.DEFAULT,
-                          color: theme.colors.text.primary,
-                        }}
-                      />
-                      <p className="mt-1 text-xs" style={{ color: theme.colors.text.muted }}>
-                        {t('config.providerCenter.outputLimitHint')}
-                      </p>
-                    </div>
-                  </details>
-                </div>
-              ) : (
-                <div className="text-sm" style={{ color: theme.colors.text.muted }}>
-                  {t('config.providerCenter.errorMissingProfiles')}
-                </div>
-              )}
-            </div>
-          </div>
+          <ConfigModalProvidersTab
+            profiles={profiles}
+            selectedProfile={selectedProfile}
+            defaultProfileId={defaultProfileId}
+            settingsControlsDisabled={settingsControlsDisabled}
+            selectedAvailableModels={selectedAvailableModels}
+            selectedManualModelInput={selectedManualModelInput}
+            selectedIntrospection={selectedIntrospection}
+            selectedDiscoveryStatus={selectedDiscoveryStatus}
+            selectedDiscoveryCandidates={selectedDiscoveryCandidates}
+            selectedAdvancedOpen={selectedAdvancedOpen}
+            ctxWindowTokens={ctxWindowTokens}
+            onAddProfile={handleAddProfile}
+            onRemoveProfile={handleRemoveProfile}
+            onSelectProfile={setSelectedProfileId}
+            onSetDefaultProfile={setDefaultProfileId}
+            onProfileChange={handleProfileChange}
+            onSetDefaultAvailableModel={handleSetDefaultAvailableModel}
+            onRemoveAvailableModel={handleRemoveAvailableModel}
+            onManualModelInputChange={(profileId, value) =>
+              setManualModelInputByProfile((prev) => ({
+                ...prev,
+                [profileId]: value,
+              }))
+            }
+            onAddAvailableModel={handleAddAvailableModel}
+            onDiscoverModels={handleDiscoverModels}
+            onAdvancedOpenChange={(profileId, open) =>
+              setAdvancedOpenByProfile((prev) => ({
+                ...prev,
+                [profileId]: open,
+              }))
+            }
+          />
         ) : activeTab === 'skills' ? (
-          <div className="space-y-4">
-            <div>
-              <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                {t('config.skillsDir')}
-              </label>
-              <input
-                type="text"
-                value={skillsDir}
-                onChange={(event) => setSkillsDir(event.target.value)}
-                placeholder={t('config.skillsDir.placeholder')}
-                disabled={settingsControlsDisabled}
-                className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                style={{
-                  backgroundColor: theme.colors.bg.tertiary,
-                  borderColor: theme.colors.border.DEFAULT,
-                  color: theme.colors.text.primary,
-                }}
-              />
-              <p className="mt-1 text-xs" style={{ color: theme.colors.text.muted }}>
-                {t('config.skillsDir.hint')}
-              </p>
-            </div>
-
-            <div>
-              <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                {t('config.globalAgentsDir')}
-              </label>
-              <input
-                type="text"
-                value={globalAgentsDir}
-                onChange={(event) => setGlobalAgentsDir(event.target.value)}
-                placeholder={t('config.globalAgentsDir.placeholder')}
-                disabled={settingsControlsDisabled}
-                className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                style={{
-                  backgroundColor: theme.colors.bg.tertiary,
-                  borderColor: theme.colors.border.DEFAULT,
-                  color: theme.colors.text.primary,
-                }}
-              />
-              <p className="mt-1 text-xs" style={{ color: theme.colors.text.muted }}>
-                {t('config.globalAgentsDir.hint')}
-              </p>
-            </div>
-
-            <div className="rounded-lg p-3 text-sm" style={{ backgroundColor: theme.colors.bg.tertiary }}>
-              <p style={{ color: theme.colors.text.secondary }}>{t('config.tips.title')}</p>
-              <ul className="mt-1 space-y-1" style={{ color: theme.colors.text.muted }}>
-                <li className="list-inside list-disc">{t('config.tips.item1')}</li>
-                <li className="list-inside list-disc">{t('config.tips.item2')}</li>
-                <li className="list-inside list-disc">{t('config.tips.item3')}</li>
-                <li className="list-inside list-disc">{t('config.tips.item4')}</li>
-              </ul>
-            </div>
-          </div>
+          <ConfigModalSkillsTab
+            skillsDir={skillsDir}
+            setSkillsDir={setSkillsDir}
+            globalAgentsDir={globalAgentsDir}
+            setGlobalAgentsDir={setGlobalAgentsDir}
+            settingsControlsDisabled={settingsControlsDisabled}
+          />
+        ) : activeTab === 'agents' ? (
+          <ConfigModalAgentsTab
+            agentConfigLoading={agentConfigLoading}
+            agentItems={agentItems}
+            selectedAgentItem={selectedAgentItem}
+            agentConfigDraft={agentConfigDraft}
+            agentConfigSaving={agentConfigSaving}
+            agentConfigError={agentConfigError}
+            profiles={profiles}
+            agentModelOptions={agentModelOptions}
+            agentModelPlaceholder={agentModelPlaceholder}
+            agentModelOptionsOpen={agentModelOptionsOpen}
+            setAgentModelOptionsOpen={setAgentModelOptionsOpen}
+            onSelectAgentName={setSelectedAgentName}
+            onSaveAgentConfig={handleSaveAgentConfig}
+            onAgentDraftChange={handleAgentDraftChange}
+          />
         ) : activeTab === 'governance' ? (
-          <div className="space-y-4">
-            {governanceSlot ?? (
-              <div
-                className="rounded-2xl border p-4 text-sm"
-                style={{
-                  borderColor: theme.colors.border.DEFAULT,
-                  backgroundColor: theme.colors.bg.secondary,
-                  color: theme.colors.text.muted,
-                }}
-              >
-                Governance controls are available after a session is selected.
-              </div>
-            )}
-          </div>
+          <ConfigModalGovernanceTab governanceSlot={governanceSlot} />
         ) : (
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                  {t('common.language')}
-                </label>
-                <select
-                  value={locale}
-                  onChange={(event) =>
-                    setLocale(event.target.value === 'en-US' ? 'en-US' : 'zh-CN')
-                  }
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                  style={{
-                    backgroundColor: theme.colors.bg.tertiary,
-                    borderColor: theme.colors.border.DEFAULT,
-                    color: theme.colors.text.primary,
-                  }}
-                >
-                  <option value="zh-CN">{t('common.language.zhCN')}</option>
-                  <option value="en-US">{t('common.language.enUS')}</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                  {t('common.theme')}
-                </label>
-                <select
-                  value={activeTheme}
-                  onChange={(event) => setTheme(event.target.value === 'light' ? 'light' : 'dark')}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                  style={{
-                    backgroundColor: theme.colors.bg.tertiary,
-                    borderColor: theme.colors.border.DEFAULT,
-                    color: theme.colors.text.primary,
-                  }}
-                >
-                  <option value="dark">{t('common.theme.dark')}</option>
-                  <option value="light">{t('common.theme.light')}</option>
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm" style={{ color: theme.colors.text.secondary }}>
-                  {t('config.maxSteps.label')}
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  value={maxSteps}
-                  onChange={(event) => setMaxSteps(Math.max(1, Number.parseInt(event.target.value, 10) || 100))}
-                  disabled={settingsControlsDisabled}
-                  className="w-full rounded-xl border px-3 py-2 outline-none focus:ring-2"
-                  style={{
-                    backgroundColor: theme.colors.bg.tertiary,
-                    borderColor: theme.colors.border.DEFAULT,
-                    color: theme.colors.text.primary,
-                  }}
-                />
-              </div>
-            </div>
-            <label
-              className="flex items-start gap-3 rounded-xl border p-4"
-              style={{
-                borderColor: theme.colors.border.DEFAULT,
-                backgroundColor: theme.colors.bg.primary,
-              }}
-            >
-              <input
-                type="checkbox"
-                data-testid="config-completion-marker-toggle"
-                checked={completionMarkerEnforcementEnabled}
-                onChange={(event) => setCompletionMarkerEnforcementEnabled(event.target.checked)}
-                disabled={settingsControlsDisabled}
-                className="mt-1 h-4 w-4 rounded border"
-              />
-              <span className="min-w-0">
-                <span className="block text-sm font-medium" style={{ color: theme.colors.text.primary }}>
-                  {t('config.completionMarker.label')}
-                </span>
-                <span className="block text-xs" style={{ color: theme.colors.text.muted }}>
-                  {t('config.completionMarker.description')}
-                </span>
-              </span>
-            </label>
-          </div>
+          <ConfigModalOtherTab
+            settingsControlsDisabled={settingsControlsDisabled}
+            maxSteps={maxSteps}
+            setMaxSteps={setMaxSteps}
+            sessionShareTtlHours={sessionShareTtlHours}
+            setSessionShareTtlHours={setSessionShareTtlHours}
+            completionMarkerEnforcementEnabled={completionMarkerEnforcementEnabled}
+            setCompletionMarkerEnforcementEnabled={setCompletionMarkerEnforcementEnabled}
+            authEnabled={authEnabled}
+            setAuthEnabled={setAuthEnabled}
+            authConfigured={authConfigured}
+            authPassword={authPassword}
+            setAuthPassword={setAuthPassword}
+            setAuthClearPassword={setAuthClearPassword}
+            authSessionTtlMs={authSessionTtlMs}
+            setAuthSessionTtlMs={setAuthSessionTtlMs}
+            authTrustProxy={authTrustProxy}
+            setAuthTrustProxy={setAuthTrustProxy}
+            ctxWindowTokens={ctxWindowTokens}
+            setCtxWindowTokens={setCtxWindowTokens}
+            ctxPrecompressTriggerRatio={ctxPrecompressTriggerRatio}
+            setCtxPrecompressTriggerRatio={setCtxPrecompressTriggerRatio}
+            ctxReplayMinRounds={ctxReplayMinRounds}
+            setCtxReplayMinRounds={setCtxReplayMinRounds}
+            ctxReplayMaxRounds={ctxReplayMaxRounds}
+            setCtxReplayMaxRounds={setCtxReplayMaxRounds}
+            ctxReplayBudgetRatio={ctxReplayBudgetRatio}
+            setCtxReplayBudgetRatio={setCtxReplayBudgetRatio}
+            ctxPrecompressKeepLlmRounds={ctxPrecompressKeepLlmRounds}
+            setCtxPrecompressKeepLlmRounds={setCtxPrecompressKeepLlmRounds}
+            ctxPrecompressChunkTokens={ctxPrecompressChunkTokens}
+            setCtxPrecompressChunkTokens={setCtxPrecompressChunkTokens}
+            ctxCompressionMaxTokens={ctxCompressionMaxTokens}
+            setCtxCompressionMaxTokens={setCtxCompressionMaxTokens}
+          />
         )}
 
         {resolvedError && (

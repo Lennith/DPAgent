@@ -130,7 +130,7 @@ function testInjectedSummaryStoresPromptRefOnlyAndPersistsRawPrompt(): void {
   }
 }
 
-function testContextSnapshotIncludesActiveAgentRefWithoutProfileBody(): void {
+function testContextSnapshotOmitsActiveAgentRefAndPath(): void {
   const harness = createHarness('active-agent-snapshot');
   try {
     harness.manager.updateNamespaceMeta(harness.context, {
@@ -142,12 +142,9 @@ function testContextSnapshotIncludesActiveAgentRefWithoutProfileBody(): void {
       },
     });
     const loaded = harness.manager.loadForTurn(harness.context);
-    assert.match(loaded.systemSegment, /### Active Agent/);
-    assert.match(
-      loaded.systemSegment,
-      /\[AGENT_PROFILE_REF source=workspace name=workspace path=D:\/Repo\/AGENTS\.md\]/
-    );
-    assert.equal(loaded.systemSegment.includes('Coder content'), false);
+    assert.doesNotMatch(loaded.systemSegment, /### Active Agent/);
+    assert.doesNotMatch(loaded.systemSegment, /\[AGENT_PROFILE_REF source=workspace name=workspace/);
+    assert.doesNotMatch(loaded.systemSegment, /D:\/Repo\/AGENTS\.md/);
   } finally {
     cleanupHarness(harness.tempDir);
   }
@@ -218,7 +215,7 @@ function testReplayMessagesCollapseStreamingAssistantOutputToCommittedFinalOutpu
 function runAll(): void {
   testNonInjectedSummaryPersistsPromptAndFinalOutputWithoutTruncation();
   testInjectedSummaryStoresPromptRefOnlyAndPersistsRawPrompt();
-  testContextSnapshotIncludesActiveAgentRefWithoutProfileBody();
+  testContextSnapshotOmitsActiveAgentRefAndPath();
   testFinalOutputUsesCommitFinalOutputTextInsteadOfAssistantMessage();
   testReplayMessagesCollapseStreamingAssistantOutputToCommittedFinalOutput();
   console.log('turn-summary-v2 tests passed');

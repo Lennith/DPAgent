@@ -1,11 +1,11 @@
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
-import { MiniMaxAgent } from '../../src/index.js';
+import { DPAgent } from '../../src/index.js';
 import { ToolRegistry } from '../../src/tools/index.js';
 import type { ContextRef, LLMResponse, Message } from '../../src/types.js';
 import type { LLMClient } from '../../src/llm/index.js';
+import { cleanupIntegrationHarness, createIntegrationHarness } from './helpers/integration-harness.js';
 
 class ScriptedLLMClient {
   async generateWithCallbacks(
@@ -23,6 +23,12 @@ class ScriptedLLMClient {
     };
     callbacks.onComplete?.(response);
     return response;
+  }
+
+  async generatePreparedWithCallbacks(
+    ...args: Parameters<ScriptedLLMClient['generateWithCallbacks']>
+  ): ReturnType<ScriptedLLMClient['generateWithCallbacks']> {
+    return this.generateWithCallbacks(...args);
   }
 
   async generate(): Promise<LLMResponse> {
@@ -46,29 +52,14 @@ class ScriptedLLMClient {
   }
 }
 
-function createHarness(): { tempDir: string; workspaceDir: string; runtimeDir: string; contextDir: string } {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p0-session-transcript-search-'));
-  const workspaceDir = path.join(tempDir, 'workspace');
-  const runtimeDir = path.join(tempDir, 'runtime');
-  const contextDir = path.join(tempDir, 'contexts');
-  fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  fs.mkdirSync(contextDir, { recursive: true });
-  return { tempDir, workspaceDir, runtimeDir, contextDir };
-}
-
-function cleanupHarness(tempDir: string): void {
-  fs.rmSync(tempDir, { recursive: true, force: true });
-}
-
 async function runCase(): Promise<void> {
-  const harness = createHarness();
+  const harness = createIntegrationHarness('p0-session-transcript-search-');
   const context: ContextRef = {
     scope: 'session',
     namespace: 'p0-memory-search',
   };
   try {
-    const agent = new MiniMaxAgent({
+    const agent = new DPAgent({
       allowMissingApiKeyAtBoot: true,
       configPath: path.join(process.cwd(), 'config.yaml'),
       workspaceDir: harness.workspaceDir,
@@ -133,7 +124,7 @@ async function runCase(): Promise<void> {
 
     console.log('p0-session-transcript-search integration test passed');
   } finally {
-    cleanupHarness(harness.tempDir);
+    cleanupIntegrationHarness(harness);
   }
 }
 

@@ -8,6 +8,8 @@ import {
   saveDefaultWorkspaceToStorage,
 } from '../workspace-preferences.js';
 import type { LlmProfilesConfigView } from '../app-shell-types.js';
+import type { PublicSettingsView } from '../../../shared/web-settings-contracts.js';
+import { getShareTokenFromLocation } from '../shared-access.js';
 
 export interface AppWorkspaceState {
   workspaceDir: string;
@@ -23,7 +25,6 @@ export interface AppWorkspaceState {
   hasApiKey: boolean;
   setHasApiKey: Dispatch<SetStateAction<boolean>>;
   llmProfiles: LlmProfilesConfigView | null;
-  contextWindowChars: number;
   refreshConfig: () => Promise<void>;
   openWorkspaceModal: () => void;
   confirmWorkspaceSelection: () => string;
@@ -40,22 +41,20 @@ export function useAppWorkspaceState(): AppWorkspaceState {
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(true);
   const [llmProfiles, setLlmProfiles] = useState<LlmProfilesConfigView | null>(null);
-  const [contextWindowChars, setContextWindowChars] = useState(230000);
 
   const refreshConfig = useCallback(async () => {
     try {
-      const response = await fetch('/api/config');
-      const config = await response.json();
-      setHasApiKey(Boolean(config?.hasApiKey));
-      setLlmProfiles((config?.llmProfiles as LlmProfilesConfigView | undefined) ?? null);
-      const nextContextWindowChars = Number(config?.agent?.contextWindowChars);
-      setContextWindowChars(
-        Number.isFinite(nextContextWindowChars) && nextContextWindowChars > 0
-          ? Math.floor(nextContextWindowChars)
-          : 230000
+      const shareToken = getShareTokenFromLocation();
+      const response = await fetch(
+        shareToken
+          ? `/api/share/${encodeURIComponent(shareToken)}/settings`
+          : '/api/settings'
       );
+      const settings = (await response.json()) as PublicSettingsView;
+      setHasApiKey(Boolean(settings?.hasApiKey));
+      setLlmProfiles((settings?.llmProfiles as LlmProfilesConfigView | undefined) ?? null);
       const storedDefaultWorkspaceDir = loadDefaultWorkspaceFromStorage();
-      const configuredWorkspaceDir = String(config?.agent?.workspaceDir ?? '').trim();
+      const configuredWorkspaceDir = String(settings?.agent?.workspaceDir ?? '').trim();
       const preferredWorkspaceDir = resolveDefaultWorkspaceDir({
         storedWorkspaceDir: storedDefaultWorkspaceDir,
         configuredWorkspaceDir,
@@ -63,7 +62,7 @@ export function useAppWorkspaceState(): AppWorkspaceState {
       });
       setDefaultWorkspaceDir(preferredWorkspaceDir);
       setWorkspaceDir((prev) => normalizeWorkspaceDir(prev) ?? preferredWorkspaceDir);
-      if (!config?.hasApiKey) {
+      if (!settings?.hasApiKey) {
         setShowConfigModal(true);
       }
     } catch (error) {
@@ -109,7 +108,6 @@ export function useAppWorkspaceState(): AppWorkspaceState {
     hasApiKey,
     setHasApiKey,
     llmProfiles,
-    contextWindowChars,
     refreshConfig,
     openWorkspaceModal,
     confirmWorkspaceSelection,

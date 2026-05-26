@@ -1,5 +1,8 @@
 import * as assert from 'node:assert/strict';
-import { upsertToolCallState } from '../../src/web/client/app-shell-types.js';
+import {
+  contextUtilizationFromPrecompressPayload,
+  upsertToolCallState,
+} from '../../src/web/client/app-shell-types.js';
 
 function testUpgradesMatchingPlaceholderWhenNotLast(): void {
   const result = upsertToolCallState(
@@ -124,10 +127,37 @@ function testAppendsWhenNoMatchingToolCallIdExists(): void {
   ]);
 }
 
+function testContextUtilizationUsesTokensBeforeChars(): void {
+  const utilization = contextUtilizationFromPrecompressPayload({
+    ratio: 0.1,
+    usedChars: 1000,
+    limitChars: 10000,
+    usedTokens: 900,
+    limitTokens: 1000,
+    source: 'provider_usage',
+    anchorPromptTokens: 850,
+    deltaEstimatedTokens: 50,
+  });
+
+  assert.deepEqual(utilization, {
+    ratio: 0.9,
+    usedChars: 1000,
+    limitChars: 10000,
+    usedTokens: 900,
+    limitTokens: 1000,
+    source: 'provider_usage',
+    anchorPromptTokens: 850,
+    deltaEstimatedTokens: 50,
+    isWarning: true,
+    initializing: false,
+  });
+}
+
 function runAll(): void {
   testUpgradesMatchingPlaceholderWhenNotLast();
   testUpdatesExistingToolCallWhenProviderReplaysArgs();
   testAppendsWhenNoMatchingToolCallIdExists();
+  testContextUtilizationUsesTokensBeforeChars();
   console.log('web-tool-call-state tests passed');
 }
 

@@ -1,21 +1,20 @@
 import type { SkillCatalogEntry } from '../skills/SkillLoader.js';
-import { SkillDraftStore, type SkillDraftRecord, type SkillDraftTarget } from '../skills/SkillDraftStore.js';
+import { SkillWriteStore, type SkillWriteRecord, type SkillWriteTarget } from '../skills/SkillWriteStore.js';
 import type { SkillLoader } from '../skills/SkillLoader.js';
 import { Tool, errorResult, successResult } from './Tool.js';
 
 export interface SkillToolsOptions {
   skillLoader: SkillLoader;
-  skillDraftStore: SkillDraftStore;
+  writeSkill: (input: Parameters<SkillWriteStore['writeSkill']>[0]) => SkillWriteRecord;
   resolveWorkspaceDir: () => string | undefined;
+  resolveAgentSkillDir?: () => string | undefined;
+  resolveIncludeGlobalSkills?: () => boolean | undefined;
   resolveSessionId: () => string | undefined;
   resolveToolsetName: () => string | undefined;
   globalSkillsDir?: string;
-  writeMode: 'confirm' | 'auto';
-  approveSkillDraft?: (id: string) => SkillDraftRecord | null;
-  rejectSkillDraft?: (id: string, reviewNote?: string) => SkillDraftRecord | null;
 }
 
-function normalizeTarget(value: unknown, fallback: SkillDraftTarget): SkillDraftTarget {
+function normalizeTarget(value: unknown, fallback: SkillWriteTarget): SkillWriteTarget {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (normalized === 'workspace' || normalized === 'global') {
     return normalized;
@@ -27,6 +26,8 @@ class SkillsListTool extends Tool {
   constructor(
     private readonly skillLoader: SkillLoader,
     private readonly resolveWorkspaceDir: () => string | undefined,
+    private readonly resolveAgentSkillDir: () => string | undefined,
+    private readonly resolveIncludeGlobalSkills: () => boolean | undefined,
     private readonly resolveToolsetName: () => string | undefined
   ) {
     super();
@@ -56,6 +57,8 @@ class SkillsListTool extends Tool {
     const query = String(args.query ?? '').trim().toLowerCase();
     let items = this.skillLoader.getSkillCatalog({
       workspaceDir: this.resolveWorkspaceDir(),
+      agentSkillDir: this.resolveAgentSkillDir(),
+      includeGlobalSkills: this.resolveIncludeGlobalSkills(),
       toolsetName: this.resolveToolsetName(),
     });
     if (query) {
@@ -83,6 +86,8 @@ class SkillsViewTool extends Tool {
   constructor(
     private readonly skillLoader: SkillLoader,
     private readonly resolveWorkspaceDir: () => string | undefined,
+    private readonly resolveAgentSkillDir: () => string | undefined,
+    private readonly resolveIncludeGlobalSkills: () => boolean | undefined,
     private readonly resolveToolsetName: () => string | undefined
   ) {
     super();
@@ -116,6 +121,8 @@ class SkillsViewTool extends Tool {
     }
     const skill = this.skillLoader.getSkillByName(name, {
       workspaceDir: this.resolveWorkspaceDir(),
+      agentSkillDir: this.resolveAgentSkillDir(),
+      includeGlobalSkills: this.resolveIncludeGlobalSkills(),
       toolsetName: this.resolveToolsetName(),
     });
     if (!skill) {
@@ -146,25 +153,17 @@ class SkillsViewTool extends Tool {
 }
 
 export class SkillManageTool extends Tool {
-  private readonly skillLoader: SkillLoader;
-  private readonly skillDraftStore: SkillDraftStore;
+  private readonly writeSkill: (input: Parameters<SkillWriteStore['writeSkill']>[0]) => SkillWriteRecord;
   private readonly resolveWorkspaceDir: () => string | undefined;
   private readonly resolveSessionId: () => string | undefined;
   private readonly globalSkillsDir?: string;
-  private readonly writeMode: 'confirm' | 'auto';
-  private readonly approveSkillDraft?: SkillToolsOptions['approveSkillDraft'];
-  private readonly rejectSkillDraft?: SkillToolsOptions['rejectSkillDraft'];
 
   constructor(options: SkillToolsOptions) {
     super();
-    this.skillLoader = options.skillLoader;
-    this.skillDraftStore = options.skillDraftStore;
+    this.writeSkill = options.writeSkill;
     this.resolveWorkspaceDir = options.resolveWorkspaceDir;
     this.resolveSessionId = options.resolveSessionId;
     this.globalSkillsDir = options.globalSkillsDir;
-    this.writeMode = options.writeMode;
-    this.approveSkillDraft = options.approveSkillDraft;
-    this.rejectSkillDraft = options.rejectSkillDraft;
   }
 
   get name(): string {
@@ -172,7 +171,14 @@ export class SkillManageTool extends Tool {
   }
 
   get description(): string {
-    return 'Submit create/update skill drafts for review and approval when a verified, reusable workflow should be captured or revised after user correction or new evidence. Use this for non-trivial methods worth reusing; skip simple one-off tasks, temporary workarounds, raw facts, and one-time outputs. This tool only manages draft submission and review workflow; it does not promise immediate activation or richer lifecycle edit verbs.';
+    return [
+      'Create or update an approved skill immediately when a verified, reusable workflow should be captured or revised after user correction or new evidence.',
+      'Workspace skills are project-local; agent skills are bundled with the selected agent profile and are read as approved references; global skills are shared runtime skills.',
+      'Use target="workspace" for project-local skills and target="global" only for reusable skills that should become shared runtime skills.',
+      'This tool does not edit selected-agent bundled skills directly.',
+      'Use this for non-trivial methods worth reusing; skip simple one-off tasks, temporary workarounds, raw facts, and one-time outputs.',
+      'This tool applies create/update writes directly; broader lifecycle actions such as removal, rollback, pack publication, and governance review are handled outside this runtime tool.',
+    ].join(' ');
   }
 
   get parameters(): Record<string, unknown> {
@@ -181,7 +187,7 @@ export class SkillManageTool extends Tool {
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'list_pending', 'approve', 'reject'],
+          enum: ['create', 'update'],
         },
         name: {
           type: 'string',
@@ -195,18 +201,10 @@ export class SkillManageTool extends Tool {
           type: 'string',
           description: 'Full skill markdown or body content.',
         },
-        id: {
-          type: 'string',
-          description: 'Pending draft id for approve or reject.',
-        },
         target: {
           type: 'string',
           enum: ['workspace', 'global'],
-          description: 'Draft target location. Defaults to workspace when available.',
-        },
-        review_note: {
-          type: 'string',
-          description: 'Optional rejection note.',
+          description: 'Write target location. workspace means project-local; global means shared runtime skills. Defaults to workspace when available. Agent-bundled skills are not a writable target here.',
         },
       },
       required: ['action'],
@@ -217,7 +215,7 @@ export class SkillManageTool extends Tool {
     const action = String(args.action ?? '').trim().toLowerCase();
     const workspaceDir = this.resolveWorkspaceDir();
     const sessionId = this.resolveSessionId();
-    const fallbackTarget: SkillDraftTarget = workspaceDir ? 'workspace' : 'global';
+    const fallbackTarget: SkillWriteTarget = workspaceDir ? 'workspace' : 'global';
 
     switch (action) {
       case 'create':
@@ -229,26 +227,7 @@ export class SkillManageTool extends Tool {
           return errorResult('name, description, and content are required');
         }
         const target = normalizeTarget(args.target, fallbackTarget);
-        if (this.writeMode === 'auto') {
-          const draft = this.skillDraftStore.createDraft({
-            name,
-            description,
-            content,
-            target,
-            workspaceDir,
-            sourceSessionId: sessionId,
-            globalSkillsDir: this.globalSkillsDir,
-          });
-          const approved = this.approveSkillDraft?.(draft.id) ?? this.skillDraftStore.approveDraft(draft.id);
-          if (!approved) {
-            return errorResult('failed to auto-approve skill draft');
-          }
-          if (!this.approveSkillDraft) {
-            this.skillLoader.reload();
-          }
-          return successResult(JSON.stringify({ ok: true, action, mode: 'written', record: approved }, null, 2));
-        }
-        const draft = this.skillDraftStore.createDraft({
+        const record = this.writeSkill({
           name,
           description,
           content,
@@ -257,46 +236,13 @@ export class SkillManageTool extends Tool {
           sourceSessionId: sessionId,
           globalSkillsDir: this.globalSkillsDir,
         });
-        return successResult(JSON.stringify({ ok: true, action, mode: 'pending', record: draft }, null, 2));
-      }
-      case 'list_pending':
         return successResult(
           JSON.stringify(
-            {
-              ok: true,
-              action,
-              items: this.skillDraftStore.listPending({ sessionId, workspaceDir }),
-            },
+            { ok: true, action: record.action, requestedAction: action, mode: 'applied', record },
             null,
             2
           )
         );
-      case 'approve': {
-        const id = String(args.id ?? '').trim();
-        if (!id) {
-          return errorResult('id is required for approve');
-        }
-        const record = this.approveSkillDraft?.(id) ?? this.skillDraftStore.approveDraft(id);
-        if (!record) {
-          return errorResult(`pending skill draft not found: ${id}`);
-        }
-        if (!this.approveSkillDraft) {
-          this.skillLoader.reload();
-        }
-        return successResult(JSON.stringify({ ok: true, action, record }, null, 2));
-      }
-      case 'reject': {
-        const id = String(args.id ?? '').trim();
-        if (!id) {
-          return errorResult('id is required for reject');
-        }
-        const record =
-          this.rejectSkillDraft?.(id, String(args.review_note ?? '').trim() || undefined) ??
-          this.skillDraftStore.rejectDraft(id, String(args.review_note ?? '').trim() || undefined);
-        if (!record) {
-          return errorResult(`pending skill draft not found: ${id}`);
-        }
-        return successResult(JSON.stringify({ ok: true, action, record }, null, 2));
       }
       default:
         return errorResult(`unknown action: ${action}`);
@@ -305,11 +251,25 @@ export class SkillManageTool extends Tool {
 }
 
 export function createSkillTools(options: SkillToolsOptions): [SkillsListTool, SkillsViewTool, SkillManageTool] {
+  const resolveAgentSkillDir = options.resolveAgentSkillDir ?? (() => undefined);
+  const resolveIncludeGlobalSkills = options.resolveIncludeGlobalSkills ?? (() => undefined);
   return [
-    new SkillsListTool(options.skillLoader, options.resolveWorkspaceDir, options.resolveToolsetName),
-    new SkillsViewTool(options.skillLoader, options.resolveWorkspaceDir, options.resolveToolsetName),
+    new SkillsListTool(
+      options.skillLoader,
+      options.resolveWorkspaceDir,
+      resolveAgentSkillDir,
+      resolveIncludeGlobalSkills,
+      options.resolveToolsetName
+    ),
+    new SkillsViewTool(
+      options.skillLoader,
+      options.resolveWorkspaceDir,
+      resolveAgentSkillDir,
+      resolveIncludeGlobalSkills,
+      options.resolveToolsetName
+    ),
     new SkillManageTool(options),
   ];
 }
 
-export type { SkillDraftRecord, SkillCatalogEntry };
+export type { SkillWriteRecord, SkillCatalogEntry };

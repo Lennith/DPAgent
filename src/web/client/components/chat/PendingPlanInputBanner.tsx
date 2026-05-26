@@ -1,4 +1,3 @@
-import React from 'react';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 import { useI18n } from '../../i18n/index.js';
 

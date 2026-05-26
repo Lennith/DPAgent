@@ -86,6 +86,33 @@ function testMcpSearchReplacesCoreSearchByCapabilityInference(): void {
   assert.equal(registry.has('internet_lookup'), true);
 }
 
+function testSameNameMcpSearchReplacesCoreSearch(): void {
+  const registry = new ToolRegistry();
+  const state = createToolRegistrationState();
+  registerToolWithDedupe(registry, state, new WebSearchTool(), 'core');
+
+  const mcpSearch = new FakeTool(
+    'web_search',
+    'MCP search web results by query',
+    {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+      },
+      required: ['query'],
+    }
+  );
+
+  const replaced = registerToolWithDedupe(registry, state, mcpSearch, 'team');
+  assert.equal(replaced.skipped, false);
+  if (replaced.skipped) {
+    throw new Error('expected same-name MCP tool to replace core tool');
+  }
+  assert.equal(replaced.replaced?.toolName, 'web_search');
+  assert.equal(replaced.replaced?.source, 'core');
+  assert.equal(registry.get('web_search')?.description, 'MCP search web results by query');
+}
+
 function testUnknownMcpToolDoesNotGetMisclassified(): void {
   const registry = new ToolRegistry();
   const state = createToolRegistrationState();
@@ -175,6 +202,7 @@ function testToolResultArtifactDoesNotConflictWithFileReadCapability(): void {
 function runAll(): void {
   testCoreWebToolsRegisterUnderProtocolNames();
   testMcpSearchReplacesCoreSearchByCapabilityInference();
+  testSameNameMcpSearchReplacesCoreSearch();
   testUnknownMcpToolDoesNotGetMisclassified();
   testWebToolDescriptionsStayStable();
   testCreateWebToolsReturnsProtocolNamedTools();

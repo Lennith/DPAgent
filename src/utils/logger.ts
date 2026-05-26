@@ -1,5 +1,5 @@
 /**
- * Unified Logger for MiniMax Agent
+ * Unified Logger for DPAgent
  * 
  * Log Levels: DEBUG < INFO < WARN < ERROR
  * Components: [WebServer] [Agent] [LLM] [Tool] [MCP] [Skill] [Session]
@@ -11,7 +11,7 @@ import * as path from 'path';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type LogComponent = 
   | 'WebServer' 
-  | 'MiniMaxAgent' 
+  | 'DPAgent'
   | 'Agent' 
   | 'LLM' 
   | 'Tool' 

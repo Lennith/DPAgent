@@ -1,13 +1,26 @@
-﻿import * as assert from 'node:assert/strict';
+import * as assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import { autoLoopManager } from '../../src/auto-loop/index.js';
 import type { ContextRef } from '../../src/types.js';
+import { createWebServerDouble } from './helpers/web-server-harness.js';
+import { createWebServerTestConfig } from './web-server-test-config.js';
 
 interface EmittedMessage {
   ws: object;
   type: string;
   data: unknown;
+}
+
+function stripCreatedAt(message: EmittedMessage): EmittedMessage {
+  if (!message.data || typeof message.data !== 'object' || Array.isArray(message.data)) {
+    return message;
+  }
+  const data = { ...(message.data as Record<string, unknown>) };
+  delete data.createdAt;
+  return {
+    ...message,
+    data,
+  };
 }
 
 const DONE_MARKER = '\u3010\u5b8c\u6210\uff01\u3011';
@@ -42,7 +55,7 @@ class TrackingRunContextMap extends Map<string, ContextRef> {
 }
 
 function createHarness(context: ContextRef = { scope: 'session', namespace: 'sess-1' }): CompletionHarness {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   const emitted: EmittedMessage[] = [];
   const lifecycle: string[] = [];
   const metaState: Record<string, unknown> = {
@@ -54,7 +67,7 @@ function createHarness(context: ContextRef = { scope: 'session', namespace: 'ses
   const originalGetOrCreate = autoLoopManager.getOrCreate;
 
   server.agent = {
-    getConfig: () => ({
+    getConfig: () => createWebServerTestConfig({
       agent: {
         tokenLimit: 1000,
         completionMarkerEnforcementEnabled: true,
@@ -78,7 +91,7 @@ function createHarness(context: ContextRef = { scope: 'session', namespace: 'ses
       workspaceDir,
       runtimeKey: `runtime:${sessionId}:${workspaceDir}`,
       llmRuntime: {
-        profileId: 'legacy-default',
+        profileId: 'default',
         provider: 'anthropic',
         apiKey: 'sk-test',
         apiBase: 'https://api.minimaxi.com/v1',
@@ -122,28 +135,118 @@ function createHarness(context: ContextRef = { scope: 'session', namespace: 'ses
   };
 }
 
-async function testOnCompleteClosedSocketStopsLoopWithoutCompletionEmission(): Promise<void> {
-  const harness = createHarness();
+async function testOnCompleteClosedWorkspaceSocketKeepsAutoLoopContinuation(): Promise<void> {
+  const harness = createHarness({ scope: 'workspace', namespace: 'repo-closed' });
+  let captured: unknown[] | null = null;
   try {
     let requestedKey = '';
     harness.setControllerFactory((key: string) => {
       requestedKey = key;
       return {
+        getConfig: () => ({
+          enabled: true,
+          pausedByUser: false,
+        }),
+        getState: () => ({
+          isRunning: true,
+          currentRound: 3,
+        }),
         stop: (reason: string) => {
           harness.lifecycle.push(`stop:${reason}`);
         },
-        shouldContinue: () => {
-          throw new Error('shouldContinue should not run when websocket is closed');
+        shouldContinue: (result: string) => {
+          assert.equal(result, 'done');
+          return { shouldContinue: true };
         },
       };
     });
+    harness.server.scheduleCallbackContinuation = (
+      ws: unknown,
+      context: unknown,
+      controllerArg: unknown,
+      nextPrompt: unknown
+    ) => {
+      captured = [ws, context, controllerArg, nextPrompt];
+    };
 
     const callback = harness.server.createCallback(harness.closedSocket, harness.context, 'run-1');
     await callback.onComplete('done');
 
-    assert.equal(requestedKey, 'sess-1');
-    assert.deepEqual(harness.lifecycle, ['reject:run-1:run_completed', 'refresh', 'stop:user_stop']);
-    assert.deepEqual(harness.emitted, []);
+    assert.equal(requestedKey, 'workspace:repo-closed');
+    assert.deepEqual(harness.lifecycle, [
+      'reject:run-1:run_completed',
+      'refresh',
+      'emit:complete',
+      'emit:auto_loop_round',
+    ]);
+    assert.equal(captured?.[0], harness.closedSocket);
+    assert.equal(captured?.[1], harness.context);
+    assert.match(String(captured?.[3] ?? ''), /\[AUTO_LOOP_CONTINUE\]/);
+  } finally {
+    harness.restore();
+  }
+}
+
+async function testOnCompleteClosedSessionSocketKeepsTodoContinuation(): Promise<void> {
+  const harness = createHarness();
+  let captured: unknown[] | null = null;
+  try {
+    harness.server.getSessionTodoProtocolState = () => ({
+      items: [{ id: 'todo-1', work: 'Continue release task', detectionStandard: 'Task completes.' }],
+      unfinishedItems: [
+        { id: 'todo-1', work: 'Continue release task', detectionStandard: 'Task completes.' },
+      ],
+      activeItem: {
+        id: 'todo-1',
+        work: 'Continue release task',
+        detectionStandard: 'Task completes.',
+        status: 'in_progress',
+      },
+      blockedItem: null,
+      pendingItems: [],
+      completedItems: [],
+      hasUnfinished: true,
+      allCompleted: false,
+    });
+    harness.setControllerFactory(() => ({
+      getConfig: () => ({
+        enabled: true,
+        pausedByUser: false,
+      }),
+      getState: () => ({
+        isRunning: true,
+        currentRound: 4,
+      }),
+      shouldContinue: (result: string, options?: { ignoreSimilarity?: boolean }) => {
+        assert.equal(result, `done${DONE_MARKER}`);
+        assert.equal(options?.ignoreSimilarity, true);
+        return { shouldContinue: true };
+      },
+      stop: (reason: string) => {
+        harness.lifecycle.push(`stop:${reason}`);
+      },
+    }));
+    harness.server.scheduleCallbackContinuation = (
+      ws: unknown,
+      context: unknown,
+      controllerArg: unknown,
+      nextPrompt: unknown
+    ) => {
+      captured = [ws, context, controllerArg, nextPrompt];
+    };
+
+    const callback = harness.server.createCallback(harness.closedSocket, harness.context, 'run-closed-session');
+    await callback.onComplete(`done${DONE_MARKER}`);
+
+    assert.deepEqual(harness.lifecycle, [
+      'reject:run-closed-session:run_completed',
+      'refresh',
+      'emit:complete',
+      'emit:auto_loop_round',
+    ]);
+    assert.equal(captured?.[0], harness.closedSocket);
+    assert.equal(captured?.[1], harness.context);
+    assert.match(String(captured?.[3] ?? ''), /\[TODO_LOOP\]/);
   } finally {
     harness.restore();
   }
@@ -339,7 +442,8 @@ async function testOnCompleteSchedulesNextQualifiedRoundWhenMarkerExists(): Prom
       'emit:complete',
       'emit:auto_loop_round',
     ]);
-    assert.deepEqual(harness.emitted[0], {
+    assert.equal(typeof (harness.emitted[0]?.data as { createdAt?: string }).createdAt, 'string');
+    assert.deepEqual(stripCreatedAt(harness.emitted[0]), {
       ws: harness.openSocket,
       type: 'complete',
       data: {
@@ -421,6 +525,13 @@ async function testResolveSessionContinuationPlanAllowsOuterLoopAfterTodoComplet
 async function testResolveSessionContinuationPlanUsesPlanSetTodoLoopPrompt(): Promise<void> {
   const harness = createHarness();
   try {
+    harness.metaState.planningState = {
+      state: 'plan_executing',
+      activeExecutionPlanId: 'plan-approved',
+      updatedAt: '2026-05-01T00:00:00.000Z',
+    };
+    harness.server.getApprovedExecutionPlanMarkdown = () =>
+      '### Approved Plan\n\n### Implementation Steps\n1. Ship the approved execution path.';
     harness.server.getSessionTodoProtocolState = () => ({
       items: [
         { id: 'todo-1', work: 'Deliver the feature end to end', detectionStandard: 'All milestones are shipped.' },
@@ -482,6 +593,9 @@ async function testResolveSessionContinuationPlanUsesPlanSetTodoLoopPrompt(): Pr
     assert.match(nextPrompt, /call set_status with status=completed plus task_id \(the todo item id\) and evidence/i);
     assert.match(nextPrompt, /call set_status with status=blocked plus blocked_reason/i);
     assert.match(nextPrompt, /Use add or update only for small manual corrections/i);
+    assert.match(nextPrompt, /\[APPROVED_PLAN_ORIGINAL\]/);
+    assert.match(nextPrompt, /### Approved Plan/);
+    assert.match(nextPrompt, /Todo is the only execution ledger/i);
   } finally {
     harness.restore();
   }
@@ -643,7 +757,7 @@ async function testMarkerDisabledSkipsContinuationAndStatsMutation(): Promise<vo
   const harness = createHarness();
   try {
     harness.server.agent = {
-      getConfig: () => ({
+      getConfig: () => createWebServerTestConfig({
         agent: {
           tokenLimit: 1000,
           completionMarkerEnforcementEnabled: false,
@@ -669,7 +783,8 @@ async function testMarkerDisabledSkipsContinuationAndStatsMutation(): Promise<vo
     await callback.onComplete('done');
 
     assert.deepEqual(harness.lifecycle, ['reject:run-disabled:run_completed', 'refresh', 'emit:complete']);
-    assert.deepEqual(harness.emitted, [
+    assert.equal(typeof (harness.emitted[0]?.data as { createdAt?: string }).createdAt, 'string');
+    assert.deepEqual(harness.emitted.map(stripCreatedAt), [
       {
         ws: harness.openSocket,
         type: 'complete',
@@ -696,7 +811,7 @@ async function testMarkerDisabledSessionPlanDoesNotRequireMarkerBeforeTodoStop()
   const harness = createHarness();
   try {
     harness.server.agent = {
-      getConfig: () => ({
+      getConfig: () => createWebServerTestConfig({
         agent: {
           tokenLimit: 1000,
           completionMarkerEnforcementEnabled: false,
@@ -826,8 +941,8 @@ async function testApplyCallbackContinuationPlanSchedulesContinuation(): Promise
   }
 }
 
-async function testStartScheduledContinuationStopsClosedSocketWithoutActivatingRun(): Promise<void> {
-  const harness = createHarness();
+async function testStartScheduledContinuationUsesClosedSocketAsDetachedOwner(): Promise<void> {
+  const harness = createHarness({ scope: 'workspace', namespace: 'repo-closed-start' });
   const controller = {
     stop: (reason: string) => {
       harness.lifecycle.push(`stop:${reason}`);
@@ -840,9 +955,65 @@ async function testStartScheduledContinuationStopsClosedSocketWithoutActivatingR
     controller
   );
 
-  assert.equal(scaffold, null);
-  assert.deepEqual(harness.lifecycle, ['stop:user_stop']);
-  assert.equal(harness.server.activeRunContexts.size, 0);
+  assert.notEqual(scaffold, null);
+  assert.equal(scaffold?.ownerWs, harness.closedSocket);
+  assert.match(scaffold?.runId ?? '', /^run-/);
+  assert.deepEqual(harness.lifecycle, [
+    `active:set:${scaffold?.runId}`,
+    'emit:chat_started',
+  ]);
+  assert.equal(harness.server.activeRunContexts.size, 1);
+}
+
+async function testDismissedTodoDoesNotScheduleTodoContinuation(): Promise<void> {
+  const harness = createHarness();
+  try {
+    harness.server.agent = {
+      getConfig: () => createWebServerTestConfig({
+        agent: {
+          tokenLimit: 1000,
+          completionMarkerEnforcementEnabled: false,
+        },
+      }),
+    };
+    harness.server.getSessionTodoProtocolState = () => ({
+      items: [{ id: 'todo-dismissed', work: 'blocked', detectionStandard: 'external fix', status: 'dismissed' }],
+      unfinishedItems: [],
+      activeItem: null,
+      blockedItem: null,
+      pendingItems: [],
+      completedItems: [],
+      dismissedItems: [{ id: 'todo-dismissed', work: 'blocked', detectionStandard: 'external fix', status: 'dismissed' }],
+      hasUnfinished: false,
+      allCompleted: false,
+    });
+    harness.setControllerFactory(() => ({
+      getConfig: () => ({
+        enabled: false,
+        pausedByUser: false,
+      }),
+      getState: () => ({
+        isRunning: false,
+        currentRound: 2,
+      }),
+      shouldContinue: () => {
+        throw new Error('dismissed todo must not drive continuation');
+      },
+    }));
+
+    const plan = harness.server.resolveCallbackContinuationPlan(
+      harness.openSocket,
+      harness.context,
+      'sess-1',
+      undefined,
+      'done'
+    );
+
+    assert.equal(plan.kind, 'none');
+    assert.equal(plan.emitComplete, true);
+  } finally {
+    harness.restore();
+  }
 }
 
 async function testStartScheduledContinuationActivatesRunAndEmitsChatStarted(): Promise<void> {
@@ -867,6 +1038,12 @@ async function testStartScheduledContinuationActivatesRunAndEmitsChatStarted(): 
         runId: scaffold?.runId,
         context: harness.context,
         startedAt: (harness.emitted[0].data as { startedAt: string }).startedAt,
+        owner: 'web',
+        origin: 'web',
+        interactionState: {
+          mode: 'normal',
+          owner: 'web',
+        },
       },
     },
   ]);
@@ -906,6 +1083,7 @@ async function testResolveScheduledContinuationInputReturnsSuccess(): Promise<vo
       rawUserPrompt: 'Continue',
       effectivePrompt: 'resolved prompt',
       hasSystemPromptInjection: true,
+      runOrigin: 'web',
       callback: {
         ws: harness.openSocket,
         context: harness.context,
@@ -998,6 +1176,7 @@ async function testApplyScheduledContinuationFailureEmitsErrorStopsAndCleans(): 
     },
     {
       runId: 'run-2',
+      ownerWs: harness.openSocket,
       dispatcher: {
         error: (error: string) => {
           assert.equal(harness.server.activeRunContexts.size, 0);
@@ -1034,6 +1213,7 @@ async function testApplyScheduledContinuationFailureStillStopsAndCleansWhenDispa
       },
       {
         runId: 'run-2',
+        ownerWs: harness.openSocket,
         dispatcher: {
           error: (error: string) => {
             assert.equal(harness.server.activeRunContexts.size, 0);
@@ -1074,6 +1254,7 @@ async function testApplyScheduledContinuationFailureStillCleansWhenControllerSto
       },
       {
         runId: 'run-2',
+        ownerWs: harness.openSocket,
         dispatcher: {
           error: (error: string) => {
             assert.equal(harness.server.activeRunContexts.size, 0);
@@ -1109,6 +1290,7 @@ async function testApplyScheduledContinuationSuccessDelegatesToTrackedRun(): Pro
     { stop: () => undefined },
     {
       runId: 'run-2',
+      ownerWs: harness.openSocket,
       dispatcher: { error: (_error: string) => undefined },
     },
     {
@@ -1122,12 +1304,14 @@ async function testApplyScheduledContinuationSuccessDelegatesToTrackedRun(): Pro
 
   const execution = captured as {
     runId: string;
+    ownerWs: object;
     context: ContextRef;
     dispatcher: { error: (error: string) => void };
     stopControllerOnError: { stop: () => void };
     resolveRunInput: () => unknown;
   };
   assert.equal(execution.runId, 'run-2');
+  assert.equal(execution.ownerWs, harness.openSocket);
   assert.deepEqual(execution.context, harness.context);
   assert.equal(typeof execution.dispatcher.error, 'function');
   assert.equal(typeof execution.stopControllerOnError.stop, 'function');
@@ -1170,15 +1354,46 @@ async function testScheduleHelperUses500msDelayAndDelegatesToExecution(): Promis
   }
 }
 
-async function testScheduledCompletionStopsIfSocketClosesBeforeNextRun(): Promise<void> {
+async function testScheduledCompletionContinuesIfSocketClosesBeforeNextRun(): Promise<void> {
   const harness = createHarness({ scope: 'workspace', namespace: 'repo-socket-close' });
   const originalSetTimeout = globalThis.setTimeout;
-  let scheduledFn: (() => Promise<void>) | null = null;
+  let scheduledFn: (() => void) | null = null;
+  let executionPromise: Promise<void> | null = null;
+  const stopReasons: string[] = [];
   try {
-    (globalThis as any).setTimeout = (fn: () => Promise<void>) => {
+    (globalThis as any).setTimeout = (fn: () => void) => {
       scheduledFn = fn;
       return 0;
     };
+    const executeScheduled = harness.server.executeScheduledCallbackContinuation.bind(harness.server);
+    harness.server.executeScheduledCallbackContinuation = (...args: unknown[]) => {
+      executionPromise = executeScheduled(...args);
+      return executionPromise;
+    };
+    harness.server.agent = {
+      getConfig: () => createWebServerTestConfig({
+        agent: {
+          tokenLimit: 1000,
+        },
+      }),
+      runWithResult: async () => {
+        harness.lifecycle.push('runWithResult');
+        return {
+          content: 'continued',
+          context: harness.context,
+          turnId: 'turn-continuation',
+          contextVersion: 2,
+        };
+      },
+    };
+    harness.server.resolveWorkspaceDirForContext = () => 'D:\\workspace';
+    harness.server.resolveUserPrompt = () => ({
+      ok: true,
+      effectivePrompt: 'resolved prompt',
+      displayPrompt: 'Continue',
+      hasSystemPromptInjection: true,
+    });
+    harness.server.resolveAdditionalSystemPrompt = () => 'AUTO_LOOP_SYSTEM_PROMPT';
     harness.setControllerFactory(() => ({
       getConfig: () => ({
         enabled: true,
@@ -1190,20 +1405,36 @@ async function testScheduledCompletionStopsIfSocketClosesBeforeNextRun(): Promis
       }),
       stop: (reason: string) => {
         harness.lifecycle.push(`stop:${reason}`);
+        stopReasons.push(reason);
       },
     }));
 
     const callback = harness.server.createCallback(harness.openSocket, harness.context, 'run-1');
     await callback.onComplete('done');
+    harness.server.createCallback = (_ws: object, _context: ContextRef, runId: string) => {
+      harness.lifecycle.push(`createCallback:${runId}`);
+      return { runId };
+    };
     harness.openSocket.readyState = WebSocket.CLOSED;
-    await scheduledFn?.();
+    scheduledFn?.();
+    await executionPromise;
 
-    assert.deepEqual(harness.lifecycle, [
+    assert.deepEqual(stopReasons, []);
+    assert.equal(harness.server.activeRunContexts.size, 0);
+    assert.equal(
+      harness.lifecycle.some((entry) => entry.startsWith('active:set:')),
+      true
+    );
+    assert.equal(
+      harness.lifecycle.some((entry) => entry.startsWith('active:delete:')),
+      true
+    );
+    assert.equal(harness.lifecycle.includes('runWithResult'), true);
+    assert.deepEqual(harness.lifecycle.slice(0, 4), [
       'reject:run-1:run_completed',
       'refresh',
       'emit:complete',
       'emit:auto_loop_round',
-      'stop:user_stop',
     ]);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
@@ -1217,7 +1448,7 @@ async function testDirectContinuationExecutionRunsAgentAndCleansActiveContext():
   const stopReasons: string[] = [];
   try {
     harness.server.agent = {
-      getConfig: () => ({
+      getConfig: () => createWebServerTestConfig({
         agent: {
           tokenLimit: 1000,
         },
@@ -1306,7 +1537,7 @@ async function testDirectContinuationExecutionStopsOnRunFailureAndCleansActiveCo
   const stopReasons: string[] = [];
   try {
     harness.server.agent = {
-      getConfig: () => ({
+      getConfig: () => createWebServerTestConfig({
         agent: {
           tokenLimit: 1000,
         },
@@ -1419,6 +1650,12 @@ async function testScheduledCompletionEmitsChatStartedAndStopsOnPromptResolution
       runId: (chatStarted.data as { runId: string }).runId,
       context: harness.context,
       startedAt: (chatStarted.data as { startedAt: string }).startedAt,
+      owner: 'web',
+      origin: 'web',
+      interactionState: {
+        mode: 'normal',
+        owner: 'web',
+      },
     });
     assert.deepEqual(errorMessage.data, {
       runId: (chatStarted.data as { runId: string }).runId,
@@ -1591,7 +1828,7 @@ async function testExecuteTrackedRunFailureStopsControllerAndCleansWithoutRefres
   harness.lifecycle.length = 0;
   try {
     harness.server.agent = {
-      getConfig: () => ({
+      getConfig: () => createWebServerTestConfig({
         agent: {
           tokenLimit: 1000,
         },
@@ -1640,7 +1877,7 @@ async function testExecuteTrackedRunResolveInputThrowStopsControllerAndCleansWit
   harness.lifecycle.length = 0;
   try {
     harness.server.agent = {
-      getConfig: () => ({
+      getConfig: () => createWebServerTestConfig({
         agent: {
           tokenLimit: 1000,
         },
@@ -1681,7 +1918,8 @@ async function testExecuteTrackedRunResolveInputThrowStopsControllerAndCleansWit
 }
 
 async function runAll(): Promise<void> {
-  await testOnCompleteClosedSocketStopsLoopWithoutCompletionEmission();
+  await testOnCompleteClosedWorkspaceSocketKeepsAutoLoopContinuation();
+  await testOnCompleteClosedSessionSocketKeepsTodoContinuation();
   await testOnCompleteCancelledSuppressesCompletionAndContinuation();
   await testOnCompleteWithoutMarkerSchedulesMarkerContinuationWithoutCompletion();
   await testOnCompleteWithoutMarkerUsesRepairOnlyPromptForBlockedTodo();
@@ -1694,10 +1932,11 @@ async function runAll(): Promise<void> {
   await testResolveSessionContinuationPlanRejectsDuplicateTailMarkers();
   await testMarkerDisabledSkipsContinuationAndStatsMutation();
   await testMarkerDisabledSessionPlanDoesNotRequireMarkerBeforeTodoStop();
+  await testDismissedTodoDoesNotScheduleTodoContinuation();
   await testFinalizeCompletedRunRejectsRefreshesAndCompletesInOrder();
   await testResolveCallbackContinuationPlanReturnsStoppedPlan();
   await testApplyCallbackContinuationPlanSchedulesContinuation();
-  await testStartScheduledContinuationStopsClosedSocketWithoutActivatingRun();
+  await testStartScheduledContinuationUsesClosedSocketAsDetachedOwner();
   await testStartScheduledContinuationActivatesRunAndEmitsChatStarted();
   await testResolveScheduledContinuationInputReturnsSuccess();
   await testResolveScheduledContinuationInputReturnsFailureForPromptError();
@@ -1708,7 +1947,7 @@ async function runAll(): Promise<void> {
   await testApplyScheduledContinuationFailureStillCleansWhenControllerStopThrows();
   await testApplyScheduledContinuationSuccessDelegatesToTrackedRun();
   await testScheduleHelperUses500msDelayAndDelegatesToExecution();
-  await testScheduledCompletionStopsIfSocketClosesBeforeNextRun();
+  await testScheduledCompletionContinuesIfSocketClosesBeforeNextRun();
   await testDirectContinuationExecutionRunsAgentAndCleansActiveContext();
   await testDirectContinuationExecutionStopsOnRunFailureAndCleansActiveContext();
   await testScheduledCompletionEmitsChatStartedAndStopsOnPromptResolutionError();

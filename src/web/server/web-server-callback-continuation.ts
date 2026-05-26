@@ -10,11 +10,6 @@ import { DEFAULT_AUTO_LOOP_PROMPT } from './web-server-shared.js';
 
 export type CallbackContinuationPlan =
   | {
-      kind: 'stop_closed_socket';
-      controller: unknown;
-      emitComplete: false;
-    }
-  | {
       kind: 'stopped';
       reason?: string;
       totalRounds: number;
@@ -44,12 +39,13 @@ export interface CallbackContinuationDispatcherLike {
 }
 
 interface ResolveCallbackContinuationPlanInput {
-  socketOpen: boolean;
   context: ContextRef;
   controller: unknown;
   result: string;
   completionMarkerEnforcementEnabled: boolean;
+  skipCompletionMarkerRepair?: boolean;
   todoState?: TodoProtocolState;
+  approvedPlanMarkdown?: string;
   getAutoLoopConfig: (controller: unknown) => AutoLoopConfig;
   getAutoLoopState: (controller: unknown) => { isRunning: boolean; currentRound: number };
   shouldContinue: (
@@ -142,7 +138,8 @@ function buildTodoLoopPrompt(
   controller: unknown,
   getAutoLoopConfig: (controller: unknown) => AutoLoopConfig,
   completionMarkerEnforcementEnabled: boolean,
-  state: TodoProtocolState
+  state: TodoProtocolState,
+  approvedPlanMarkdown?: string
 ): string | null {
   if (!state.hasUnfinished) {
     return null;
@@ -153,6 +150,7 @@ function buildTodoLoopPrompt(
     '[TODO_LOOP]',
     'Continue executing the current session todo protocol for the next real work round.',
     'Use the todo list below as the source of truth for what remains.',
+    'Todo is the only execution ledger in plan execution; do not call plan tools or rewrite plan steps.',
     ...(completionMarkerRuleText ? [completionMarkerRuleText] : []),
     'If multiple milestones remain but the remaining plan is still a single umbrella todo, rewrite the remaining session plan with todo action=plan_set before continuing.',
     'Use set_status to promote the next pending todo to in_progress before executing it.',
@@ -163,6 +161,13 @@ function buildTodoLoopPrompt(
     'Use add or update only for small manual corrections after the plan already exists.',
     'Do not call exit_auto_loop while unfinished todos remain.',
   ];
+
+  const planMarkdown = String(approvedPlanMarkdown ?? '').trim();
+  if (planMarkdown) {
+    lines.push('', '[APPROVED_PLAN_ORIGINAL]');
+    lines.push(planMarkdown);
+    lines.push('[/APPROVED_PLAN_ORIGINAL]', '');
+  }
 
   if (state.activeItem) {
     lines.push(
@@ -210,16 +215,12 @@ function buildAutoLoopContinuationPrompt(
 export function resolveWebServerCallbackContinuationPlan(
   input: ResolveCallbackContinuationPlanInput
 ): CallbackContinuationPlan {
-  if (!input.socketOpen) {
-    return {
-      kind: 'stop_closed_socket',
-      controller: input.controller,
-      emitComplete: false,
-    };
-  }
-
   if (input.context.scope === 'session') {
-    if (input.completionMarkerEnforcementEnabled && !hasRequiredCompletionMarker(input.result)) {
+    if (
+      input.completionMarkerEnforcementEnabled &&
+      input.skipCompletionMarkerRepair !== true &&
+      !hasRequiredCompletionMarker(input.result)
+    ) {
       return {
         kind: 'continue_marker_required',
         controller: input.controller,
@@ -264,7 +265,8 @@ export function resolveWebServerCallbackContinuationPlan(
         input.controller,
         input.getAutoLoopConfig,
         input.completionMarkerEnforcementEnabled,
-        input.todoState
+        input.todoState,
+        input.approvedPlanMarkdown
       );
       if (nextPrompt) {
         return {
@@ -313,8 +315,6 @@ export function applyWebServerCallbackContinuationPlan(
   input: ApplyCallbackContinuationPlanInput
 ): void {
   switch (input.plan.kind) {
-    case 'stop_closed_socket':
-      return;
     case 'stopped':
       input.dispatcher.autoLoopStopped(input.plan.reason, input.plan.totalRounds);
       return;

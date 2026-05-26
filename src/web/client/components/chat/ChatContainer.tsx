@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 import { useI18n } from '../../i18n/index.js';
-import type { Message, ToolResult } from '../../hooks/useAgent';
+import type { Message, ToolResult } from '../../chat-types';
 import { MessageItem } from './MessageItem.js';
 import { ThinkingBlock } from './ThinkingBlock.js';
 import { ToolCallBlock } from './ToolCallBlock.js';
@@ -14,15 +14,28 @@ import {
 } from './PlanInputCard.js';
 import { ChatInput } from './ChatInput.js';
 import { ProcessingSkeleton } from '../common/LoadingSkeleton.js';
+import {
+  DEFAULT_CHAT_DISPLAY_FILTERS,
+  loadChatDisplayFilters,
+  saveChatDisplayFilters,
+  type ChatDisplayFilters,
+} from './chat-display-filters.js';
+import {
+  isChatScrolledNearBottom,
+  shouldAutoScrollToLatest,
+} from './chat-scroll-policy.js';
 import type {
   InterruptedArtifactView,
   LlmProfilesConfigView,
   RuntimeCompressionStatus,
   RunLlmRuntimeView,
+  RunningInputQueueItemView,
+  SessionInteractionStateView,
   SessionLlmSelectionPatch,
   SessionLlmSelectionView,
+  SessionPlanningState,
 } from '../../app-shell-types.js';
-import { inferToolResultSuccess } from '../../app-shell-types.js';
+import type { WSMessage } from '../../hooks/useWebSocket.js';
 
 export type LiveEvent =
   | {
@@ -80,6 +93,11 @@ export interface ContextUtilizationData {
   ratio: number;
   usedChars: number;
   limitChars: number;
+  usedTokens?: number;
+  limitTokens?: number;
+  source?: 'provider_usage' | 'weighted_char_estimate' | 'calibrated_weighted_estimate';
+  anchorPromptTokens?: number;
+  deltaEstimatedTokens?: number;
   isWarning: boolean;
   initializing: boolean;
 }
@@ -90,26 +108,52 @@ interface ChatContainerProps {
   pendingPlanInput: PlanInputRequestViewModel | null;
   pendingPlanInputError: string | null;
   onSubmitPlanInput: (answers: PlanInputAnswerViewModel[]) => void;
+  runningInputQueue?: RunningInputQueueItemView[];
+  onInsertRunningInput?: (itemId: string) => void;
+  onEditRunningInput?: (item: RunningInputQueueItemView) => void;
+  onCancelRunningInput?: (itemId: string) => void;
   input: string;
   setInput: (value: string) => void;
-  onSend: (payload: { prompt: string; selectedAgentName?: string; usePlanMode?: boolean }) => void;
+  onSend: (payload: {
+    prompt: string;
+    selectedAgentName?: string;
+    planningAction?: 'enter_drafting';
+    fileReferences?: string[];
+  }) => boolean;
+  planningState?: SessionPlanningState;
+  planModeIntent?: boolean;
+  onPlanModeIntentChange?: (enabled: boolean) => void;
+  onPlanningStateChange?: (state: SessionPlanningState) => void;
+  onExitPlanDraft?: () => void | Promise<void>;
+  onExitPlanExecution?: () => void | Promise<void>;
   onCancel?: () => void;
-  onResumeInterruptedRun?: () => void;
-  onDismissInterruptedArtifact?: () => void;
   isRunning: boolean;
   isCanceling?: boolean;
+  isHydrating?: boolean;
   canCancel?: boolean;
   isInteractionLocked?: boolean;
+  interactionState?: SessionInteractionStateView;
+  runningInputAckId?: string;
+  runningInputEditRestore?: { id: string; fileReferences?: string[] };
   error: string | null;
   interruptedArtifact?: InterruptedArtifactView | null;
   sessionId?: string | null;
   llmProfiles?: LlmProfilesConfigView | null;
   llmSelection?: SessionLlmSelectionView;
+  currentLlmRuntime?: RunLlmRuntimeView | null;
   onChangeLlmSelection?: (patch: SessionLlmSelectionPatch) => void;
+  shareActive?: boolean;
+  shareDisabled?: boolean;
+  onToggleShare?: () => void;
+  onResyncSession?: () => void | Promise<void>;
+  showAutoLoopControl?: boolean;
   contextUtilization?: ContextUtilizationData | null;
   compressionStatus?: RuntimeCompressionStatus | null;
   currentStep?: number;
   maxSteps?: number;
+  websocketConnected?: boolean;
+  sendWebSocket?: (message: WSMessage) => boolean;
+  subscribeWebSocket?: (type: string, listener: (data: unknown) => void) => () => void;
 }
 
 export function ChatContainer({
@@ -118,33 +162,60 @@ export function ChatContainer({
   pendingPlanInput,
   pendingPlanInputError,
   onSubmitPlanInput,
+  runningInputQueue = [],
+  onInsertRunningInput,
+  onEditRunningInput,
+  onCancelRunningInput,
   input,
   setInput,
   onSend,
+  planningState = 'normal',
+  planModeIntent = false,
+  onPlanModeIntentChange,
+  onPlanningStateChange,
+  onExitPlanDraft,
+  onExitPlanExecution,
   onCancel,
-  onResumeInterruptedRun,
-  onDismissInterruptedArtifact,
   isRunning,
   isCanceling = false,
+  isHydrating = false,
   canCancel = isRunning,
   isInteractionLocked = isRunning,
+  interactionState = { mode: 'normal' },
+  runningInputAckId,
+  runningInputEditRestore,
   error,
   interruptedArtifact = null,
   sessionId,
   llmProfiles = null,
   llmSelection,
+  currentLlmRuntime = null,
   onChangeLlmSelection,
+  shareActive = false,
+  shareDisabled = false,
+  onToggleShare,
+  onResyncSession,
+  showAutoLoopControl = true,
   contextUtilization,
   compressionStatus = null,
   currentStep = 0,
   maxSteps = 0,
+  websocketConnected = false,
+  sendWebSocket,
+  subscribeWebSocket,
 }: ChatContainerProps) {
   const theme = useThemeConfig();
   const { t, locale } = useI18n();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
+  const wasNearBottomBeforeUpdateRef = useRef(true);
+  const lastScrollSessionKeyRef = useRef<string | null>(null);
+  const lastScrollContentSignatureRef = useRef('');
   const operationStartTimeRef = useRef<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [displayFilters, setDisplayFilters] = useState<ChatDisplayFilters>(() => loadChatDisplayFilters());
+  const [isUserReadingHistory, setIsUserReadingHistory] = useState(false);
+  const [hasUnseenUpdates, setHasUnseenUpdates] = useState(false);
 
   useEffect(() => {
     if (isRunning && operationStartTimeRef.current === null) {
@@ -170,13 +241,105 @@ export function ChatContainer({
     return () => clearInterval(timer);
   }, [isRunning]);
 
+  const latestMessage = messages[messages.length - 1];
+  const latestLiveEvent = liveEvents[liveEvents.length - 1];
+  const scrollContentSignature = [
+    sessionId ?? '',
+    messages.length,
+    latestMessage?.id ?? '',
+    latestMessage?.role ?? '',
+    latestMessage?.content?.length ?? 0,
+    liveEvents.length,
+    latestLiveEvent?.id ?? '',
+    latestLiveEvent?.timestamp ?? '',
+    latestLiveEvent?.type ?? '',
+    latestLiveEvent && 'content' in latestLiveEvent ? latestLiveEvent.content.length : '',
+    latestLiveEvent && 'thinking' in latestLiveEvent ? latestLiveEvent.thinking.length : '',
+    pendingPlanInput?.requestId ?? '',
+    runningInputQueue.map((item) => item.id).join(','),
+  ].join('|');
+
+  const scrollToLatest = (behavior: ScrollBehavior = 'auto'): void => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    if (typeof viewport.scrollTo === 'function') {
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+    } else {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+    wasNearBottomBeforeUpdateRef.current = true;
+    setIsUserReadingHistory(false);
+    setHasUnseenUpdates(false);
+  };
+
+  const handleMessagesScroll = (): void => {
+    const viewport = messagesViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const nearBottom = isChatScrolledNearBottom(viewport);
+    wasNearBottomBeforeUpdateRef.current = nearBottom;
+    setIsUserReadingHistory(!nearBottom);
+    if (nearBottom) {
+      setHasUnseenUpdates(false);
+    }
+  };
+
   useEffect(() => {
     const viewport = messagesViewportRef.current;
     if (!viewport) {
       return;
     }
-    viewport.scrollTop = viewport.scrollHeight;
-  }, [messages, liveEvents]);
+    const sessionKey = sessionId ?? '';
+    const sessionChanged = lastScrollSessionKeyRef.current !== sessionKey;
+    const contentChanged = lastScrollContentSignatureRef.current !== scrollContentSignature;
+    lastScrollSessionKeyRef.current = sessionKey;
+    lastScrollContentSignatureRef.current = scrollContentSignature;
+    if (!contentChanged && !sessionChanged) {
+      return;
+    }
+    if (
+      shouldAutoScrollToLatest({
+        sessionChanged,
+        wasNearBottomBeforeUpdate: wasNearBottomBeforeUpdateRef.current,
+        latestMessageRole: latestMessage?.role,
+      })
+    ) {
+      scrollToLatest('auto');
+      return;
+    }
+    setIsUserReadingHistory(true);
+    setHasUnseenUpdates(true);
+  }, [scrollContentSignature, sessionId, latestMessage?.role]);
+
+  useEffect(() => {
+    saveChatDisplayFilters(displayFilters);
+  }, [displayFilters]);
+
+  const toggleDisplayFilter = (key: keyof ChatDisplayFilters): void => {
+    setDisplayFilters((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
+
+  const shouldRenderLiveEvent = (event: LiveEvent): boolean => {
+    if (event.type === 'thinking') {
+      return displayFilters.showThinking;
+    }
+    if (event.type === 'tool_call') {
+      return displayFilters.showToolCall;
+    }
+    if (event.type === 'tool_result') {
+      if (event.name === 'send_file_to_user') {
+        return false;
+      }
+      return displayFilters.showToolResult;
+    }
+    return true;
+  };
 
   const getStreamingETA = (): string | null => {
     if (!isRunning || liveEvents.length === 0) {
@@ -260,7 +423,7 @@ export function ChatContainer({
   };
 
   const renderCompressionStatus = (): React.ReactNode => {
-    if (!isRunning || !compressionStatus) {
+    if (!compressionStatus) {
       return null;
     }
     const ratioFromContext = contextUtilization ? Math.round(contextUtilization.ratio * 100) : 0;
@@ -287,7 +450,9 @@ export function ChatContainer({
           }}
         >
           <div className="font-semibold" style={{ color: theme.colors.text.primary }}>
-            {t('app.context.compression')}
+            {compressionStatus.source === 'replay_prepare'
+              ? t('app.context.replayPrepare')
+              : t('app.context.compression')}
           </div>
           <div className="mt-1 text-xs">
             {t('app.context.compressionProgress', { percentage })}
@@ -299,27 +464,24 @@ export function ChatContainer({
   };
 
   const eta = getStreamingETA();
-  const visibleInterruptedArtifact =
-    interruptedArtifact && !interruptedArtifact.dismissedAt ? interruptedArtifact : null;
-  const interruptedToolResultSuccessById = new Map(
-    (visibleInterruptedArtifact?.sideEffectLedger ?? [])
-      .filter((entry) => typeof entry.toolCallId === 'string' && entry.toolCallId.trim().length > 0)
-      .map((entry) => [String(entry.toolCallId), entry.resultSuccess !== false] as const)
-  );
+  const visibleInterruptedArtifact = interruptedArtifact ?? null;
+  const observeOnly = interactionState.mode === 'observe_only';
 
   const renderInterruptedArtifact = (): React.ReactNode => {
     if (!visibleInterruptedArtifact) {
       return null;
     }
-    const previewMessages = visibleInterruptedArtifact.previewMessages.slice(-6);
     const statusTitle =
       visibleInterruptedArtifact.terminalCode === 'cancelled'
-        ? `${t('app.running.cancel')}ed`
+        ? t('app.running.cancelled')
         : t('app.error.title');
     const statusSummary =
       visibleInterruptedArtifact.replayCutoffKind === 'checkpoint'
-        ? `Saved through step ${visibleInterruptedArtifact.lastSafeStep}/${visibleInterruptedArtifact.maxSteps}. This saved progress is already part of future context.`
-        : 'The run stopped before a replay-safe checkpoint was saved.';
+        ? t('app.interrupted.savedThroughCheckpoint', {
+            lastSafeStep: visibleInterruptedArtifact.lastSafeStep,
+            maxSteps: visibleInterruptedArtifact.maxSteps,
+          })
+        : t('app.interrupted.noReplayCheckpoint');
 
     return (
       <div className="flex justify-start">
@@ -345,74 +507,24 @@ export function ChatContainer({
                 </div>
               ) : null}
             </div>
-            <div className="flex items-center gap-2">
-              {visibleInterruptedArtifact.resumable && !isInteractionLocked && onResumeInterruptedRun ? (
-                <button
-                  type="button"
-                  onClick={onResumeInterruptedRun}
-                  className="rounded-lg border px-3 py-1 text-xs transition-colors"
-                  style={{
-                    borderColor: theme.colors.primary.DEFAULT,
-                    color: theme.colors.primary.DEFAULT,
-                  }}
-                >
-                  {t('subagent.resume')}
-                </button>
-              ) : null}
-              {onDismissInterruptedArtifact && !isInteractionLocked ? (
-                <button
-                  type="button"
-                  onClick={onDismissInterruptedArtifact}
-                  className="rounded-lg border px-3 py-1 text-xs transition-colors"
-                  style={{
-                    borderColor: theme.colors.border.DEFAULT,
-                    color: theme.colors.text.secondary,
-                  }}
-                >
-                  {t('common.hide')}
-                </button>
-              ) : null}
-            </div>
+            {onResyncSession ? (
+              <button
+                type="button"
+                onClick={() => {
+                  void onResyncSession();
+                }}
+                className="shrink-0 rounded-xl border px-3 py-1.5 text-xs font-semibold"
+                style={{
+                  borderColor: 'rgba(239, 68, 68, 0.28)',
+                  backgroundColor: theme.colors.bg.secondary,
+                  color: theme.colors.text.primary,
+                }}
+                data-testid="session-resync-button"
+              >
+                {t('app.session.sync')}
+              </button>
+            ) : null}
           </div>
-
-          {previewMessages.length > 0 ? (
-            <div className="space-y-3">
-              {previewMessages.map((message, index) => {
-                if (message.role === 'tool') {
-                  return (
-                    <ToolResultBlock
-                      key={`interrupted-tool-${index}`}
-                      name={message.name || 'tool'}
-                      result={{
-                        success:
-                          interruptedToolResultSuccessById.get(String(message.toolCallId ?? '')) ??
-                          inferToolResultSuccess(String(message.content ?? '')),
-                        content: message.content,
-                      }}
-                    />
-                  );
-                }
-                return (
-                  <MessageItem
-                    key={`interrupted-msg-${index}`}
-                    message={{
-                      id: `interrupted-msg-${index}`,
-                      role: message.role === 'user' ? 'user' : 'assistant',
-                      content: message.content,
-                      timestamp: Date.now(),
-                      thinking: message.thinking,
-                      toolCalls: message.toolCalls?.map((toolCall) => ({
-                        name: toolCall.function.name,
-                        args: toolCall.function.arguments,
-                      })),
-                      toolResults: [],
-                      metadata: message.metadata,
-                    }}
-                  />
-                );
-              })}
-            </div>
-          ) : null}
         </div>
       </div>
     );
@@ -426,8 +538,28 @@ export function ChatContainer({
     >
       {renderContextUtilization()}
 
-      <div ref={messagesViewportRef} className="chat-messages-viewport flex-1 overflow-y-auto px-5 py-4">
+      <div
+        ref={messagesViewportRef}
+        className="chat-messages-viewport flex-1 overflow-y-auto px-5 py-4"
+        onScroll={handleMessagesScroll}
+      >
         <div className="chat-transcript mx-auto w-full space-y-3">
+          {observeOnly && (
+            <div
+              className="message-width-assistant rounded-2xl border px-4 py-3 text-sm"
+              style={{
+                backgroundColor: theme.colors.assistantMessage.bg,
+                borderColor: theme.colors.border.DEFAULT,
+                color: theme.colors.text.secondary,
+              }}
+              data-testid="cli-observe-only-banner"
+            >
+              <div className="font-semibold" style={{ color: theme.colors.text.primary }}>
+                {t('app.session.observeOnlyTitle')}
+              </div>
+              <div className="mt-1 text-xs">{t('app.session.observeOnlyDetail')}</div>
+            </div>
+          )}
           {messages.length === 0 && liveEvents.length === 0 && (
             <div className="flex min-h-full items-center justify-center">
               {isRunning ? (
@@ -456,10 +588,13 @@ export function ChatContainer({
           )}
 
           {messages.map((msg) => (
-          <MessageItem key={msg.id} message={msg} />
+          <MessageItem key={msg.id} message={msg} displayFilters={displayFilters} />
           ))}
 
           {liveEvents.map((event) => {
+          if (!shouldRenderLiveEvent(event)) {
+            return null;
+          }
           if (event.type === 'text') {
             return (
               <MessageItem
@@ -477,6 +612,7 @@ export function ChatContainer({
                       }
                     : undefined,
                 }}
+                displayFilters={DEFAULT_CHAT_DISPLAY_FILTERS}
               />
             );
           }
@@ -592,7 +728,13 @@ export function ChatContainer({
           {pendingPlanInput && (
           <div className="flex justify-start">
             <div className="message-width-assistant w-full">
-              <PlanInputCard request={pendingPlanInput} error={pendingPlanInputError} onSubmit={onSubmitPlanInput} />
+              <PlanInputCard
+                request={pendingPlanInput}
+                error={pendingPlanInputError}
+                disabled={observeOnly}
+                disabledReason={observeOnly ? t('planInput.readOnly') : undefined}
+                onSubmit={onSubmitPlanInput}
+              />
             </div>
           </div>
           )}
@@ -620,6 +762,22 @@ export function ChatContainer({
 
           <div ref={messagesEndRef} />
         </div>
+        {isUserReadingHistory && hasUnseenUpdates ? (
+          <div className="sticky bottom-3 z-20 flex justify-center pt-2">
+            <button
+              type="button"
+              onClick={() => scrollToLatest('smooth')}
+              className="rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg transition-transform hover:-translate-y-0.5"
+              style={{
+                backgroundColor: theme.colors.bg.secondary,
+                borderColor: theme.colors.primary.DEFAULT,
+                color: theme.colors.primary.DEFAULT,
+              }}
+            >
+              {t('chatMessages.jumpToLatest')}
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div
@@ -629,6 +787,61 @@ export function ChatContainer({
             'linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,0.16) 26%, rgba(0,0,0,0.22))',
         }}
       >
+        {runningInputQueue.length > 0 && (
+          <div className="mx-auto mb-2 flex w-full max-w-4xl flex-col gap-2">
+            {runningInputQueue.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center gap-3 rounded-lg border px-3 py-2 text-xs"
+                style={{
+                  borderColor: theme.colors.border.DEFAULT,
+                  backgroundColor: theme.colors.bg.secondary,
+                  color: theme.colors.text.secondary,
+                }}
+              >
+                <div className="min-w-0 flex-1 truncate">{item.prompt}</div>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md border px-2 py-1 transition-opacity disabled:opacity-50"
+                  style={{
+                    borderColor: theme.colors.border.DEFAULT,
+                    color: theme.colors.text.primary,
+                  }}
+                  disabled={isHydrating || observeOnly}
+                  onClick={() => onEditRunningInput?.(item)}
+                >
+                  {t('runningInput.edit')}
+                </button>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md border px-2 py-1 transition-opacity disabled:opacity-50"
+                  style={{
+                    borderColor: theme.colors.border.DEFAULT,
+                    color: theme.colors.text.secondary,
+                  }}
+                  disabled={isHydrating || observeOnly}
+                  onClick={() => onCancelRunningInput?.(item.id)}
+                >
+                  {t('runningInput.cancel')}
+                </button>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md border px-2 py-1 transition-opacity disabled:opacity-50"
+                  style={{
+                    borderColor: theme.colors.border.DEFAULT,
+                    color: theme.colors.text.primary,
+                  }}
+                  disabled={!isRunning || isCanceling || isHydrating || item.status === 'insert_requested' || observeOnly}
+                  onClick={() => onInsertRunningInput?.(item.id)}
+                >
+                  {item.status === 'insert_requested'
+                    ? t('runningInput.insertPending')
+                    : t('runningInput.insert')}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div
           className="chat-composer-card mx-auto w-full rounded-[1.4rem] border"
           style={{
@@ -643,14 +856,34 @@ export function ChatContainer({
             input={input}
             setInput={setInput}
             onSend={onSend}
+            planningState={planningState}
+            planModeIntent={planModeIntent}
+            onPlanModeIntentChange={onPlanModeIntentChange}
+            onPlanningStateChange={onPlanningStateChange}
+            onExitPlanDraft={onExitPlanDraft}
+            onExitPlanExecution={onExitPlanExecution}
             onCancel={onCancel}
             isRunning={isRunning}
             isCanceling={isCanceling}
+            isHydrating={isHydrating}
             canCancel={canCancel}
             isInteractionLocked={isInteractionLocked}
+            observeOnly={observeOnly}
+            runningInputAckId={runningInputAckId}
+            runningInputEditRestore={runningInputEditRestore}
             llmProfiles={llmProfiles}
             llmSelection={llmSelection}
+            currentLlmRuntime={currentLlmRuntime}
             onChangeLlmSelection={onChangeLlmSelection}
+            shareActive={shareActive}
+            shareDisabled={shareDisabled}
+            onToggleShare={onToggleShare}
+            showAutoLoopControl={showAutoLoopControl}
+            displayFilters={displayFilters}
+            onToggleDisplayFilter={toggleDisplayFilter}
+            websocketConnected={websocketConnected}
+            sendWebSocket={sendWebSocket}
+            subscribeWebSocket={subscribeWebSocket}
           />
         </div>
       </div>

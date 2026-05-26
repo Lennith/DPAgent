@@ -18,12 +18,25 @@ function createTemplate({
   skillsDir,
 }) {
   return {
-    api: {
-      apiKey,
-      apiBase,
-      model,
-      provider: 'anthropic',
-      maxOutputTokens: 32768,
+    llmProfiles: {
+      defaultProfileId: 'default',
+      profiles: [
+        {
+          id: 'default',
+          name: 'Default Profile',
+          provider: 'anthropic',
+          apiKey,
+          apiBase,
+          defaultModel: model,
+          maxOutputTokens: 32768,
+          enabled: true,
+          capabilities: {
+            modelDiscovery: true,
+            reasoningEffort: false,
+            thinkingBudget: true,
+          },
+        },
+      ],
     },
     agent: {
       maxSteps: 100,

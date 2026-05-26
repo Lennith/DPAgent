@@ -1,11 +1,15 @@
 import type { ToolResult, ToolSchema } from '../types.js';
 
+export interface ToolExecuteOptions {
+  signal?: AbortSignal;
+}
+
 export abstract class Tool {
   abstract get name(): string;
   abstract get description(): string;
   abstract get parameters(): Record<string, unknown>;
   
-  abstract execute(args: Record<string, unknown>): Promise<ToolResult>;
+  abstract execute(args: Record<string, unknown>, options?: ToolExecuteOptions): Promise<ToolResult>;
 
   toSchema(): ToolSchema {
     return {

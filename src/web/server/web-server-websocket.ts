@@ -1,10 +1,12 @@
+import type { IncomingMessage } from 'http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type {
   CancelRequest,
   ChatRequest,
-  DismissInterruptedArtifactRequest,
   PlanInputResponseRequest,
-  ResumeFailedTurnRequest,
+  RunningInputCancelRequest,
+  RunningInputEnqueueRequest,
+  RunningInputInsertRequest,
   StopAutoLoopRequest,
   WSMessage,
 } from './web-server-shared.js';
@@ -12,7 +14,8 @@ import type {
 export interface WebServerSocketLifecycleOptions {
   wss: WebSocketServer;
   onMessage: (ws: WebSocket, message: WSMessage) => Promise<void>;
-  onClose: (ws: WebSocket) => void;
+  onConnection?: (ws: WebSocket, request: IncomingMessage) => void;
+  onClose: (ws: WebSocket, code: number, reason: Buffer) => void;
   onError: (ws: WebSocket, error: Error) => void;
   logConnect: () => void;
   logDisconnect: () => void;
@@ -21,17 +24,23 @@ export interface WebServerSocketLifecycleOptions {
 
 export interface WebServerMessageDispatchHandlers {
   onChat: (ws: WebSocket, request: ChatRequest) => Promise<void>;
-  onChatResume: (ws: WebSocket) => void;
   onCancel: (ws: WebSocket, request: CancelRequest) => void;
-  onResumeFailedTurn: (ws: WebSocket, request: ResumeFailedTurnRequest) => Promise<void>;
-  onDismissInterruptedArtifact: (ws: WebSocket, request: DismissInterruptedArtifactRequest) => void;
   onPlanInputResponse: (ws: WebSocket, request: PlanInputResponseRequest) => void;
+  onRunningInputEnqueue: (ws: WebSocket, request: RunningInputEnqueueRequest) => void;
+  onRunningInputInsert: (ws: WebSocket, request: RunningInputInsertRequest) => void;
+  onRunningInputCancel: (ws: WebSocket, request: RunningInputCancelRequest) => void;
   onStopAutoLoop: (ws: WebSocket, request: StopAutoLoopRequest) => void;
+  onAsrStreamStart: (ws: WebSocket, request: unknown) => Promise<void>;
+  onAsrStreamChunk: (ws: WebSocket, request: unknown) => Promise<void>;
+  onAsrStreamStop: (ws: WebSocket, request: unknown) => Promise<void>;
+  onAsrStreamCancel: (ws: WebSocket, request: unknown) => Promise<void>;
+  onAsrClientDebug: (ws: WebSocket, request: unknown) => void;
   onPing: (ws: WebSocket, payload: unknown) => void;
 }
 
 export function setupWebServerSocketLifecycle(options: WebServerSocketLifecycleOptions): void {
-  options.wss.on('connection', (ws: WebSocket) => {
+  options.wss.on('connection', (ws: WebSocket, request: IncomingMessage) => {
+    options.onConnection?.(ws, request);
     options.logConnect();
 
     ws.on('message', async (data: Buffer) => {
@@ -43,8 +52,8 @@ export function setupWebServerSocketLifecycle(options: WebServerSocketLifecycleO
       }
     });
 
-    ws.on('close', () => {
-      options.onClose(ws);
+    ws.on('close', (code: number, reason: Buffer) => {
+      options.onClose(ws, code, reason);
       options.logDisconnect();
     });
 
@@ -63,23 +72,38 @@ export async function dispatchWebServerMessage(
     case 'chat':
       await handlers.onChat(ws, message.data as ChatRequest);
       return;
-    case 'chat_resume':
-      handlers.onChatResume(ws);
-      return;
     case 'cancel':
       handlers.onCancel(ws, (message.data ?? {}) as CancelRequest);
-      return;
-    case 'resume_failed_turn':
-      await handlers.onResumeFailedTurn(ws, (message.data ?? {}) as ResumeFailedTurnRequest);
-      return;
-    case 'dismiss_interrupted_artifact':
-      handlers.onDismissInterruptedArtifact(ws, (message.data ?? {}) as DismissInterruptedArtifactRequest);
       return;
     case 'plan_input_response':
       handlers.onPlanInputResponse(ws, (message.data ?? {}) as PlanInputResponseRequest);
       return;
+    case 'running_input_enqueue':
+      handlers.onRunningInputEnqueue(ws, (message.data ?? {}) as RunningInputEnqueueRequest);
+      return;
+    case 'running_input_insert':
+      handlers.onRunningInputInsert(ws, (message.data ?? {}) as RunningInputInsertRequest);
+      return;
+    case 'running_input_cancel':
+      handlers.onRunningInputCancel(ws, (message.data ?? {}) as RunningInputCancelRequest);
+      return;
     case 'stop_auto_loop':
       handlers.onStopAutoLoop(ws, (message.data ?? {}) as StopAutoLoopRequest);
+      return;
+    case 'asr_stream_start':
+      await handlers.onAsrStreamStart(ws, message.data ?? {});
+      return;
+    case 'asr_stream_chunk':
+      await handlers.onAsrStreamChunk(ws, message.data ?? {});
+      return;
+    case 'asr_stream_stop':
+      await handlers.onAsrStreamStop(ws, message.data ?? {});
+      return;
+    case 'asr_stream_cancel':
+      await handlers.onAsrStreamCancel(ws, message.data ?? {});
+      return;
+    case 'asr_client_debug':
+      handlers.onAsrClientDebug(ws, message.data ?? {});
       return;
     case 'ping': {
       const payload =

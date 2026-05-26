@@ -1,4 +1,3 @@
-import React from 'react';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 import { summarizeToolResult } from './toolEventSummary.js';
 

@@ -1,4 +1,3 @@
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -11,117 +10,31 @@ import {
   slugifyWorkflowText,
   tokenizeWorkflowText,
 } from '../utils/workflow-signal.js';
+import type {
+  MemoryBucket,
+  MemoryEntry,
+  MemoryScope,
+  MemorySearchResult,
+  MemorySuggestion,
+  NormalizedMemoryInput,
+  PendingMemoryFilters,
+} from './memory-store-contracts.js';
+import {
+  hashText,
+  normalizeTimestamp,
+  normalizeWorkspacePathForIdentity,
+  nowIso,
+  truncate,
+} from './memory-store-utils.js';
 
-export type MemoryScope = 'workspace' | 'user';
-export type MemoryEntryStatus = 'active' | 'superseded' | 'expired';
-
-export interface MemoryEntry {
-  id: string;
-  scope: MemoryScope;
-  namespace: string;
-  namespaceLabel: string;
-  title: string;
-  content: string;
-  keywords: string[];
-  workspaceDir?: string;
-  sourceSessionId?: string;
-  lineageId: string;
-  version: number;
-  status: MemoryEntryStatus;
-  supersededAt?: string;
-  supersededById?: string;
-  expiresAt?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface MemorySuggestion {
-  id: string;
-  scope: MemoryScope;
-  namespace: string;
-  namespaceLabel: string;
-  title: string;
-  content: string;
-  keywords: string[];
-  workspaceDir?: string;
-  sourceSessionId?: string;
-  reason?: string;
-  lineageId: string;
-  versionHint: number;
-  expiresAt?: string;
-  triggerCount?: number;
-  createdAt: string;
-  updatedAt: string;
-  status: 'pending' | 'approved' | 'rejected';
-  reviewedAt?: string;
-  reviewNote?: string;
-  approvedEntryId?: string;
-}
-
-interface MemoryBucket {
-  scope: MemoryScope;
-  namespace: string;
-  namespaceLabel: string;
-  entries: MemoryEntry[];
-}
-
-interface NormalizedMemoryInput {
-  scope: MemoryScope;
-  namespace: string;
-  namespaceLabel: string;
-  title: string;
-  content: string;
-  keywords: string[];
-  workspaceDir?: string;
-  sourceSessionId?: string;
-  reason?: string;
-  lineageKey?: string;
-  lineageId: string;
-  expiresAt?: string;
-  triggerCount?: number;
-}
-
-export interface PendingMemoryFilters {
-  sessionId?: string;
-  workspaceDir?: string;
-}
-
-export interface MemorySearchResult {
-  score: number;
-  entry: MemoryEntry;
-  excerpt: string;
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-function hashText(value: string): string {
-  return crypto.createHash('sha1').update(value).digest('hex');
-}
-
-function truncate(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, maxChars - 16))}...(truncated)`;
-}
-
-function normalizeTimestamp(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
-}
-
-function normalizeWorkspacePathForIdentity(workspaceDir: string): string {
-  const resolved = path.resolve(workspaceDir).replace(/\//g, path.sep);
-  if (process.platform !== 'win32') {
-    return resolved;
-  }
-  return resolved.toLowerCase();
-}
+export type {
+  MemoryEntry,
+  MemoryEntryStatus,
+  MemoryScope,
+  MemorySearchResult,
+  MemorySuggestion,
+  PendingMemoryFilters,
+} from './memory-store-contracts.js';
 
 export class MemoryStore {
   private readonly baseDir: string;
@@ -297,6 +210,7 @@ export class MemoryStore {
       title?: string;
       content: string;
       workspaceDir?: string;
+      includeUser?: boolean;
       sourceSessionId?: string;
       reason?: string;
       expiresAt?: string;
@@ -304,7 +218,7 @@ export class MemoryStore {
   ): MemoryEntry | null {
     const target = this.readEntry(id, {
       workspaceDir: input.workspaceDir,
-      includeUser: true,
+      includeUser: input.includeUser,
       includeExpired: true,
       includeSuperseded: true,
     });

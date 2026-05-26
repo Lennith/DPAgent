@@ -6,11 +6,11 @@ export function resolveWebServerPort(rawPort: string | undefined, fallback = DEF
     return fallback;
   }
   if (!/^\d+$/.test(trimmed)) {
-    throw new Error(`Invalid MINIMAX_PORT: ${trimmed}`);
+    throw new Error(`Invalid DPAGENT_PORT: ${trimmed}`);
   }
   const port = Number.parseInt(trimmed, 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid MINIMAX_PORT: ${trimmed}`);
+    throw new Error(`Invalid DPAGENT_PORT: ${trimmed}`);
   }
   return port;
 }

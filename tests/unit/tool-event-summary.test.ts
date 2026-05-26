@@ -51,6 +51,33 @@ function runAll(): void {
   assert.equal(todoPlanResultSummary.title, 'Todo plan_set succeeded');
   assert.match(todoPlanResultSummary.subtitle, /Plan replaced with 2 todo items/i);
 
+  const largeCallSummary = summarizeToolCall('write_file', {
+    path: 'large.txt',
+    content: 'x'.repeat(20000),
+    metadata: Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`key_${index}`, index])),
+    chunks: Array.from({ length: 50 }, (_, index) => ({ index, value: 'y'.repeat(1000) })),
+  });
+  assert.equal(largeCallSummary.title, 'write file');
+  assert.match(largeCallSummary.detailJson, /truncated/i);
+  assert.ok(largeCallSummary.detailJson.length < 7000);
+
+  const sendFileCallSummary = summarizeToolCall('send_file_to_user', {
+    path: 'D:\\test\\report.md',
+  });
+  assert.equal(sendFileCallSummary.title, 'Send file to user');
+  assert.match(sendFileCallSummary.subtitle, /report\.md/);
+
+  const sendFileResultSummary = summarizeToolResult('send_file_to_user', {
+    success: true,
+    content: JSON.stringify({
+      href: 'http://localhost:53721/download/id/report.md',
+      displayPath: 'D:\\test\\report.md',
+      filename: 'report.md',
+    }),
+  });
+  assert.equal(sendFileResultSummary.title, 'Send file succeeded');
+  assert.match(sendFileResultSummary.subtitle, /D:\\test\\report\.md/);
+
   console.log('tool-event-summary tests passed');
 }
 

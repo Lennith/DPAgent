@@ -1,11 +1,24 @@
 import type { LiveEvent } from './components/chat/ChatContainer.js';
-import type { Message, ToolCall, ToolResult } from './hooks/useAgent.js';
+import type { Message, ToolCall, ToolResult } from './chat-types.js';
+export type {
+  LlmProfilesConfigView,
+  PublicLlmProfile,
+  PublicSettingsView,
+} from '../../shared/web-settings-contracts.js';
 
-export type ReasoningPreset = 'off' | 'low' | 'medium' | 'high';
+export type ReasoningPreset = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type SessionOrigin = 'web' | 'cli' | 'automation';
+export type RunOwner = SessionOrigin;
+
+export interface SessionInteractionStateView {
+  mode: 'normal' | 'observe_only';
+  reason?: 'cli_active_run' | 'automation_active_run' | 'wss_controlled_active_run';
+  owner?: RunOwner;
+}
 
 export interface SessionLlmProviderOptionsView {
   openai?: {
-    reasoningEffort?: 'low' | 'medium' | 'high' | null;
+    reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
   };
   anthropic?: {
     thinkingBudgetTokens?: number | null;
@@ -26,29 +39,6 @@ export interface SessionLlmSelectionPatch {
   reasoningPreset?: ReasoningPreset;
   providerOptions?: SessionLlmProviderOptionsView;
   updatedAt?: string;
-}
-
-export interface PublicLlmProfile {
-  id: string;
-  name: string;
-  provider: 'anthropic' | 'openai';
-  apiBase: string;
-  defaultModel: string;
-  maxOutputTokens?: number;
-  enabled?: boolean;
-  capabilities?: {
-    modelDiscovery?: boolean;
-    reasoningEffort?: boolean;
-    thinkingBudget?: boolean;
-  };
-  createdAt?: string;
-  updatedAt?: string;
-  hasApiKey: boolean;
-}
-
-export interface LlmProfilesConfigView {
-  defaultProfileId: string;
-  profiles: PublicLlmProfile[];
 }
 
 export interface LlmProfileIntrospectionView {
@@ -86,7 +76,11 @@ export interface SessionInfo {
     lastResolvedAt?: string;
     lastIssue?: 'missing_tail_marker' | 'duplicate_tail_marker';
   } | null;
+  origin?: SessionOrigin;
   llmSelection?: SessionLlmSelectionView;
+  planningState?: SessionPlanningStateView | null;
+  activeRun?: ActiveRunView | null;
+  interactionState?: SessionInteractionStateView;
   isLocalDraft?: boolean;
 }
 
@@ -95,27 +89,38 @@ export interface SessionDetail {
   workspaceDir?: string;
   memoryPromotionState?: MemoryPromotionStateView | null;
   completionMarkerStats?: SessionInfo['completionMarkerStats'];
+  origin?: SessionOrigin;
   llmSelection?: SessionLlmSelectionView;
+  planningState?: SessionPlanningStateView | null;
+  interactionState?: SessionInteractionStateView;
   contextUtilization?: {
     observedAt: string;
     ratio: number;
     usedChars: number;
     limitChars: number;
+    usedTokens?: number;
+    limitTokens?: number;
+    source?: 'provider_usage' | 'weighted_char_estimate' | 'calibrated_weighted_estimate';
+    anchorPromptTokens?: number;
+    deltaEstimatedTokens?: number;
     isWarning: boolean;
   } | null;
   activeRun?: ActiveRunView | null;
-  pendingResume?: boolean;
   interruptedArtifact?: InterruptedArtifactView | null;
   pendingPlanInput?: {
     runId: string;
     requestId: string;
+    source?: 'request_user_input' | 'finalize_plan_approval';
     requestedAt: string;
     questions: PlanInputQuestion[];
+    planPreview?: FinalizedPlanView;
     lastError?: string | null;
   } | null;
+  runtimeErrors?: RuntimeErrorMessageView[];
   messages: Array<{
     role: 'user' | 'assistant' | 'tool' | string;
     content: string;
+    createdAt?: string;
     thinking?: string;
     metadata?: Message['metadata'];
     toolCalls?: Array<{ id: string; function: { name: string; arguments: Record<string, unknown> } }>;
@@ -130,7 +135,28 @@ export interface ActiveRunView {
   draftId?: string;
   context: ContextRef;
   startedAt: string;
+  lastActivityAt?: string;
+  currentStep?: number;
+  maxSteps?: number;
+  owner?: RunOwner;
+  origin?: SessionOrigin;
+  interactionState?: SessionInteractionStateView;
   llmRuntime?: RunLlmRuntimeView;
+  runningInputQueue?: RunningInputQueueItemView[];
+}
+
+export interface RunningInputQueueItemView {
+  id: string;
+  runId: string;
+  context: ContextRef;
+  prompt: string;
+  clientRequestId?: string;
+  selectedAgentName?: string;
+  fileReferences?: string[];
+  createdAt: string;
+  updatedAt: string;
+  status: 'queued_next' | 'insert_requested';
+  insertRequestedAt?: string;
 }
 
 export interface InterruptedArtifactView {
@@ -142,7 +168,6 @@ export interface InterruptedArtifactView {
   runFamilyId: string;
   terminalCode: 'cancelled' | 'error';
   replayCutoffKind: 'none' | 'checkpoint';
-  resumable: boolean;
   lastSafeStep: number;
   maxSteps: number;
   errorSummary?: string;
@@ -158,7 +183,6 @@ export interface InterruptedArtifactView {
     resultSummary: string;
   }>;
   checkpointTurnId?: string;
-  dismissedAt?: string;
 }
 
 export interface RunTerminalStateView {
@@ -166,7 +190,6 @@ export interface RunTerminalStateView {
   runFamilyId: string;
   draftId: string;
   terminalCode: 'completed' | 'cancelled' | 'error';
-  resumable: boolean;
   lastSafeStep: number;
   maxSteps: number;
   replayCutoffKind: 'none' | 'checkpoint' | 'endturn';
@@ -206,7 +229,7 @@ export interface TodoItem {
   id: string;
   work: string;
   detectionStandard: string;
-  status: 'pending' | 'in_progress' | 'blocked' | 'completed';
+  status: 'pending' | 'in_progress' | 'blocked' | 'completed' | 'dismissed';
   priority: 'low' | 'medium' | 'high';
   blockedReason?: string;
   completionTaskId?: string;
@@ -225,9 +248,113 @@ export interface GovernanceAuditItem {
   metadata?: Record<string, unknown>;
 }
 
+export interface WorkspaceGovernanceMemoryItem {
+  id: string;
+  scope: 'user' | 'workspace';
+  title: string;
+  content: string;
+  version: number;
+  status: 'active' | 'superseded' | 'expired';
+  updatedAt: string;
+}
+
+export interface WorkspaceGovernanceSkillItem {
+  name: string;
+  description: string;
+  path: string;
+  version?: string;
+  reviewStatus?: string;
+  isAutoGenerated: boolean;
+  metadata?: Record<string, unknown>;
+  content: string;
+  workspaceDir: string;
+}
+
+export interface WorkspaceSkillGovernanceReport {
+  kind: 'workspace_skill_governance';
+  runId: string;
+  workspaceDir: string;
+  generatedAt: string;
+  fallback: boolean;
+  fallbackReason?: string;
+  summary: {
+    scannedSkills: number;
+    exactDuplicates: number;
+    candidateDuplicates: number;
+    autoArchived: number;
+    reportOnly: number;
+    boundaryFixed: number;
+    conflicts: number;
+  };
+}
+
 export interface ContextRef {
   scope: 'session' | 'workspace' | 'global';
   namespace: string;
+}
+
+export type SessionPlanningState = 'normal' | 'plan_drafting' | 'plan_executing';
+
+export interface SessionPlanningStateView {
+  state: SessionPlanningState;
+  pendingPlanId?: string;
+  activeExecutionPlanId?: string;
+  updatedAt?: string;
+}
+
+export interface AgentProfileConfigView {
+  version?: 1;
+  description?: string;
+  llmProfileId?: string;
+  llmModel?: string;
+  reasoningPreset?: ReasoningPreset;
+  loadGlobalSkills?: boolean;
+  exposeAsSubagent?: boolean;
+  promptAppend?: string;
+  warnings?: string[];
+  path?: string;
+}
+
+export interface AgentListItemView {
+  name: string;
+  source: 'bundled' | 'global' | 'workspace';
+  description: string;
+  path: string;
+  mtime: string;
+  config?: AgentProfileConfigView;
+}
+
+export interface RuntimeErrorMessageView {
+  id: string;
+  runId: string;
+  message: string;
+  createdAt: string;
+  terminalCode?: 'cancelled' | 'error';
+  replayCutoffKind?: 'none' | 'checkpoint' | 'endturn';
+  lastSafeStep?: number;
+  maxSteps?: number;
+}
+
+export type FinalizedPlanStepPriority = 'low' | 'medium' | 'high';
+
+export interface FinalizedPlanStepView {
+  planStepId: string;
+  work: string;
+  detectionStandard: string;
+  priority?: FinalizedPlanStepPriority;
+  tags?: string[];
+}
+
+export interface FinalizedPlanView {
+  planId?: string;
+  title: string;
+  summary?: string;
+  markdown: string;
+  steps: FinalizedPlanStepView[];
+  testPlan?: string[];
+  assumptions?: string[];
+  notes?: string;
+  updatedAt?: string;
 }
 
 export interface PlanInputOption {
@@ -246,7 +373,9 @@ export interface PlanInputRequestPayload {
   runId: string;
   context: ContextRef;
   requestId: string;
+  source?: 'request_user_input' | 'finalize_plan_approval';
   questions: PlanInputQuestion[];
+  planPreview?: FinalizedPlanView;
 }
 
 export interface PendingPlanInputSessionItem {
@@ -270,8 +399,6 @@ export interface SessionRuntimeState {
   hasHydrated: boolean;
   hydrating: boolean;
   isRunning: boolean;
-  resumePending: boolean;
-  dismissPending: boolean;
   cancelInitiated: boolean;
   cancelAcknowledged: boolean;
   cancelRequestedAt: number;
@@ -290,13 +417,20 @@ export interface SessionRuntimeState {
   pendingPlanInput: PlanInputRequestPayload | null;
   pendingPlanInputError: string | null;
   currentLlmRuntime: RunLlmRuntimeView | null;
+  activeRunOwner: RunOwner | null;
+  interactionState: SessionInteractionStateView;
+  runningInputQueue: RunningInputQueueItemView[];
 }
 
 export interface ChatStartedEvent {
   runId: string;
   context: ContextRef;
   startedAt?: string;
+  owner?: RunOwner;
+  origin?: SessionOrigin;
+  interactionState?: SessionInteractionStateView;
   llmRuntime?: RunLlmRuntimeView;
+  runningInputQueue?: RunningInputQueueItemView[];
 }
 
 export function inferToolResultSuccess(content: string): boolean {
@@ -339,8 +473,6 @@ export function createRuntimeState(): SessionRuntimeState {
     hasHydrated: false,
     hydrating: false,
     isRunning: false,
-    resumePending: false,
-    dismissPending: false,
     cancelInitiated: false,
     cancelAcknowledged: false,
     cancelRequestedAt: 0,
@@ -359,6 +491,23 @@ export function createRuntimeState(): SessionRuntimeState {
     pendingPlanInput: null,
     pendingPlanInputError: null,
     currentLlmRuntime: null,
+    activeRunOwner: null,
+    interactionState: { mode: 'normal' },
+    runningInputQueue: [],
+  };
+}
+
+export function removeRunningInputQueueItem(
+  runtime: SessionRuntimeState,
+  itemId: string
+): SessionRuntimeState {
+  const nextQueue = runtime.runningInputQueue.filter((item) => item.id !== itemId);
+  if (nextQueue.length === runtime.runningInputQueue.length) {
+    return runtime;
+  }
+  return {
+    ...runtime,
+    runningInputQueue: nextQueue,
   };
 }
 
@@ -370,11 +519,124 @@ export function createPendingRunRuntimeState(
     ...createRuntimeState(),
     hasHydrated: runtime.hasHydrated,
     ignoredRunIds: runtime.ignoredRunIds,
-    interruptedArtifact: runtime.interruptedArtifact,
+    interruptedArtifact: null,
     isRunning: true,
     runStartedAt: startedAt,
     lastActivityAt: startedAt,
+    activeRunOwner: 'web',
+    interactionState: { mode: 'normal', owner: 'web' },
   };
+}
+
+function parseTimestampMs(value: unknown): number {
+  const parsed = Date.parse(String(value ?? ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function finiteNonNegativeInteger(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+export function resolveActiveRunForHydration(
+  runtime: Pick<SessionRuntimeState, 'ignoredRunIds'>,
+  activeRun: ActiveRunView | null | undefined
+): ActiveRunView | null {
+  if (!activeRun) {
+    return null;
+  }
+  return runtime.ignoredRunIds.includes(activeRun.runId) ? null : activeRun;
+}
+
+export function shouldPreserveCurrentRunForIgnoredActiveRunHydration(input: {
+  runtime: Pick<SessionRuntimeState, 'isRunning' | 'runId'>;
+  rawActiveRun: ActiveRunView | null | undefined;
+  activeRunForHydration: ActiveRunView | null | undefined;
+  pendingPlanInput?: unknown | null;
+}): boolean {
+  return Boolean(
+    input.rawActiveRun &&
+      !input.activeRunForHydration &&
+      !input.pendingPlanInput &&
+      input.runtime.isRunning &&
+      input.runtime.runId &&
+      input.runtime.runId !== input.rawActiveRun.runId
+  );
+}
+
+export function hydrateRuntimeFromActiveRun(input: {
+  runtime: SessionRuntimeState;
+  activeRun: ActiveRunView;
+  interactionState?: SessionInteractionStateView | null;
+  now?: number;
+}): SessionRuntimeState {
+  if (input.runtime.ignoredRunIds.includes(input.activeRun.runId)) {
+    return {
+      ...input.runtime,
+      hasHydrated: true,
+      hydrating: false,
+    };
+  }
+  const now = input.now ?? Date.now();
+  const startedAtMs = parseTimestampMs(input.activeRun.startedAt);
+  const activeLastActivityAtMs = parseTimestampMs(input.activeRun.lastActivityAt);
+  const sameRunCurrentActivity =
+    input.runtime.runId === input.activeRun.runId && input.runtime.lastActivityAt > 0
+      ? input.runtime.lastActivityAt
+      : 0;
+  const staleSameRunHydration =
+    sameRunCurrentActivity > 0 &&
+    activeLastActivityAtMs > 0 &&
+    sameRunCurrentActivity > activeLastActivityAtMs;
+  const runStartedAt = startedAtMs || input.runtime.runStartedAt || now;
+  const lastActivityAt = Math.max(
+    activeLastActivityAtMs,
+    sameRunCurrentActivity,
+    runStartedAt,
+    now && !activeLastActivityAtMs && !sameRunCurrentActivity && !runStartedAt ? now : 0
+  );
+  return {
+    ...input.runtime,
+    hasHydrated: true,
+    hydrating: false,
+    runId: input.activeRun.runId,
+    isRunning: true,
+    runStartedAt,
+    lastActivityAt,
+    currentStep: staleSameRunHydration
+      ? input.runtime.currentStep
+      : finiteNonNegativeInteger(input.activeRun.currentStep, input.runtime.currentStep),
+    maxSteps: staleSameRunHydration
+      ? input.runtime.maxSteps
+      : finiteNonNegativeInteger(input.activeRun.maxSteps, input.runtime.maxSteps),
+    currentLlmRuntime: input.activeRun.llmRuntime ?? input.runtime.currentLlmRuntime,
+    activeRunOwner: input.activeRun.owner ?? null,
+    interactionState: input.activeRun.interactionState ?? input.interactionState ?? { mode: 'normal' },
+    runningInputQueue: input.activeRun.runningInputQueue ?? input.runtime.runningInputQueue,
+    interruptedArtifact: null,
+    lastTerminalState: null,
+  };
+}
+
+export function resolveInterruptedArtifactForHydration(input: {
+  interruptedArtifact: InterruptedArtifactView | null | undefined;
+  currentRuntime: Pick<SessionRuntimeState, 'isRunning' | 'runId'> | null | undefined;
+  activeRun?: ActiveRunView | null;
+  pendingPlanInput?: unknown | null;
+}): InterruptedArtifactView | null {
+  const artifact = input.interruptedArtifact ?? null;
+  if (!artifact) {
+    return null;
+  }
+  if (input.activeRun || input.pendingPlanInput) {
+    return null;
+  }
+  if (input.currentRuntime?.isRunning || input.currentRuntime?.runId) {
+    return null;
+  }
+  return artifact;
 }
 
 function runtimeErrorMessage(error: unknown, fallback: string): string {
@@ -398,7 +660,7 @@ export function finishRuntimeHydrationAfterLoadFailure(
 
 export function isRuntimeInteractionLocked(
   runtime:
-    | (Pick<SessionRuntimeState, 'hydrating' | 'isRunning' | 'resumePending' | 'dismissPending'> &
+    | (Pick<SessionRuntimeState, 'hydrating' | 'isRunning'> &
         Partial<Pick<SessionRuntimeState, 'cancelInitiated' | 'cancelAcknowledged'>>)
     | null
     | undefined
@@ -409,24 +671,66 @@ export function isRuntimeInteractionLocked(
   return (
     runtime.hydrating === true ||
     runtime.isRunning === true ||
-    runtime.resumePending === true ||
-    runtime.dismissPending === true ||
     (runtime.cancelInitiated === true && runtime.cancelAcknowledged !== true)
   );
 }
 
+export interface RuntimeInteractionLockDiagnostic {
+  sessionId: string;
+  reason: 'hydrating' | 'running' | 'canceling' | 'observe_only';
+  runId: string | null;
+  isRunning: boolean;
+  hydrating: boolean;
+  cancelInitiated: boolean;
+  cancelAcknowledged: boolean;
+  observeOnly: boolean;
+  lastActivityAt?: string;
+}
+
+function timestampMsToIso(value: number | undefined): string | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return new Date(value).toISOString();
+}
+
+export function buildRuntimeInteractionLockDiagnostic(input: {
+  sessionId: string;
+  runtime: SessionRuntimeState;
+}): RuntimeInteractionLockDiagnostic | null {
+  const observeOnly = input.runtime.interactionState.mode === 'observe_only';
+  if (!isRuntimeInteractionLocked(input.runtime) && !observeOnly) {
+    return null;
+  }
+  const reason: RuntimeInteractionLockDiagnostic['reason'] = observeOnly
+    ? 'observe_only'
+    : input.runtime.hydrating
+      ? 'hydrating'
+      : input.runtime.cancelInitiated && input.runtime.cancelAcknowledged !== true
+        ? 'canceling'
+        : 'running';
+  return {
+    sessionId: input.sessionId,
+    reason,
+    runId: input.runtime.runId,
+    isRunning: input.runtime.isRunning,
+    hydrating: input.runtime.hydrating,
+    cancelInitiated: input.runtime.cancelInitiated,
+    cancelAcknowledged: input.runtime.cancelAcknowledged,
+    observeOnly,
+    lastActivityAt: timestampMsToIso(input.runtime.lastActivityAt),
+  };
+}
+
 export function isRuntimeLlmSelectionLocked(
   runtime:
-    | (Pick<SessionRuntimeState, 'hydrating' | 'isRunning' | 'resumePending' | 'dismissPending'> &
+    | (Pick<SessionRuntimeState, 'hydrating' | 'isRunning'> &
         Partial<Pick<SessionRuntimeState, 'cancelInitiated' | 'cancelAcknowledged'>>)
     | null
     | undefined
 ): boolean {
   return (
     runtime?.hydrating === true ||
-    runtime?.isRunning === true ||
-    runtime?.resumePending === true ||
-    runtime?.dismissPending === true ||
     (runtime?.cancelInitiated === true && runtime.cancelAcknowledged !== true)
   );
 }
@@ -508,10 +812,34 @@ export function shouldApplyRunTerminalEvent(runtime: SessionRuntimeState, runId:
   if (runtime.runId === normalizedRunId) {
     return true;
   }
+  if (runtime.runId && runtime.runId !== normalizedRunId) {
+    return false;
+  }
   if (runtime.ignoredRunIds.includes(normalizedRunId)) {
     return true;
   }
   return false;
+}
+
+export function createRunErrorTranscriptMessage(input: {
+  runId: string;
+  message: string;
+  createdAt?: string;
+  timestamp?: number;
+  id?: string;
+}): Message {
+  const createdAt = input.createdAt ?? new Date(input.timestamp ?? Date.now()).toISOString();
+  const parsedTimestamp = Date.parse(createdAt);
+  return {
+    id: input.id ?? `run-error-${input.runId}`,
+    role: 'system',
+    content: input.message,
+    timestamp: Number.isFinite(parsedTimestamp) ? parsedTimestamp : input.timestamp ?? Date.now(),
+    metadata: {
+      runtimeEvent: 'run_error',
+      runId: input.runId,
+    },
+  };
 }
 
 export function observeRunEvent(
@@ -523,8 +851,6 @@ export function observeRunEvent(
     ...runtime,
     runId,
     isRunning: true,
-    resumePending: false,
-    dismissPending: false,
     runStartedAt: runtime.runStartedAt || timestamp,
     lastActivityAt: timestamp,
   };
@@ -542,8 +868,6 @@ export function finalizeRuntimeAfterComplete(
     runStartedAt: 0,
     lastActivityAt: completedAt,
     isRunning: false,
-    resumePending: false,
-    dismissPending: false,
     cancelInitiated: false,
     cancelAcknowledged: true,
     cancelRequestedAt: 0,
@@ -559,6 +883,39 @@ export function finalizeRuntimeAfterComplete(
     pendingPlanInput: null,
     pendingPlanInputError: null,
     currentLlmRuntime: null,
+    activeRunOwner: null,
+    interactionState: { mode: 'normal' },
+    runningInputQueue: completedRuntime.runningInputQueue,
+  };
+}
+
+export function finalizeRuntimeAfterRecoverableConflictError(
+  runtime: SessionRuntimeState,
+  runId: string,
+  observedAt: number
+): SessionRuntimeState {
+  if (runtime.runId !== runId) {
+    return runtime;
+  }
+  const nextRuntime = addIgnoredRunId(runtime, runId);
+  return {
+    ...nextRuntime,
+    runId: null,
+    runStartedAt: 0,
+    lastActivityAt: observedAt,
+    isRunning: false,
+    cancelInitiated: false,
+    cancelAcknowledged: true,
+    cancelRequestedAt: 0,
+    contextPrecompressActive: false,
+    compressionStatus: null,
+    liveEvents: closeStreamingThinking(nextRuntime.liveEvents),
+    error: null,
+    pendingPlanInput: null,
+    pendingPlanInputError: null,
+    currentLlmRuntime: null,
+    activeRunOwner: null,
+    interactionState: { mode: 'normal' },
   };
 }
 
@@ -572,10 +929,12 @@ export function restorePendingPlanInputPayload(
   return {
     runId: pendingPlanInput.runId,
     requestId: pendingPlanInput.requestId,
+    ...(pendingPlanInput.source ? { source: pendingPlanInput.source } : {}),
     context: {
       scope: 'session',
       namespace: sessionId,
     },
+    ...(pendingPlanInput.planPreview ? { planPreview: pendingPlanInput.planPreview } : {}),
     questions: pendingPlanInput.questions.map((question) => ({
       header: question.header,
       id: question.id,
@@ -830,13 +1189,29 @@ export type MessageMap = Record<string, Message[]>;
 export type RuntimeMap = Record<string, SessionRuntimeState>;
 export type ContextUtilizationMap = Record<
   string,
-  { ratio: number; usedChars: number; limitChars: number; isWarning: boolean; initializing: boolean }
+  {
+    ratio: number;
+    usedChars: number;
+    limitChars: number;
+    usedTokens?: number;
+    limitTokens?: number;
+    source?: 'provider_usage' | 'weighted_char_estimate' | 'calibrated_weighted_estimate';
+    anchorPromptTokens?: number;
+    deltaEstimatedTokens?: number;
+    isWarning: boolean;
+    initializing: boolean;
+  }
 >;
 
 export interface ContextPrecompressUtilizationPayload {
   ratio?: unknown;
   usedChars?: unknown;
   limitChars?: unknown;
+  usedTokens?: unknown;
+  limitTokens?: unknown;
+  source?: unknown;
+  anchorPromptTokens?: unknown;
+  deltaEstimatedTokens?: unknown;
 }
 
 export function contextUtilizationFromPrecompressPayload(
@@ -857,11 +1232,34 @@ export function contextUtilizationFromPrecompressPayload(
   if (limitChars <= 0) {
     return null;
   }
-  const ratio = usedChars / limitChars;
+  const usedTokens =
+    typeof payload.usedTokens === 'number' && Number.isFinite(payload.usedTokens) && payload.usedTokens >= 0
+      ? Math.floor(payload.usedTokens)
+      : undefined;
+  const limitTokens =
+    typeof payload.limitTokens === 'number' && Number.isFinite(payload.limitTokens) && payload.limitTokens > 0
+      ? Math.floor(payload.limitTokens)
+      : undefined;
+  const ratio = usedTokens !== undefined && limitTokens !== undefined ? usedTokens / limitTokens : usedChars / limitChars;
+  const source =
+    payload.source === 'provider_usage' ||
+    payload.source === 'weighted_char_estimate' ||
+    payload.source === 'calibrated_weighted_estimate'
+      ? payload.source
+      : undefined;
   return {
     ratio,
     usedChars,
     limitChars,
+    ...(usedTokens !== undefined ? { usedTokens } : {}),
+    ...(limitTokens !== undefined ? { limitTokens } : {}),
+    ...(source ? { source } : {}),
+    ...(typeof payload.anchorPromptTokens === 'number' && Number.isFinite(payload.anchorPromptTokens)
+      ? { anchorPromptTokens: Math.floor(payload.anchorPromptTokens) }
+      : {}),
+    ...(typeof payload.deltaEstimatedTokens === 'number' && Number.isFinite(payload.deltaEstimatedTokens)
+      ? { deltaEstimatedTokens: Math.floor(payload.deltaEstimatedTokens) }
+      : {}),
     isWarning: ratio >= 0.8,
     initializing: false,
   };

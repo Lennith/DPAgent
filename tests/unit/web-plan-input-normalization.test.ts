@@ -123,6 +123,31 @@ function testOptionQuestionAllowsFreeTextFallback(): void {
   });
 }
 
+function testCustomAnswerOverridesStaleSelectedOption(): void {
+  const result = normalizePlanInputAnswers(
+    [
+      {
+        id: 'mode',
+        selectedIndex: 0,
+        selectedLabel: '',
+        freeText: 'Use the custom answer instead of the previous radio option',
+      },
+      { id: 'notes', freeText: 'Need signoff' },
+    ],
+    createRequest()
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    throw new Error(result.error);
+  }
+  assert.deepEqual(result.answers[0], {
+    id: 'mode',
+    selectedLabel: '',
+    selectedIndex: -1,
+    freeText: 'Use the custom answer instead of the previous radio option',
+  });
+}
+
 function testOptionQuestionRequiresSelectionOrFreeText(): void {
   const result = normalizePlanInputAnswers(
     [
@@ -169,6 +194,7 @@ function runAll(): void {
   testUnknownQuestionRejected();
   testSelectedLabelBackfillsCanonicalOptionAndOrder();
   testOptionQuestionAllowsFreeTextFallback();
+  testCustomAnswerOverridesStaleSelectedOption();
   testOptionQuestionRequiresSelectionOrFreeText();
   testFreeTextQuestionRequiresFreeText();
   testMissingAnswerRejectedAfterNormalization();

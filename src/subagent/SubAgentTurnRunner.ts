@@ -1,15 +1,20 @@
 import { Agent } from '../agent/index.js';
-import { buildAgentProfileBlock } from '../agents/index.js';
+import { buildAgentProfileBlock } from '../agents/AgentProfiles.js';
 import { ContextManager } from '../context/index.js';
+import { LLMClient } from '../llm/index.js';
 import { ToolRegistry } from '../tools/index.js';
+import { filterSubAgentToolRegistry } from '../tools/CapabilityCatalog.js';
 import type { LLMRuntime } from '../llm/index.js';
+import { resolveLlmRuntimeConfig, resolveModelRuntimeBudgetOptions } from '../llm/provider-profiles.js';
 import type {
   SubAgentProviderConfig,
   Message,
 } from '../types.js';
+import { resolveContextBudget } from '../runtime/context-window-budget.js';
+import { ContextUsageCalibrationStore } from '../runtime/context-usage-calibration-store.js';
+import { TimerScope } from '../runtime/async-primitives.js';
 import type { SubAgentExecutionOutput, SubAgentQueuedTask } from './types.js';
-
-const DEFAULT_TASK_TIMEOUT_MS = 300000;
+import { DEFAULT_TASK_TIMEOUT_MS } from './subagent-manager-contracts.js';
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -23,7 +28,7 @@ function truncate(value: string, maxChars: number): string {
 }
 
 export interface SubAgentProgressUpdate {
-  type: 'step' | 'thinking' | 'tool_call' | 'tool_result' | 'message' | 'heartbeat' | 'timeout_warning' | 'timeout_force';
+  type: 'step' | 'thinking' | 'tool_call' | 'tool_result' | 'message' | 'heartbeat' | 'timeout_warning';
   step?: number;
   maxSteps?: number;
   thinking?: string;
@@ -35,7 +40,7 @@ export interface SubAgentProgressUpdate {
   timestamp: string;
   elapsedMs: number;
   timeoutWarning?: {
-    threshold: number; // 0.8 or 0.95
+    threshold: number;
     elapsedMs: number;
     message: string;
   };
@@ -50,13 +55,9 @@ export interface SubAgentTurnRunnerOptions {
   getMcpToolDescriptions: () => string;
   getMaxSteps: () => number;
   getTokenLimit: () => number;
-  getContextWindowChars?: () => number | undefined;
-  getContextPrecompressTriggerRatio?: () => number | undefined;
-  getContextOverflowForcedTrimChars?: () => number | undefined;
   getContextOverflowMaxErrorsBeforeTrim?: () => number | undefined;
-  getContextPrecompressKeepLlmRounds?: () => number | undefined;
-  getContextPrecompressChunkChars?: () => number | undefined;
-  getContextPrecompressRetry?: () => number | undefined;
+  getContextUsageCalibrationStore?: () => ContextUsageCalibrationStore | undefined;
+  getConfig: () => import('../types.js').AgentConfig;
   getDefaultWorkspaceDir: () => string;
   getProviderConfigs: () => SubAgentProviderConfig[] | undefined;
   onProgress?: (update: SubAgentProgressUpdate) => void;
@@ -79,7 +80,10 @@ export class SubAgentTurnRunner {
     return true;
   }
 
-  async runTask(task: SubAgentQueuedTask, onHeartbeat?: () => void): Promise<SubAgentExecutionOutput> {
+  async runTask(
+    task: SubAgentQueuedTask,
+    onProgress?: (update: SubAgentProgressUpdate) => void
+  ): Promise<SubAgentExecutionOutput> {
     const startedAt = nowIso();
     let provider: SubAgentProviderConfig;
     try {
@@ -106,7 +110,7 @@ export class SubAgentTurnRunner {
       };
     }
 
-    const llmClient = this.options.getLLMClient();
+    const llmClient = this.resolveTaskLlmClient(task);
     if (!llmClient) {
       return {
         status: 'failed',
@@ -152,30 +156,36 @@ export class SubAgentTurnRunner {
     const emitProgress = (update: Omit<SubAgentProgressUpdate, 'timestamp' | 'elapsedMs'>): void => {
       const elapsedMs = Date.now() - startTime;
       try {
-        this.options.onProgress?.({
+        const progressUpdate = {
           ...update,
           timestamp: nowIso(),
           elapsedMs,
-        });
-        onHeartbeat?.();
+        };
+        this.options.onProgress?.(progressUpdate);
+        onProgress?.(progressUpdate);
       } catch {
         // ignore progress callback failures
       }
     };
 
-    const agent = new Agent({
-      llmClient,
-      toolRegistry,
-      systemPrompt: mergedSystemPrompt,
-      maxSteps: this.options.getMaxSteps(),
+    const runtimeConfig = llmClient.getRuntimeConfig?.();
+    const subBudget = resolveContextBudget({
+      config: this.options.getConfig(),
+      profileId: runtimeConfig?.profileId,
+      provider: runtimeConfig?.provider ?? 'anthropic',
+      model: runtimeConfig?.model ?? 'unknown',
+      modelRuntimeOptions: resolveModelRuntimeBudgetOptions(runtimeConfig),
+    });
+
+      const agent = new Agent({
+        llmClient,
+        toolRegistry,
+        systemPrompt: mergedSystemPrompt,
+        maxSteps: this.options.getMaxSteps(),
       tokenLimit: this.options.getTokenLimit(),
-      contextWindowChars: this.options.getContextWindowChars?.(),
-      contextPrecompressTriggerRatio: this.options.getContextPrecompressTriggerRatio?.(),
-      contextOverflowForcedTrimChars: this.options.getContextOverflowForcedTrimChars?.(),
+      contextBudget: subBudget,
       contextOverflowMaxErrorsBeforeTrim: this.options.getContextOverflowMaxErrorsBeforeTrim?.(),
-      contextPrecompressKeepLlmRounds: this.options.getContextPrecompressKeepLlmRounds?.(),
-      contextPrecompressChunkChars: this.options.getContextPrecompressChunkChars?.(),
-      contextPrecompressRetry: this.options.getContextPrecompressRetry?.(),
+      contextUsageCalibrationStore: this.options.getContextUsageCalibrationStore?.(),
       workspaceDir: task.workspaceDir ?? this.options.getDefaultWorkspaceDir(),
       callback: {
         onThinking: (thinking) => emitProgress({ type: 'thinking', thinking }),
@@ -191,47 +201,22 @@ export class SubAgentTurnRunner {
     this.runningAgents.set(task.taskId, agent);
     emitProgress({ type: 'heartbeat' });
 
-    // REQ-0002: Timeout watchdog with escalation - early warnings at 30s/60s + percentage-based
+    // Timeout watchdog: warn before and at the advisory task deadline. Explicit cancel is the only interrupt path.
     const TIMEOUT_WARNING_THRESHOLD = 0.8;
-    const TIMEOUT_FORCE_THRESHOLD = 0.95;
     const ABSOLUTE_WARNING_30S = 30000;
     const ABSOLUTE_WARNING_60S = 60000;
-    const taskTimeoutMs = provider.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
+    const taskTimeoutMs = task.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
     const warningThresholdMs = Math.floor(taskTimeoutMs * TIMEOUT_WARNING_THRESHOLD);
-    const forceThresholdMs = Math.floor(taskTimeoutMs * TIMEOUT_FORCE_THRESHOLD);
 
-    let watchdogTimer: NodeJS.Timeout | null = null;
-    let forceResolveTimer: NodeJS.Timeout | null = null;
-    let earlyWarning30sTimer: NodeJS.Timeout | null = null;
-    let earlyWarning60sTimer: NodeJS.Timeout | null = null;
-    let isForceResolved = false;
-    let forceResolveReason: string | undefined;
+    const watchdogs = new TimerScope();
     let hasEmitted30sWarning = false;
     let hasEmitted60sWarning = false;
-
-    const clearWatchdogs = (): void => {
-      if (watchdogTimer) {
-        clearTimeout(watchdogTimer);
-        watchdogTimer = null;
-      }
-      if (forceResolveTimer) {
-        clearTimeout(forceResolveTimer);
-        forceResolveTimer = null;
-      }
-      if (earlyWarning30sTimer) {
-        clearTimeout(earlyWarning30sTimer);
-        earlyWarning30sTimer = null;
-      }
-      if (earlyWarning60sTimer) {
-        clearTimeout(earlyWarning60sTimer);
-        earlyWarning60sTimer = null;
-      }
-    };
+    let hasEmittedDeadlineWarning = false;
 
     const setupWatchdogs = (): void => {
       // REQ-0002: Early warning at 30s (only if task timeout > 30s)
       if (taskTimeoutMs > ABSOLUTE_WARNING_30S) {
-        earlyWarning30sTimer = setTimeout(() => {
+        watchdogs.setTimeout(() => {
           if (!hasEmitted30sWarning) {
             hasEmitted30sWarning = true;
             emitProgress({
@@ -248,7 +233,7 @@ export class SubAgentTurnRunner {
 
       // REQ-0002: Early warning at 60s (only if task timeout > 60s)
       if (taskTimeoutMs > ABSOLUTE_WARNING_60S) {
-        earlyWarning60sTimer = setTimeout(() => {
+        watchdogs.setTimeout(() => {
           if (!hasEmitted60sWarning) {
             hasEmitted60sWarning = true;
             emitProgress({
@@ -264,7 +249,7 @@ export class SubAgentTurnRunner {
       }
 
       // Warning at percentage-based threshold (80%)
-      watchdogTimer = setTimeout(() => {
+      watchdogs.setTimeout(() => {
         const elapsedMs = Date.now() - startTime;
         emitProgress({
           type: 'timeout_warning',
@@ -274,23 +259,6 @@ export class SubAgentTurnRunner {
             message: `Sub-agent approaching timeout (${elapsedMs}ms / ${taskTimeoutMs}ms). Consider completing soon.`,
           },
         });
-        // Schedule force-resolve at 95%
-        forceResolveTimer = setTimeout(() => {
-          const elapsedMs2 = Date.now() - startTime;
-          if (!isForceResolved) {
-            isForceResolved = true;
-            forceResolveReason = `timeout_force: exceeded ${TIMEOUT_FORCE_THRESHOLD * 100}% of ${taskTimeoutMs}ms limit`;
-            emitProgress({
-              type: 'timeout_force',
-              timeoutWarning: {
-                threshold: TIMEOUT_FORCE_THRESHOLD,
-                elapsedMs: elapsedMs2,
-                message: forceResolveReason,
-              },
-            });
-            agent.cancel();
-          }
-        }, forceThresholdMs - warningThresholdMs);
       }, warningThresholdMs);
     };
 
@@ -302,7 +270,25 @@ export class SubAgentTurnRunner {
     let runError: string | undefined;
 
     try {
-      const result = await agent.runWithResult(task.prompt, turn.turnId);
+      const runPromise = agent.runWithResult(task.prompt, turn.turnId);
+      watchdogs.setTimeout(() => {
+        if (hasEmittedDeadlineWarning) {
+          return;
+        }
+        hasEmittedDeadlineWarning = true;
+        const elapsedMs = Date.now() - startTime;
+        emitProgress({
+          type: 'timeout_warning',
+          timeoutWarning: {
+            threshold: 1,
+            elapsedMs,
+            message:
+              `Sub-agent exceeded expected timeout (${elapsedMs}ms / ${taskTimeoutMs}ms). ` +
+              'It remains running until it finishes or is explicitly canceled.',
+          },
+        });
+      }, taskTimeoutMs);
+      const result = await runPromise;
       finishReason = result.finishReason;
       usage = result.usage
         ? {
@@ -315,7 +301,7 @@ export class SubAgentTurnRunner {
     } catch (error) {
       runError = error instanceof Error ? error.message : String(error);
     } finally {
-      clearWatchdogs();
+      watchdogs.clearAll();
       this.runningAgents.delete(task.taskId);
     }
 
@@ -339,19 +325,6 @@ export class SubAgentTurnRunner {
         artifacts,
         error: runError,
         finishReason,
-        usage,
-        startedAt,
-        completedAt,
-      };
-    }
-    // REQ-0002: Handle timeout force-resolve
-    if (isForceResolved) {
-      return {
-        status: 'timeout',
-        summary: `Sub-agent force-resolved: ${forceResolveReason ?? 'timeout'}. Partial result: ${truncate(content || '(no content)', 280)}`,
-        artifacts,
-        error: forceResolveReason,
-        finishReason: 'timeout',
         usage,
         startedAt,
         completedAt,
@@ -385,7 +358,7 @@ export class SubAgentTurnRunner {
       id: 'local-default',
       type: 'local',
       enabled: true,
-      timeoutMs: 300000,
+      timeoutMs: DEFAULT_TASK_TIMEOUT_MS,
     };
     if (!providerId) {
       return fallback;
@@ -395,6 +368,26 @@ export class SubAgentTurnRunner {
       throw new Error(`provider_unavailable:${providerId}`);
     }
     return matched;
+  }
+
+  private resolveTaskLlmClient(task: SubAgentQueuedTask): LLMRuntime | null {
+    const agentConfig = task.agentConfig;
+    if (!agentConfig?.llmProfileId && !agentConfig?.llmModel && !agentConfig?.reasoningPreset) {
+      return this.options.getLLMClient();
+    }
+    const runtime = resolveLlmRuntimeConfig(this.options.getConfig(), {
+      profileId: agentConfig.llmProfileId,
+      model: agentConfig.llmModel,
+      reasoningPreset: agentConfig.reasoningPreset,
+    });
+    return new LLMClient({
+      provider: runtime.provider,
+      apiKey: runtime.apiKey,
+      apiBase: runtime.apiBase,
+      model: runtime.model,
+      maxTokens: runtime.maxOutputTokens,
+      llmRuntime: runtime,
+    });
   }
 
   private resolveSubAgentAgentPrompt(task: SubAgentQueuedTask): string {
@@ -422,25 +415,7 @@ export class SubAgentTurnRunner {
   }
 
   private filterAllowedTools(sourceRegistry: ToolRegistry, allowedTools?: string[]): ToolRegistry {
-    const normalizedAllowSet = allowedTools
-      ? new Set(allowedTools.map((name) => name.trim().toLowerCase()).filter((name) => name.length > 0))
-      : null;
-    const registry = new ToolRegistry();
-    for (const tool of sourceRegistry.getAll()) {
-      const normalizedName = tool.name.trim().toLowerCase();
-      if (
-        normalizedName === 'context_manage' ||
-        normalizedName === 'subagent_manage' ||
-        normalizedName === 'todo'
-      ) {
-        continue;
-      }
-      if (normalizedAllowSet && !normalizedAllowSet.has(normalizedName)) {
-        continue;
-      }
-      registry.register(tool);
-    }
-    return registry;
+    return filterSubAgentToolRegistry(sourceRegistry, allowedTools);
   }
 
   private extractArtifacts(messages: Message[]): SubAgentExecutionOutput['artifacts'] {

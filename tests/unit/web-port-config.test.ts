@@ -12,9 +12,9 @@ async function testResolveWebServerPortHonorsValidOverride(): Promise<void> {
 }
 
 async function testResolveWebServerPortRejectsInvalidOverride(): Promise<void> {
-  assert.throws(() => resolveWebServerPort('not-a-number'), /Invalid MINIMAX_PORT/);
-  assert.throws(() => resolveWebServerPort('70000'), /Invalid MINIMAX_PORT/);
-  assert.throws(() => resolveWebServerPort('123abc'), /Invalid MINIMAX_PORT/);
+  assert.throws(() => resolveWebServerPort('not-a-number'), /Invalid DPAGENT_PORT/);
+  assert.throws(() => resolveWebServerPort('70000'), /Invalid DPAGENT_PORT/);
+  assert.throws(() => resolveWebServerPort('123abc'), /Invalid DPAGENT_PORT/);
 }
 
 async function runAll(): Promise<void> {

@@ -1,8 +1,8 @@
 import type {
   MemoryEntry,
   MemoryScope,
-  MemoryStore,
-} from '../memory/index.js';
+} from '../memory/memory-store-contracts.js';
+import type { MemoryStore } from '../memory/MemoryStore.js';
 import { Tool, errorResult, successResult } from './Tool.js';
 
 export interface MemoryToolOptions {
@@ -51,7 +51,7 @@ export class MemoryTool extends Tool {
   }
 
   get description(): string {
-    return 'Manage durable workspace/user memory. Use add only for stable preferences, workspace conventions, validated commands, or long-lived facts worth carrying across sessions; do not store raw logs, temporary workarounds, one-off outputs, or details already captured in current structured context. Inspect current structured context via context_manage, and use session_search separately for raw prior-session transcript recall. scope selects the write target for add/replace/remove; list/read/history currently inspect combined workspace+user durable memory when a workspace is active, so scope is not a strict inspection filter.';
+    return 'Manage durable workspace/user memory. Store only stable preferences, reusable facts, workspace conventions, or validated commands, not raw logs, transcripts, temporary workarounds, temporary task state, one-off outputs, tool output, or details already captured in structured context. Keep each entry concise and standalone; split unrelated facts into separate entries, replace existing entries instead of duplicating them, use context_manage for current structured context, and remember scope selects the write target but is not a strict inspection filter.';
   }
 
   get parameters(): Record<string, unknown> {
@@ -78,7 +78,7 @@ export class MemoryTool extends Tool {
         },
         content: {
           type: 'string',
-          description: 'Memory content for add or replace.',
+          description: 'Memory content for add or replace; summarize long sources and never store truncation markers.',
         },
         reason: {
           type: 'string',

@@ -19,11 +19,45 @@ function createRequest(): PlanInputRequest {
   };
 }
 
+function createFinalizePlanApprovalRequest(): PlanInputRequest & { planPreview: unknown } {
+  return {
+    ...createRequest(),
+    source: 'finalize_plan_approval',
+    planPreview: {
+      planId: 'plan-1',
+      title: 'Rendered Plan',
+      summary: 'Show the final plan before approval.',
+      markdown: '### Rendered Plan\n\n### Summary\nShow the final plan before approval.',
+      steps: [
+        {
+          planStepId: 'step-001',
+          work: 'Render the finalized plan.',
+          detectionStandard: 'The approval card displays plan content.',
+          priority: 'high',
+          tags: ['ui'],
+        },
+      ],
+      testPlan: ['Render approval card'],
+      assumptions: ['Use existing plan mode flow'],
+      notes: '',
+    },
+  };
+}
+
+function withoutCreatedAt(message: ReturnType<ReturnType<typeof createCallbackEventMessageFactory>['message']>) {
+  const data = { ...(message.data as Record<string, unknown>) };
+  delete data.createdAt;
+  return {
+    ...message,
+    data,
+  };
+}
+
 function testSimpleRunScopedMessagesReuseEnvelope(): void {
   const context: ContextRef = { scope: 'session', namespace: 'sess-1' };
   const factory = createCallbackEventMessageFactory({ runId: 'run-1', context });
 
-  assert.deepEqual(factory.thinking('plan first'), {
+  assert.deepEqual(withoutCreatedAt(factory.thinking('plan first')), {
     type: 'thinking',
     data: {
       runId: 'run-1',
@@ -32,7 +66,7 @@ function testSimpleRunScopedMessagesReuseEnvelope(): void {
     },
   });
 
-  assert.deepEqual(factory.toolCall('request_user_input', { questions: 1 }), {
+  assert.deepEqual(withoutCreatedAt(factory.toolCall('request_user_input', { questions: 1 })), {
     type: 'tool_call',
     data: {
       runId: 'run-1',
@@ -42,7 +76,7 @@ function testSimpleRunScopedMessagesReuseEnvelope(): void {
     },
   });
 
-  assert.deepEqual(factory.toolResult('request_user_input', { success: true, content: 'done' }), {
+  assert.deepEqual(withoutCreatedAt(factory.toolResult('request_user_input', { success: true, content: 'done' })), {
     type: 'tool_result',
     data: {
       runId: 'run-1',
@@ -95,6 +129,24 @@ function testSimpleRunScopedMessagesReuseEnvelope(): void {
   });
 }
 
+function testStreamingMessagesExposeServerCreatedAt(): void {
+  const context: ContextRef = { scope: 'session', namespace: 'sess-1' };
+  const factory = createCallbackEventMessageFactory({ runId: 'run-1', context });
+  const messageTypes = [
+    factory.thinking('plan first'),
+    factory.toolCall('read_file', { path: 'README.md' }, 'tool-1'),
+    factory.toolResult('read_file', { success: true, content: 'ok' }),
+    factory.message('assistant', 'hello'),
+    factory.complete('done'),
+  ];
+
+  for (const message of messageTypes) {
+    const data = message.data as { createdAt?: string };
+    assert.equal(typeof data.createdAt, 'string');
+    assert.ok(Number.isFinite(Date.parse(data.createdAt ?? '')));
+  }
+}
+
 function testContextMessagesPreserveProtocolFields(): void {
   const context: ContextRef = { scope: 'session', namespace: 'sess-1' };
   const factory = createCallbackEventMessageFactory({ runId: 'run-1', context });
@@ -105,6 +157,8 @@ function testContextMessagesPreserveProtocolFields(): void {
       ratio: 0.85,
       usedChars: 3400,
       limitChars: 4000,
+      usedTokens: 1700,
+      limitTokens: 2000,
       triggerRatio: 0.8,
       isWarning: true,
       message: 'Context approaching capacity - compression triggered',
@@ -119,6 +173,8 @@ function testContextMessagesPreserveProtocolFields(): void {
         utilizationRatio: 0.85,
         usedChars: 3400,
         limitChars: 4000,
+        usedTokens: 1700,
+        limitTokens: 2000,
         triggerRatio: 0.8,
         isWarning: true,
         message: 'Context approaching capacity - compression triggered',
@@ -133,10 +189,13 @@ function testContextMessagesPreserveProtocolFields(): void {
       ratio: 0.82,
       usedChars: 3280,
       limitChars: 4000,
+      usedTokens: 1640,
+      limitTokens: 2000,
       checkpointId: null,
       failureReason: 'compress_timeout',
       willRetriggerNextTurn: false,
       providerPayloadCharsAfter: 3200,
+      providerPayloadTokensAfter: 1600,
     }),
     {
       type: 'context_precompress',
@@ -148,10 +207,13 @@ function testContextMessagesPreserveProtocolFields(): void {
         ratio: 0.82,
         usedChars: 3280,
         limitChars: 4000,
+        usedTokens: 1640,
+        limitTokens: 2000,
         checkpointId: null,
         failureReason: 'compress_timeout',
         willRetriggerNextTurn: false,
         providerPayloadCharsAfter: 3200,
+        providerPayloadTokensAfter: 1600,
       },
     }
   );
@@ -162,6 +224,8 @@ function testContextMessagesPreserveProtocolFields(): void {
       error: 'max_tokens',
       stage: 'overflow_detected',
       checkpointId: 'snap-1',
+      usedTokens: 1950,
+      limitTokens: 2000,
     }),
     {
       type: 'context_overflow',
@@ -172,6 +236,8 @@ function testContextMessagesPreserveProtocolFields(): void {
         error: 'max_tokens',
         stage: 'overflow_detected',
         checkpointId: 'snap-1',
+        usedTokens: 1950,
+        limitTokens: 2000,
       },
     }
   );
@@ -191,7 +257,20 @@ function testPlanInputAndCompletionMessagesPreserveSpecialFields(): void {
     },
   });
 
-  assert.deepEqual(sessionFactory.complete('done'), {
+  const approvalRequest = createFinalizePlanApprovalRequest();
+  assert.deepEqual(sessionFactory.planInputRequested(approvalRequest), {
+    type: 'plan_input_requested',
+    data: {
+      runId: 'run-1',
+      context: sessionContext,
+      requestId: 'req-1',
+      source: 'finalize_plan_approval',
+      questions: approvalRequest.questions,
+      planPreview: approvalRequest.planPreview,
+    },
+  });
+
+  assert.deepEqual(withoutCreatedAt(sessionFactory.complete('done')), {
     type: 'complete',
     data: {
       runId: 'run-1',
@@ -204,7 +283,7 @@ function testPlanInputAndCompletionMessagesPreserveSpecialFields(): void {
 
   const workspaceContext: ContextRef = { scope: 'workspace', namespace: 'repo' };
   const workspaceFactory = createCallbackEventMessageFactory({ runId: 'run-2', context: workspaceContext });
-  assert.deepEqual(workspaceFactory.complete('done'), {
+  assert.deepEqual(withoutCreatedAt(workspaceFactory.complete('done')), {
     type: 'complete',
     data: {
       runId: 'run-2',
@@ -222,7 +301,6 @@ function testPlanInputAndCompletionMessagesPreserveSpecialFields(): void {
         runFamilyId: 'family-1',
         draftId: 'draft-1',
         terminalCode: 'error',
-        resumable: true,
         lastSafeStep: 12,
         maxSteps: 100,
         replayCutoffKind: 'checkpoint',
@@ -237,8 +315,6 @@ function testPlanInputAndCompletionMessagesPreserveSpecialFields(): void {
           runFamilyId: 'family-1',
           terminalCode: 'error',
           replayCutoffKind: 'checkpoint',
-          resumable: true,
-          resumeToken: 'resume-1',
           lastSafeStep: 12,
           maxSteps: 100,
           errorSummary: 'read ECONNRESET',
@@ -257,7 +333,6 @@ function testPlanInputAndCompletionMessagesPreserveSpecialFields(): void {
         runFamilyId: 'family-1',
         draftId: 'draft-1',
         terminalCode: 'error',
-        resumable: true,
         lastSafeStep: 12,
         maxSteps: 100,
         replayCutoffKind: 'checkpoint',
@@ -272,7 +347,6 @@ function testPlanInputAndCompletionMessagesPreserveSpecialFields(): void {
           runFamilyId: 'family-1',
           terminalCode: 'error',
           replayCutoffKind: 'checkpoint',
-          resumable: true,
           lastSafeStep: 12,
           maxSteps: 100,
           errorSummary: 'read ECONNRESET',
@@ -349,10 +423,30 @@ function testAutoLoopAndChatStartedMessagesKeepRunScope(): void {
       },
     }
   );
+
+  const cliFactory = createCallbackEventMessageFactory({
+    runId: 'run-cli',
+    context,
+    origin: 'cli',
+    owner: 'cli',
+    interactionState: { mode: 'observe_only', reason: 'cli_active_run', owner: 'cli' },
+  });
+  assert.deepEqual(cliFactory.chatStarted('2026-04-05T00:04:00.000Z'), {
+    type: 'chat_started',
+    data: {
+      runId: 'run-cli',
+      context,
+      startedAt: '2026-04-05T00:04:00.000Z',
+      origin: 'cli',
+      owner: 'cli',
+      interactionState: { mode: 'observe_only', reason: 'cli_active_run', owner: 'cli' },
+    },
+  });
 }
 
 function runAll(): void {
   testSimpleRunScopedMessagesReuseEnvelope();
+  testStreamingMessagesExposeServerCreatedAt();
   testContextMessagesPreserveProtocolFields();
   testPlanInputAndCompletionMessagesPreserveSpecialFields();
   testAutoLoopAndChatStartedMessagesKeepRunScope();

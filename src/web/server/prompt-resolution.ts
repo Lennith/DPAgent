@@ -1,15 +1,16 @@
 import {
-  buildPromptWithAgentProfileBootstrap,
   buildPromptWithAgentProfileReference,
   parseLeadingAgentMention,
+  toAgentRuntimeOverrides,
   type AgentProfile,
-} from '../../agents/index.js';
-import type { ContextNamespaceMeta } from '../../types.js';
+} from '../../agents/AgentProfiles.js';
+import type { AgentRuntimeOverrides, ContextNamespaceMeta, SessionPlanningState } from '../../types.js';
 
 export interface PromptResolutionInput {
   prompt: string;
+  fileReferences?: string[];
   selectedAgentName?: string;
-  usePlanMode?: boolean;
+  planningState?: SessionPlanningState;
   currentAgentInjectionState?: ContextNamespaceMeta['agentInjectionState'];
   globalAgentProfilesByName: ReadonlyMap<string, AgentProfile>;
   loadWorkspaceProfile: () => AgentProfile | null;
@@ -17,7 +18,7 @@ export interface PromptResolutionInput {
 }
 
 export interface PromptResolutionInjectedAgent {
-  source: 'workspace' | 'global';
+  source: 'workspace' | 'global' | 'bundled';
   name: string;
   path: string;
 }
@@ -37,6 +38,7 @@ export interface PromptResolutionSuccessResult {
   hasSystemPromptInjection: boolean;
   promptRef?: string;
   activeAgent?: PromptResolutionInjectedAgent;
+  agentRuntimeOverrides?: AgentRuntimeOverrides;
   agentInjectionState: PromptResolutionStateUpdate;
 }
 
@@ -52,10 +54,66 @@ function normalizeAgentName(name: string): string {
 }
 
 function applyPlanMode(prompt: string, input: PromptResolutionInput): string {
-  if (input.usePlanMode !== true) {
+  if (input.planningState !== 'plan_drafting') {
     return prompt;
   }
   return `${input.planModePromptPrefix}\n\n${prompt}`;
+}
+
+function escapeXmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function normalizeFileReferences(references: readonly string[] | undefined): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const reference of references ?? []) {
+    const trimmed = String(reference ?? '').trim();
+    if (!trimmed) {
+      continue;
+    }
+    const dedupeKey = /^[A-Za-z]:[\\/]/.test(trimmed) || /^\\\\/.test(trimmed)
+      ? trimmed.toLowerCase()
+      : trimmed;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+export function buildFileReferencesPromptBlock(references: readonly string[] | undefined): string {
+  const normalized = normalizeFileReferences(references);
+  if (normalized.length === 0) {
+    return '';
+  }
+  return [
+    '<refs_file_for_this_turn>',
+    ...normalized.map((reference) => `  <file path="${escapeXmlAttribute(reference)}" />`),
+    '</refs_file_for_this_turn>',
+  ].join('\n');
+}
+
+function applyFileReferences(prompt: string, references: readonly string[] | undefined): string {
+  const block = buildFileReferencesPromptBlock(references);
+  if (!block) {
+    return prompt;
+  }
+  return `${block}\n\n${prompt}`;
+}
+
+function isFileReferenceDirectiveMention(mentionName: string | undefined): boolean {
+  return normalizeAgentName(String(mentionName ?? '')) === 'file';
+}
+
+function isPlanDrafting(input: PromptResolutionInput): boolean {
+  return input.planningState === 'plan_drafting';
 }
 
 function encodePromptRefPart(value: string | undefined): string | undefined {
@@ -74,7 +132,7 @@ function buildPromptReference(options: {
     | 'cleared_agent'
     | 'plan_mode'
     | 'system_injection';
-  source?: 'global' | 'workspace' | 'plan_mode' | 'system';
+  source?: 'bundled' | 'global' | 'workspace' | 'plan_mode' | 'system';
   agentName?: string;
   profilePath?: string;
   injectionMode?: PromptResolutionProfileInjectionMode;
@@ -143,7 +201,7 @@ function resolveCurrentActiveAgent(
   if (current.lastProfileSource === 'workspace') {
     return workspaceProfile ? toInjectedAgent(workspaceProfile) : undefined;
   }
-  if (current.lastProfileSource === 'global') {
+  if (current.lastProfileSource === 'global' || current.lastProfileSource === 'bundled') {
     const preferredName = String(current.lastExplicitAgentName ?? current.lastProfileName ?? '').trim();
     const resolvedProfile = preferredName
       ? findGlobalAgentProfile(globalAgentProfilesByName, preferredName)
@@ -155,11 +213,29 @@ function resolveCurrentActiveAgent(
     const path = String(current.lastProfilePath ?? '').trim();
     if (name && path) {
       return {
-        source: 'global',
+        source: current.lastProfileSource,
         name,
         path,
       };
     }
+  }
+  return undefined;
+}
+
+function resolveCurrentActiveAgentProfile(
+  current: ContextNamespaceMeta['agentInjectionState'],
+  globalAgentProfilesByName: ReadonlyMap<string, AgentProfile>,
+  workspaceProfile: AgentProfile | null
+): AgentProfile | undefined {
+  if (!current) {
+    return undefined;
+  }
+  if (current.lastProfileSource === 'workspace') {
+    return workspaceProfile ?? undefined;
+  }
+  if (current.lastProfileSource === 'global' || current.lastProfileSource === 'bundled') {
+    const preferredName = String(current.lastExplicitAgentName ?? current.lastProfileName ?? '').trim();
+    return preferredName ? findGlobalAgentProfile(globalAgentProfilesByName, preferredName) : undefined;
   }
   return undefined;
 }
@@ -183,17 +259,21 @@ function buildResolvedPromptResult(input: {
   profileInjectionMode: PromptResolutionProfileInjectionMode;
   promptRef?: string;
   activeAgent?: PromptResolutionInjectedAgent;
+  agentRuntimeOverrides?: AgentRuntimeOverrides;
   agentInjectionState: PromptResolutionStateUpdate;
+  fileReferences?: readonly string[];
 }): PromptResolutionSuccessResult {
+  const effectiveUserPrompt = applyFileReferences(input.effectiveUserPrompt, input.fileReferences);
   return {
     ok: true,
     displayPrompt: input.displayPrompt,
-    effectiveUserPrompt: input.effectiveUserPrompt,
+    effectiveUserPrompt,
     historyUserPrompt: input.historyUserPrompt,
     profileInjectionMode: input.profileInjectionMode,
-    hasSystemPromptInjection: input.effectiveUserPrompt !== input.displayPrompt,
+    hasSystemPromptInjection: Boolean(input.promptRef) || effectiveUserPrompt !== input.displayPrompt,
     promptRef: input.promptRef,
     activeAgent: input.activeAgent,
+    agentRuntimeOverrides: input.agentRuntimeOverrides,
     agentInjectionState: input.agentInjectionState,
   };
 }
@@ -225,6 +305,11 @@ export function resolvePromptWithProfiles(input: PromptResolutionInput): PromptR
     input.globalAgentProfilesByName,
     workspaceProfile
   );
+  const currentActiveAgentProfile = resolveCurrentActiveAgentProfile(
+    input.currentAgentInjectionState,
+    input.globalAgentProfilesByName,
+    workspaceProfile
+  );
   const currentExplicitAgentName = String(input.currentAgentInjectionState?.lastExplicitAgentName ?? '').trim();
   const selectedAgentName = String(input.selectedAgentName ?? '').trim();
   const planModePrompt = applyPlanMode(trimmedPrompt, input);
@@ -244,7 +329,7 @@ export function resolvePromptWithProfiles(input: PromptResolutionInput): PromptR
     const effectiveUserPrompt =
       profileInjectionMode === 'none'
         ? applyPlanMode(displayPrompt, input)
-        : buildPromptWithAgentProfileBootstrap(planModePrompt, selectedProfile);
+        : planModePrompt;
     const historyUserPrompt =
       profileInjectionMode === 'none'
         ? displayPrompt
@@ -258,26 +343,28 @@ export function resolvePromptWithProfiles(input: PromptResolutionInput): PromptR
         profileInjectionMode !== 'none'
           ? buildPromptReference({
               reason: 'selected_agent',
-              source: 'global',
+              source: selectedProfile.source,
               agentName: selectedProfile.name,
               profilePath: selectedProfile.path,
               injectionMode: profileInjectionMode,
-              planMode: input.usePlanMode === true,
+              planMode: isPlanDrafting(input),
             })
           : effectiveUserPrompt !== displayPrompt
             ? buildPromptReference({
                 reason: 'plan_mode',
                 source: 'plan_mode',
-                planMode: true,
+                planMode: isPlanDrafting(input),
               })
             : undefined,
       activeAgent: selectedAgent,
+      agentRuntimeOverrides: toAgentRuntimeOverrides(selectedProfile),
       agentInjectionState: buildStateUpdate(selectedAgent, selectedProfile.name),
+      fileReferences: input.fileReferences,
     });
   }
 
   const mention = parseLeadingAgentMention(trimmedPrompt);
-  const mentionedProfile = mention.mentionName
+  const mentionedProfile = mention.mentionName && !isFileReferenceDirectiveMention(mention.mentionName)
     ? findGlobalAgentProfile(input.globalAgentProfilesByName, mention.mentionName)
     : undefined;
   const displayPrompt = mentionedProfile ? mention.strippedPrompt.trim() : trimmedPrompt;
@@ -295,7 +382,7 @@ export function resolvePromptWithProfiles(input: PromptResolutionInput): PromptR
     const effectiveUserPrompt =
       profileInjectionMode === 'none'
         ? applyPlanMode(displayPrompt, input)
-        : buildPromptWithAgentProfileBootstrap(applyPlanMode(displayPrompt, input), mentionedProfile);
+        : applyPlanMode(displayPrompt, input);
     const historyUserPrompt =
       profileInjectionMode === 'none'
         ? displayPrompt
@@ -309,90 +396,58 @@ export function resolvePromptWithProfiles(input: PromptResolutionInput): PromptR
         profileInjectionMode !== 'none'
           ? buildPromptReference({
               reason: 'mentioned_agent',
-              source: 'global',
+              source: mentionedProfile.source,
               agentName: mentionedProfile.name,
               profilePath: mentionedProfile.path,
               injectionMode: profileInjectionMode,
-              planMode: input.usePlanMode === true,
+              planMode: isPlanDrafting(input),
             })
           : effectiveUserPrompt !== displayPrompt
             ? buildPromptReference({
                 reason: 'plan_mode',
                 source: 'plan_mode',
-                planMode: true,
+                planMode: isPlanDrafting(input),
               })
             : undefined,
       activeAgent: nextActiveAgent,
+      agentRuntimeOverrides: toAgentRuntimeOverrides(mentionedProfile),
       agentInjectionState: buildStateUpdate(nextActiveAgent, mentionedProfile.name),
+      fileReferences: input.fileReferences,
     });
   }
 
   if (currentExplicitAgentName) {
-    const nextActiveAgent = workspaceProfile ? toInjectedAgent(workspaceProfile) : undefined;
-    const profileInjectionMode =
-      nextActiveAgent && currentActiveAgent && !sameInjectedAgent(currentActiveAgent, nextActiveAgent)
-        ? 'switch'
-        : nextActiveAgent && !currentActiveAgent
-          ? 'initial'
-          : 'none';
-    const effectiveUserPrompt =
-      nextActiveAgent && profileInjectionMode !== 'none'
-        ? buildPromptWithAgentProfileBootstrap(planModePrompt, workspaceProfile as AgentProfile)
-        : planModePrompt;
-    const historyUserPrompt =
-      nextActiveAgent && profileInjectionMode !== 'none'
-        ? buildPromptWithAgentProfileReference(displayPrompt, workspaceProfile as AgentProfile)
-        : displayPrompt;
     return buildResolvedPromptResult({
       displayPrompt,
-      effectiveUserPrompt,
-      historyUserPrompt,
-      profileInjectionMode,
+      effectiveUserPrompt: planModePrompt,
+      historyUserPrompt: displayPrompt,
+      profileInjectionMode: 'none',
       promptRef:
-        nextActiveAgent && profileInjectionMode !== 'none'
+        currentActiveAgent
           ? buildPromptReference({
-              reason: 'workspace_agent',
-              source: 'workspace',
-              agentName: nextActiveAgent.name,
-              profilePath: nextActiveAgent.path,
-              injectionMode: profileInjectionMode,
-              planMode: input.usePlanMode === true,
+              reason: 'cleared_agent',
+              source: currentActiveAgent.source,
+              agentName: currentActiveAgent.name,
+              profilePath: currentActiveAgent.path,
+              planMode: isPlanDrafting(input),
             })
-          : effectiveUserPrompt !== displayPrompt
+          : planModePrompt !== displayPrompt
             ? buildPromptReference({
-                reason: workspaceProfile ? 'cleared_agent' : 'plan_mode',
-                source: workspaceProfile ? 'workspace' : 'plan_mode',
-                planMode: input.usePlanMode === true,
+                reason: 'plan_mode',
+                source: 'plan_mode',
+                planMode: isPlanDrafting(input),
               })
             : undefined,
-      activeAgent: nextActiveAgent,
-      agentInjectionState: buildStateUpdate(nextActiveAgent, undefined),
-    });
-  }
-
-  if (!currentActiveAgent && workspaceProfile) {
-    const nextActiveAgent = toInjectedAgent(workspaceProfile);
-    return buildResolvedPromptResult({
-      displayPrompt,
-      effectiveUserPrompt: buildPromptWithAgentProfileBootstrap(planModePrompt, workspaceProfile),
-      historyUserPrompt: buildPromptWithAgentProfileReference(displayPrompt, workspaceProfile),
-      profileInjectionMode: 'initial',
-      promptRef: buildPromptReference({
-        reason: 'workspace_agent',
-        source: 'workspace',
-        agentName: workspaceProfile.name,
-        profilePath: workspaceProfile.path,
-        injectionMode: 'initial',
-        planMode: input.usePlanMode === true,
-      }),
-      activeAgent: nextActiveAgent,
-      agentInjectionState: buildStateUpdate(nextActiveAgent, undefined),
+      activeAgent: undefined,
+      agentRuntimeOverrides: undefined,
+      agentInjectionState: buildStateUpdate(undefined, undefined),
+      fileReferences: input.fileReferences,
     });
   }
 
   const activeAgent =
-    currentActiveAgent?.source === 'workspace' && workspaceProfile
-      ? toInjectedAgent(workspaceProfile)
+    currentActiveAgent?.source === 'workspace'
+      ? undefined
       : currentActiveAgent;
   const effectiveUserPrompt = applyPlanMode(displayPrompt, input);
   return buildResolvedPromptResult({
@@ -405,13 +460,19 @@ export function resolvePromptWithProfiles(input: PromptResolutionInput): PromptR
         ? buildPromptReference({
             reason: 'plan_mode',
             source: 'plan_mode',
-            planMode: true,
+            planMode: isPlanDrafting(input),
           })
         : undefined,
     activeAgent,
+    agentRuntimeOverrides:
+      activeAgent?.source === 'global' || activeAgent?.source === 'bundled'
+        ? toAgentRuntimeOverrides(currentActiveAgentProfile)
+        : undefined,
     agentInjectionState: buildStateUpdate(
       activeAgent,
-      currentExplicitAgentName || (activeAgent?.source === 'global' ? activeAgent.name : undefined)
+      currentExplicitAgentName ||
+        (activeAgent?.source === 'global' || activeAgent?.source === 'bundled' ? activeAgent.name : undefined)
     ),
+    fileReferences: input.fileReferences,
   });
 }

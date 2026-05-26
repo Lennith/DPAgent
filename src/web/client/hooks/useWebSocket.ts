@@ -1,11 +1,21 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import {
+  ManagedInterval,
+  ManagedTimeout,
+  computeExponentialBackoffDelayMs,
+} from '../../../runtime/async-primitives.js';
+import {
+  FAST_RECONNECT_ATTEMPTS,
+  SLOW_RECONNECT_DELAY_MS,
+  resolveReconnectPolicy,
+} from '../websocket-reconnect-policy.js';
 
 export interface WSMessage {
   type: string;
   data: unknown;
 }
 
-export type ConnectionStatus = 'connected' | 'disconnected' | 'error' | 'reconnecting' | 'polling';
+export type ConnectionStatus = 'connected' | 'disconnected' | 'error' | 'reconnecting';
 
 export interface ConnectionError {
   message: string;
@@ -21,7 +31,21 @@ export interface ConnectionToast {
   autoDismiss: boolean;
 }
 
-export function useWebSocket(url: string) {
+interface WebSocketLabels {
+  reconnecting: (attempt: number, max: number) => string;
+  connectionRestored: string;
+  connectionFailedMax: (max: number) => string;
+}
+
+export function useWebSocket(
+  url: string,
+  options: {
+    enabled?: boolean;
+    labels: WebSocketLabels;
+  }
+) {
+  const enabled = options.enabled !== false;
+  const labelsRef = useRef<WebSocketLabels>(options.labels);
   const wsRef = useRef<WebSocket | null>(null);
   const socketGenerationRef = useRef(0);
   const hadConnectionErrorRef = useRef(false);
@@ -31,22 +55,24 @@ export function useWebSocket(url: string) {
   const [toasts, setToasts] = useState<ConnectionToast[]>([]);
 
   const listenersRef = useRef<Map<string, Set<(data: unknown) => void>>>(new Map());
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimeoutRef = useRef(new ManagedTimeout());
   const reconnectAttemptsRef = useRef(0);
   const isManualDisconnectRef = useRef(false);
   const connectRef = useRef<(() => void) | null>(null);
+  const finalFailureToastShownRef = useRef(false);
 
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const heartbeatTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatIntervalRef = useRef(new ManagedInterval());
+  const heartbeatTimeoutRef = useRef(new ManagedTimeout());
   const lastHeartbeatRef = useRef<number>(Date.now());
   const missedHeartbeatsRef = useRef(0);
 
-  const MAX_RECONNECT_ATTEMPTS = 8;
-  const POLLING_INTERVAL_MS = 5000;
   const TOAST_AUTO_DISMISS_MS = 5000;
   const HEARTBEAT_INTERVAL_MS = 5000;
   const HEARTBEAT_TIMEOUT_MS = 3000;
+
+  useEffect(() => {
+    labelsRef.current = options.labels;
+  }, [options.labels]);
 
   const addToast = useCallback((toast: Omit<ConnectionToast, 'id' | 'timestamp'>) => {
     const id = `toast-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -57,7 +83,7 @@ export function useWebSocket(url: string) {
     };
     setToasts((prev) => [...prev, nextToast]);
     if (toast.autoDismiss) {
-      setTimeout(() => {
+      window.setTimeout(() => {
         setToasts((prev) => prev.filter((item) => item.id !== id));
       }, TOAST_AUTO_DISMISS_MS);
     }
@@ -72,74 +98,31 @@ export function useWebSocket(url: string) {
     setToasts([]);
   }, []);
 
-  const clearPolling = useCallback(() => {
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
+  const notifyFinalReconnectFailure = useCallback(() => {
+    if (finalFailureToastShownRef.current) {
+      return;
     }
-  }, []);
+    finalFailureToastShownRef.current = true;
+    addToast({
+      type: 'error',
+      message: labelsRef.current.connectionFailedMax(FAST_RECONNECT_ATTEMPTS),
+      autoDismiss: false,
+    });
+  }, [addToast]);
 
   const clearHeartbeat = useCallback(() => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-    if (heartbeatTimeoutRef.current) {
-      clearTimeout(heartbeatTimeoutRef.current);
-      heartbeatTimeoutRef.current = null;
-    }
+    heartbeatIntervalRef.current.clear();
+    heartbeatTimeoutRef.current.clear();
     missedHeartbeatsRef.current = 0;
   }, []);
 
-  const persistContextBackup = useCallback((key: string, data: unknown) => {
-    try {
-      localStorage.setItem(
-        `ws_context_backup_${key}`,
-        JSON.stringify({
-          data,
-          timestamp: new Date().toISOString(),
-        })
-      );
-    } catch (error) {
-      console.warn('[WebSocket] Failed to persist context backup:', error);
-    }
-  }, []);
-
-  const getContextBackup = useCallback((key: string): unknown | null => {
-    try {
-      const stored = localStorage.getItem(`ws_context_backup_${key}`);
-      if (stored) {
-        const parsed = JSON.parse(stored) as { data?: unknown };
-        return parsed.data ?? null;
-      }
-    } catch (error) {
-      console.warn('[WebSocket] Failed to retrieve context backup:', error);
-    }
-    return null;
-  }, []);
-
-  const clearContextBackup = useCallback((key: string) => {
-    try {
-      localStorage.removeItem(`ws_context_backup_${key}`);
-    } catch (error) {
-      console.warn('[WebSocket] Failed to clear context backup:', error);
-    }
-  }, []);
-
-  const startPollingFallback = useCallback(() => {
-    console.log('[WebSocket] Starting polling fallback mechanism');
-    setConnectionStatus('polling');
-    clearPolling();
-    clearHeartbeat();
-    pollingIntervalRef.current = setInterval(() => {
-      console.log('[WebSocket] Polling fallback: checking connection status...');
-    }, POLLING_INTERVAL_MS);
-  }, [clearPolling, clearHeartbeat]);
-
   const getReconnectDelay = useCallback((attempt: number): number => {
-    const baseDelay = Math.min(1000 * Math.pow(2, attempt), 10000);
-    const jitter = baseDelay * 0.25 * (Math.random() * 2 - 1);
-    return Math.max(250, Math.round(baseDelay + jitter));
+    return computeExponentialBackoffDelayMs(attempt, {
+      baseDelayMs: 1000,
+      maxDelayMs: 10000,
+      minDelayMs: 250,
+      jitterRatio: 0.25,
+    });
   }, []);
 
   const scheduleReconnect = useCallback(
@@ -147,35 +130,33 @@ export function useWebSocket(url: string) {
       if (isManualDisconnectRef.current) {
         return;
       }
-      if (pollingIntervalRef.current) {
+      if (reconnectTimeoutRef.current.active) {
         return;
       }
-      if (reconnectTimeoutRef.current) {
-        return;
-      }
-      if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
-        console.log(`[WebSocket] ${reason}: max reconnect attempts reached, using polling fallback`);
-        startPollingFallback();
-        addToast({
-          type: 'error',
-          message: 'Connection lost. Using offline mode.',
-          autoDismiss: false,
-        });
-        return;
-      }
-
-      reconnectAttemptsRef.current += 1;
-      const attempt = reconnectAttemptsRef.current;
-      const delay = getReconnectDelay(attempt);
-      setConnectionStatus('reconnecting');
-      console.log(`[WebSocket] ${reason}: reconnecting in ${delay}ms (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})`);
-      addToast({
-        type: 'info',
-        message: `Reconnecting... (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})`,
-        autoDismiss: true,
+      const nextAttempt = reconnectAttemptsRef.current + 1;
+      const decision = resolveReconnectPolicy({
+        nextAttempt,
+        fastDelayMs: getReconnectDelay(nextAttempt),
+        slowDelayMs: SLOW_RECONNECT_DELAY_MS,
       });
-      reconnectTimeoutRef.current = setTimeout(() => {
-        reconnectTimeoutRef.current = null;
+      reconnectAttemptsRef.current = decision.attempt;
+      if (decision.slowMode) {
+        notifyFinalReconnectFailure();
+      }
+      setConnectionStatus('reconnecting');
+      console.log(
+        `[WebSocket] ${reason}: reconnecting in ${decision.delayMs}ms (attempt ${decision.attempt}${
+          decision.slowMode ? ', slow mode' : `/${FAST_RECONNECT_ATTEMPTS}`
+        })`
+      );
+      if (!decision.slowMode) {
+        addToast({
+          type: 'info',
+          message: labelsRef.current.reconnecting(decision.displayAttempt, decision.maxDisplayAttempts),
+          autoDismiss: true,
+        });
+      }
+      reconnectTimeoutRef.current.start(() => {
         if (isManualDisconnectRef.current) {
           return;
         }
@@ -184,9 +165,9 @@ export function useWebSocket(url: string) {
           return;
         }
         connectRef.current?.();
-      }, delay);
+      }, decision.delayMs);
     },
-    [addToast, getReconnectDelay, startPollingFallback]
+    [addToast, getReconnectDelay, notifyFinalReconnectFailure]
   );
 
   const startHeartbeat = useCallback(() => {
@@ -197,17 +178,13 @@ export function useWebSocket(url: string) {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      if (heartbeatTimeoutRef.current) {
-        clearTimeout(heartbeatTimeoutRef.current);
-        heartbeatTimeoutRef.current = null;
-      }
+      heartbeatTimeoutRef.current.clear();
 
       try {
         const pingTimestamp = Date.now();
         ws.send(JSON.stringify({ type: 'ping', data: { timestamp: pingTimestamp } }));
         lastHeartbeatRef.current = pingTimestamp;
-        heartbeatTimeoutRef.current = setTimeout(() => {
-          heartbeatTimeoutRef.current = null;
+        heartbeatTimeoutRef.current.start(() => {
           missedHeartbeatsRef.current += 1;
           console.warn(`[WebSocket] Heartbeat timeout #${missedHeartbeatsRef.current}`);
           if (missedHeartbeatsRef.current >= 3) {
@@ -224,11 +201,14 @@ export function useWebSocket(url: string) {
       }
     };
 
-    heartbeatIntervalRef.current = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
-    setTimeout(sendHeartbeat, 1000);
+    heartbeatIntervalRef.current.start(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+    window.setTimeout(sendHeartbeat, 1000);
   }, [clearHeartbeat, scheduleReconnect]);
 
   const connect = useCallback(() => {
+    if (!enabled) {
+      return;
+    }
     const current = wsRef.current;
     if (current?.readyState === WebSocket.OPEN || current?.readyState === WebSocket.CONNECTING) {
       return;
@@ -254,18 +234,15 @@ export function useWebSocket(url: string) {
       setIsConnected(true);
       setConnectionStatus('connected');
       reconnectAttemptsRef.current = 0;
+      finalFailureToastShownRef.current = false;
       hadConnectionErrorRef.current = false;
       setLastError(null);
-      clearPolling();
       startHeartbeat();
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
+      reconnectTimeoutRef.current.clear();
       if (recovered) {
         addToast({
           type: 'success',
-          message: 'Connection restored',
+          message: labelsRef.current.connectionRestored,
           autoDismiss: true,
         });
       }
@@ -301,7 +278,7 @@ export function useWebSocket(url: string) {
 
         if (message.type === 'server_error') {
           const serverError = message.data as { error?: string; message?: string; timestamp?: string; recoverable?: boolean };
-          const isRecoverable = serverError.recoverable ?? (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS);
+          const isRecoverable = serverError.recoverable ?? true;
           const error: ConnectionError = {
             message: serverError.message ?? serverError.error ?? 'Server error',
             timestamp: serverError.timestamp ?? new Date().toISOString(),
@@ -328,10 +305,7 @@ export function useWebSocket(url: string) {
 
         if (message.type === 'pong') {
           const pongData = message.data as { timestamp?: number; serverTime?: number };
-          if (heartbeatTimeoutRef.current) {
-            clearTimeout(heartbeatTimeoutRef.current);
-            heartbeatTimeoutRef.current = null;
-          }
+          heartbeatTimeoutRef.current.clear();
           missedHeartbeatsRef.current = 0;
           lastHeartbeatRef.current = Date.now();
           console.log(
@@ -365,31 +339,25 @@ export function useWebSocket(url: string) {
         event instanceof ErrorEvent
           ? event.message || 'WebSocket connection error occurred'
           : 'WebSocket connection error occurred';
-      const recoverable = reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS;
+      const recoverable = true;
       const structuredError: ConnectionError = {
         message: errorMessage,
         timestamp,
         recoverable,
       };
 
-      // REQ-0001: Log structured error for telemetry
       const errorLogEntry = {
         code: 'WS_CONNECTION_ERROR',
         message: errorMessage,
         timestamp,
         attempt: reconnectAttemptsRef.current,
-        maxAttempts: MAX_RECONNECT_ATTEMPTS,
+        maxAttempts: FAST_RECONNECT_ATTEMPTS,
         recoverable,
       };
 
       if (!recoverable) {
         console.error(JSON.stringify(errorLogEntry));
-        // REQ-0001: Show non-dismissable error toast with retry option when max attempts reached
-        addToast({
-          type: 'error',
-          message: `Connection failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Click to retry.`,
-          autoDismiss: false,
-        });
+        notifyFinalReconnectFailure();
       }
 
       hadConnectionErrorRef.current = true;
@@ -397,7 +365,7 @@ export function useWebSocket(url: string) {
       setConnectionStatus('error');
       scheduleReconnect('error');
     };
-  }, [addToast, clearHeartbeat, clearPolling, scheduleReconnect, startHeartbeat, url]);
+  }, [clearHeartbeat, enabled, notifyFinalReconnectFailure, scheduleReconnect, startHeartbeat, url]);
 
   useEffect(() => {
     connectRef.current = connect;
@@ -406,13 +374,10 @@ export function useWebSocket(url: string) {
   const disconnect = useCallback(() => {
     isManualDisconnectRef.current = true;
     socketGenerationRef.current += 1;
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    clearPolling();
+    reconnectTimeoutRef.current.clear();
     clearHeartbeat();
     reconnectAttemptsRef.current = 0;
+    finalFailureToastShownRef.current = false;
     if (wsRef.current) {
       wsRef.current.onopen = null;
       wsRef.current.onclose = null;
@@ -423,7 +388,7 @@ export function useWebSocket(url: string) {
     }
     setIsConnected(false);
     setConnectionStatus('disconnected');
-  }, [clearHeartbeat, clearPolling]);
+  }, [clearHeartbeat]);
 
   const send = useCallback((message: WSMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -445,15 +410,13 @@ export function useWebSocket(url: string) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      disconnect();
+      return;
+    }
     connect();
     return () => disconnect();
-  }, [connect, disconnect]);
-
-  useEffect(() => {
-    if (isConnected) {
-      clearContextBackup('pending');
-    }
-  }, [isConnected, clearContextBackup]);
+  }, [connect, disconnect, enabled]);
 
   return {
     isConnected,
@@ -468,8 +431,5 @@ export function useWebSocket(url: string) {
     clearToasts,
     toasts,
     ws: wsRef,
-    persistContextBackup,
-    getContextBackup,
-    clearContextBackup,
   };
 }

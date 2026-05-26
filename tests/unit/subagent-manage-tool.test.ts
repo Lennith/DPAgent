@@ -25,7 +25,41 @@ class ImmediateRunner {
   }
 }
 
-function createHarness(): {
+class HangingRunner {
+  async runTask(
+    _task: SubAgentQueuedTask,
+    onProgress?: (update: { type: 'heartbeat'; timestamp: string; elapsedMs: number }) => void
+  ): Promise<SubAgentExecutionOutput> {
+    onProgress?.({
+      type: 'heartbeat',
+      timestamp: new Date().toISOString(),
+      elapsedMs: 0,
+    });
+    return await new Promise<SubAgentExecutionOutput>(() => undefined);
+  }
+
+  cancelTask(_taskId: string): boolean {
+    return true;
+  }
+}
+
+class InspectingRunner {
+  public startedTasks: SubAgentQueuedTask[] = [];
+
+  async runTask(task: SubAgentQueuedTask): Promise<SubAgentExecutionOutput> {
+    this.startedTasks.push(task);
+    return await new Promise<SubAgentExecutionOutput>(() => undefined);
+  }
+
+  cancelTask(_taskId: string): boolean {
+    return false;
+  }
+}
+
+function createHarness(
+  runner: SubAgentTurnRunner = new ImmediateRunner() as unknown as SubAgentTurnRunner,
+  options?: { maxParallelPerParent?: number; resolveActiveTurnId?: () => string | null | undefined }
+): {
   tempDir: string;
   context: ContextRef;
   manager: SubAgentManager;
@@ -40,6 +74,9 @@ function createHarness(): {
 
   fs.mkdirSync(path.join(globalAgentsDir, 'Coder'), { recursive: true });
   fs.writeFileSync(path.join(globalAgentsDir, 'Coder', 'AGENTS.md'), '# Coder\nCoding specialist.', 'utf-8');
+  fs.writeFileSync(path.join(globalAgentsDir, 'Coder', 'agent.yaml'), 'version: 1\nexposeAsSubagent: true\n', 'utf-8');
+  fs.mkdirSync(path.join(globalAgentsDir, 'Hidden'), { recursive: true });
+  fs.writeFileSync(path.join(globalAgentsDir, 'Hidden', 'AGENTS.md'), '# Hidden\nNot exposed.', 'utf-8');
   fs.writeFileSync(path.join(workspaceDir, 'AGENTS.md'), '# Workspace\nWorkspace agent.', 'utf-8');
 
   const providers: SubAgentProviderConfig[] = [
@@ -47,12 +84,12 @@ function createHarness(): {
   ];
   const manager = new SubAgentManager({
     contextManager,
-    turnRunner: new ImmediateRunner() as unknown as SubAgentTurnRunner,
+    turnRunner: runner,
     registryFilePath: path.join(tempDir, 'subagent_registry.json'),
     getDefaultWorkspaceDir: () => workspaceDir,
     getProviderConfigs: () => providers,
     getGlobalAgentsDir: () => globalAgentsDir,
-    getMaxParallelPerParent: () => 4,
+    getMaxParallelPerParent: () => options?.maxParallelPerParent ?? 4,
     getGlobalMaxParallel: () => 10,
   });
 
@@ -60,6 +97,7 @@ function createHarness(): {
   const tool = new SubAgentManageTool({
     manager,
     resolveActiveContext: () => context,
+    resolveActiveTurnId: options?.resolveActiveTurnId,
     resolveDefaultWorkspaceDir: () => workspaceDir,
     resolveAllowedTools: () => ['read_file', 'shell_execute', 'memory_manage', 'subagent_manage'],
   });
@@ -78,7 +116,10 @@ async function testListAgents(): Promise<void> {
     const payload = JSON.parse(result.content);
     assert.equal(Array.isArray(payload.agents), true);
     assert.equal(payload.agents.some((item: { name: string; source: string }) => item.name === 'Coder' && item.source === 'global'), true);
+    assert.equal(payload.agents.some((item: { name: string }) => item.name === 'Hidden'), false);
+    assert.equal(payload.agents.some((item: { name: string; source: string }) => item.name === 'coding' && item.source === 'bundled'), true);
     assert.equal(payload.agents.some((item: { name: string; source: string }) => item.name === 'workspace' && item.source === 'workspace'), true);
+    assert.match(payload.hint, /omit agent_name/i);
   } finally {
     harness.manager.shutdown();
     cleanupHarness(harness.tempDir);
@@ -93,8 +134,21 @@ async function testCreateWithAgentAndFallback(): Promise<void> {
       prompt: 'work',
       agent_name: 'missing-agent',
     });
-    assert.equal(bad.success, false);
-    assert.equal(bad.error, 'agent_not_found: missing-agent');
+    assert.equal(bad.success, true);
+    const badPayload = JSON.parse(bad.content);
+    assert.equal(badPayload.created, false);
+    assert.equal(badPayload.warning, 'agent_not_found: missing-agent');
+    assert.match(badPayload.hint, /omit agent_name/i);
+
+    const hidden = await harness.tool.execute({
+      action: 'create',
+      prompt: 'work',
+      agent_name: 'hidden',
+    });
+    assert.equal(hidden.success, true);
+    const hiddenPayload = JSON.parse(hidden.content);
+    assert.equal(hiddenPayload.created, false);
+    assert.equal(hiddenPayload.warning, 'agent_not_found: hidden');
 
     const okWithAgent = await harness.tool.execute({
       action: 'create',
@@ -120,6 +174,44 @@ async function testCreateWithAgentAndFallback(): Promise<void> {
   }
 }
 
+async function testCreatePassesActiveTurnIdToSubagentTask(): Promise<void> {
+  const runner = new InspectingRunner();
+  const harness = createHarness(runner as unknown as SubAgentTurnRunner, {
+    resolveActiveTurnId: () => 'turn-active-parent',
+  });
+  try {
+    const result = await harness.tool.execute({
+      action: 'create',
+      prompt: 'work',
+      agent_name: 'coder',
+    });
+    assert.equal(result.success, true);
+    assert.equal(runner.startedTasks[0]?.parentTurnId, 'turn-active-parent');
+  } finally {
+    harness.manager.shutdown();
+    cleanupHarness(harness.tempDir);
+  }
+}
+
+async function testCreateOmitsBlankActiveTurnId(): Promise<void> {
+  const runner = new InspectingRunner();
+  const harness = createHarness(runner as unknown as SubAgentTurnRunner, {
+    resolveActiveTurnId: () => '   ',
+  });
+  try {
+    const result = await harness.tool.execute({
+      action: 'create',
+      prompt: 'work',
+      agent_name: 'coder',
+    });
+    assert.equal(result.success, true);
+    assert.equal(runner.startedTasks[0]?.parentTurnId, undefined);
+  } finally {
+    harness.manager.shutdown();
+    cleanupHarness(harness.tempDir);
+  }
+}
+
 async function testAllowedToolsMustStayWithinCurrentTurn(): Promise<void> {
   const harness = createHarness();
   try {
@@ -139,6 +231,14 @@ async function testAllowedToolsMustStayWithinCurrentTurn(): Promise<void> {
     });
     assert.equal(rejected.success, false);
     assert.equal(rejected.error, 'allowed_tools must stay within the current toolset');
+
+    const protectedOnly = await harness.tool.execute({
+      action: 'create',
+      prompt: 'work',
+      allowed_tools: ['todo', 'subagent_manage'],
+    });
+    assert.equal(protectedOnly.success, false);
+    assert.equal(protectedOnly.error, 'allowed_tools must stay within the current toolset');
   } finally {
     harness.manager.shutdown();
     cleanupHarness(harness.tempDir);
@@ -169,25 +269,59 @@ async function testAgentNotFoundShouldReturnToolErrorWithoutThrowing(): Promise<
   }
 }
 
-async function testDeprecatedArgs(): Promise<void> {
-  const harness = createHarness();
+async function testResultWaitTimeoutReturnsHeartbeatGuidance(): Promise<void> {
+  const harness = createHarness(new HangingRunner() as unknown as SubAgentTurnRunner);
   try {
-    const withPreset = await harness.tool.execute({
+    const created = await harness.tool.execute({
       action: 'create',
-      prompt: 'work',
-      preset: 'coding',
+      prompt: 'long work',
+      agent_name: 'coder',
     });
-    assert.equal(withPreset.success, false);
-    assert.match(withPreset.error ?? '', /deprecated/i);
+    assert.equal(created.success, true);
+    const createdPayload = JSON.parse(created.content);
+    const result = await harness.tool.execute({
+      action: 'result',
+      subagent_id: createdPayload.status.subagentId,
+      wait: true,
+      timeout_ms: 20,
+    });
+    assert.equal(result.success, true);
+    const payload = JSON.parse(result.content);
+    assert.equal(payload.waitTimedOut, true);
+    assert.equal(payload.terminal, false);
+    assert.equal(payload.status.running, true);
+    assert.equal(typeof payload.heartbeat.lastHeartbeatAt, 'string');
+    assert.equal(typeof payload.heartbeat.ageMs, 'number');
+    assert.match(payload.guidance, /still running/i);
+  } finally {
+    harness.manager.shutdown();
+    cleanupHarness(harness.tempDir);
+  }
+}
 
-    const withSystemPrompt = await harness.tool.execute({
-      action: 'resume',
-      subagent_id: 'x',
-      prompt: 'work',
-      system_prompt: 'legacy',
+async function testCreateQueuedReturnsConcurrencyHint(): Promise<void> {
+  const harness = createHarness(new HangingRunner() as unknown as SubAgentTurnRunner, {
+    maxParallelPerParent: 1,
+  });
+  try {
+    const running = await harness.tool.execute({
+      action: 'create',
+      prompt: 'running work',
+      agent_name: 'coder',
     });
-    assert.equal(withSystemPrompt.success, false);
-    assert.match(withSystemPrompt.error ?? '', /deprecated/i);
+    assert.equal(running.success, true);
+
+    const queued = await harness.tool.execute({
+      action: 'create',
+      prompt: 'queued work',
+      agent_name: 'coder',
+    });
+    assert.equal(queued.success, true);
+    const payload = JSON.parse(queued.content);
+    assert.equal(payload.status.status, 'queued');
+    assert.equal(payload.status.queuePosition, 1);
+    assert.match(payload.hint, /concurrency/i);
+    assert.match(payload.guidance, /queuePosition=1/i);
   } finally {
     harness.manager.shutdown();
     cleanupHarness(harness.tempDir);
@@ -197,9 +331,12 @@ async function testDeprecatedArgs(): Promise<void> {
 async function runAll(): Promise<void> {
   await testListAgents();
   await testCreateWithAgentAndFallback();
+  await testCreatePassesActiveTurnIdToSubagentTask();
+  await testCreateOmitsBlankActiveTurnId();
   await testAllowedToolsMustStayWithinCurrentTurn();
-  await testDeprecatedArgs();
   await testAgentNotFoundShouldReturnToolErrorWithoutThrowing();
+  await testResultWaitTimeoutReturnsHeartbeatGuidance();
+  await testCreateQueuedReturnsConcurrencyHint();
   console.log('subagent-manage-tool tests passed');
 }
 

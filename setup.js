@@ -18,12 +18,25 @@ function ensureConfigTemplate() {
     return;
   }
   const template = {
-    api: {
-      apiKey: 'YOUR_API_KEY',
-      apiBase: 'https://api.minimaxi.com',
-      model: 'MiniMax-M2.7-highspeed',
-      provider: 'anthropic',
-      maxOutputTokens: 32768,
+    llmProfiles: {
+      defaultProfileId: 'default',
+      profiles: [
+        {
+          id: 'default',
+          name: 'Default Profile',
+          provider: 'anthropic',
+          apiKey: '',
+          apiBase: 'https://api.minimaxi.com',
+          defaultModel: 'MiniMax-M2.7-highspeed',
+          maxOutputTokens: 32768,
+          enabled: true,
+          capabilities: {
+            modelDiscovery: true,
+            reasoningEffort: false,
+            thinkingBudget: true,
+          },
+        },
+      ],
     },
     agent: {
       maxSteps: 100,
@@ -57,7 +70,7 @@ function ensureConfigTemplate() {
 }
 
 function main() {
-  console.log('=== MiniMax Agent setup ===');
+  console.log('=== DPAgent setup ===');
   ensureNodeVersion();
   ensureConfigTemplate();
   fs.mkdirSync(path.join(process.cwd(), 'logs'), { recursive: true });
@@ -69,11 +82,14 @@ function main() {
   execSync('npm run build:web', { stdio: 'inherit' });
 
   const loaded = yaml.load(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
-  const apiKey = loaded.api?.apiKey || '';
+  const defaultProfileId = String(loaded.llmProfiles?.defaultProfileId || '').trim();
+  const profiles = Array.isArray(loaded.llmProfiles?.profiles) ? loaded.llmProfiles.profiles : [];
+  const defaultProfile = profiles.find((profile) => profile?.id === defaultProfileId) || profiles[0] || {};
+  const apiKey = defaultProfile.apiKey || loaded.api?.apiKey || '';
   console.log('[3/3] setup summary');
   console.log(`config: ${CONFIG_PATH}`);
-  console.log(`maxOutputTokens: ${loaded.api?.maxOutputTokens}`);
-  if (!apiKey || apiKey === 'YOUR_API_KEY') {
+  console.log(`maxOutputTokens: ${defaultProfile.maxOutputTokens ?? loaded.api?.maxOutputTokens}`);
+  if (!apiKey) {
     console.log('apiKey: not configured yet. Edit config.yaml before starting.');
   } else {
     console.log('apiKey: configured');

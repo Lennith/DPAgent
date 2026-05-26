@@ -1,11 +1,3 @@
-﻿export { SubAgentTurnRunner, type SubAgentTurnRunnerOptions } from './SubAgentTurnRunner.js';
-export { SubAgentManager, type SubAgentManagerOptions } from './SubAgentManager.js';
-export type {
-  SubAgentOperation,
-  SubAgentResumeRequest,
-  SubAgentQueuedTask,
-  SubAgentRecord,
-  ParentQueueState,
-  SubAgentRegistryState,
-  SubAgentExecutionOutput,
-} from './types.js';
+export { SubAgentTurnRunner, type SubAgentTurnRunnerOptions } from './SubAgentTurnRunner.js';
+export { SubAgentManager } from './SubAgentManager.js';
+export type { SubAgentManagerOptions } from './subagent-manager-contracts.js';

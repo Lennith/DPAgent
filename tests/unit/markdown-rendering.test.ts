@@ -3,7 +3,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ThemeProvider } from '../../src/web/client/components/providers/ThemeProvider.js';
 import { MessageItem } from '../../src/web/client/components/chat/MessageItem.js';
-import type { Message } from '../../src/web/client/hooks/useAgent.js';
+import type { Message } from '../../src/web/client/chat-types.js';
 
 function renderAssistantMarkdown(content: string): string {
   const message: Message = {

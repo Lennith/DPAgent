@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+const os = require('os');
 const { randomUUID } = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const yaml = require('js-yaml');
@@ -137,12 +138,49 @@ function reserveLocalPort() {
   });
 }
 
+function createIsolatedSmokeConfigPath() {
+  const sourceConfigPath = path.join(process.cwd(), 'config.yaml');
+  if (!fs.existsSync(sourceConfigPath)) {
+    throw new Error(`Cannot create isolated smoke config because config.yaml is missing: ${sourceConfigPath}`);
+  }
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dpagent-smoke-config-'));
+  const targetConfigPath = path.join(tempDir, 'config.yaml');
+  const sourceYaml = fs.readFileSync(sourceConfigPath, 'utf8');
+  fs.writeFileSync(targetConfigPath, buildIsolatedSmokeConfigYaml(sourceYaml), 'utf8');
+  return targetConfigPath;
+}
+
+function buildIsolatedSmokeConfigYaml(sourceYaml) {
+  try {
+    const parsed = yaml.load(sourceYaml);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return sourceYaml;
+    }
+    const current = parsed;
+    const currentAsr = current.asr && typeof current.asr === 'object' && !Array.isArray(current.asr)
+      ? current.asr
+      : {};
+    return yaml.dump(
+      {
+        ...current,
+        asr: {
+          ...currentAsr,
+          enabled: false,
+        },
+      },
+      { lineWidth: -1 }
+    );
+  } catch {
+    return sourceYaml;
+  }
+}
+
 async function ensureSmokeServer(baseUrl) {
   const parsedUrl = new URL(baseUrl);
   const host = parsedUrl.hostname;
   const isLocalhost = host === '127.0.0.1' || host === 'localhost';
   if (await isServerReady(baseUrl)) {
-    return { child: null, startedLocally: false, baseUrl };
+    return { child: null, startedLocally: false, baseUrl, isolatedConfigPath: null };
   }
   if (!isLocalhost) {
     throw new Error(`Smoke target is unavailable and not local: ${baseUrl}`);
@@ -151,13 +189,15 @@ async function ensureSmokeServer(baseUrl) {
   const port = await reserveLocalPort();
   const actualBaseUrl = `${parsedUrl.protocol}//127.0.0.1:${port}`;
   const launcher = resolveNpmLauncher();
+  const isolatedConfigPath = createIsolatedSmokeConfigPath();
   const child = spawn(launcher.command, [...launcher.args, 'run', 'start:web'], {
     cwd: process.cwd(),
     stdio: 'pipe',
     env: {
       ...process.env,
-      MINIMAX_PORT: String(port),
-      MINIMAX_ALLOW_MISSING_API_KEY_AT_BOOT: '1',
+      DPAGENT_PORT: String(port),
+      DPAGENT_CONFIG_PATH: isolatedConfigPath,
+      DPAGENT_ALLOW_MISSING_API_KEY_AT_BOOT: '1',
     },
     shell: launcher.shell,
   });
@@ -171,15 +211,31 @@ async function ensureSmokeServer(baseUrl) {
 
   try {
     await waitForServerReady(actualBaseUrl, 45000);
-    return { child, startedLocally: true, baseUrl: actualBaseUrl };
+    return { child, startedLocally: true, baseUrl: actualBaseUrl, isolatedConfigPath };
   } catch (error) {
     try {
       child.kill('SIGTERM');
     } catch {
       // ignore
     }
+    removeIsolatedSmokeConfig(isolatedConfigPath);
     const suffix = outputBuffer.trim() ? `\nserver output:\n${outputBuffer.trim()}` : '';
     throw new Error(`${error instanceof Error ? error.message : String(error)}${suffix}`);
+  }
+}
+
+function removeIsolatedSmokeConfig(configPath) {
+  if (!configPath) {
+    return;
+  }
+  try {
+    fs.rmSync(path.dirname(configPath), { recursive: true, force: true });
+  } catch (error) {
+    console.warn(
+      `[smoke-ui] failed to remove isolated config ${configPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
 }
 
@@ -605,27 +661,78 @@ function hasRuntimeConfigOverride(runtimeConfig) {
 }
 
 async function applySmokeRuntimeConfig(baseUrl, runtimeConfig) {
-  const body = {};
-  for (const [key, value] of Object.entries(runtimeConfig)) {
-    if (value) {
-      if (key === 'maxOutputTokens') {
-        const parsed = Number(value);
-        if (Number.isFinite(parsed) && parsed > 0) {
-          body[key] = parsed;
-        }
-      } else {
-        body[key] = value;
-      }
-    }
+  const settingsResponse = await fetch(`${baseUrl}/api/settings`);
+  if (!settingsResponse.ok) {
+    throw new Error(`Unable to load settings before applying smoke runtime config: HTTP ${settingsResponse.status}`);
   }
-  if (Object.keys(body).length === 0) {
+  const settings = await settingsResponse.json();
+  const profiles = Array.isArray(settings?.llmProfiles?.profiles) ? settings.llmProfiles.profiles : [];
+  const defaultProfileId = String(settings?.llmProfiles?.defaultProfileId || profiles[0]?.id || 'default');
+  const maxOutputTokens = Number(runtimeConfig.maxOutputTokens);
+  const nextProfiles = profiles.map((profile) => {
+    const isDefault = String(profile?.id || '') === defaultProfileId;
+    const nextProfile = {
+      id: String(profile?.id || defaultProfileId),
+      name: String(profile?.name || defaultProfileId),
+      provider: profile?.provider,
+      apiBase: profile?.apiBase,
+      defaultModel: profile?.defaultModel,
+      maxOutputTokens: profile?.maxOutputTokens,
+      contextWindowTokens: profile?.contextWindowTokens,
+      enabled: profile?.enabled !== false,
+      capabilities: profile?.capabilities,
+    };
+    if (!isDefault) {
+      return nextProfile;
+    }
+    if (runtimeConfig.provider) {
+      nextProfile.provider = runtimeConfig.provider;
+    }
+    if (runtimeConfig.apiBase) {
+      nextProfile.apiBase = runtimeConfig.apiBase;
+    }
+    if (runtimeConfig.model) {
+      nextProfile.defaultModel = runtimeConfig.model;
+    }
+    if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
+      nextProfile.maxOutputTokens = maxOutputTokens;
+    }
+    if (runtimeConfig.apiKey) {
+      nextProfile.apiKey = runtimeConfig.apiKey;
+    }
+    return nextProfile;
+  });
+
+  if (!nextProfiles.some((profile) => String(profile.id || '') === defaultProfileId)) {
+    nextProfiles.push({
+      id: defaultProfileId,
+      name: defaultProfileId,
+      provider: runtimeConfig.provider || 'anthropic',
+      apiBase: runtimeConfig.apiBase,
+      defaultModel: runtimeConfig.model,
+      maxOutputTokens: Number.isFinite(maxOutputTokens) && maxOutputTokens > 0 ? maxOutputTokens : undefined,
+      apiKey: runtimeConfig.apiKey,
+      enabled: true,
+    });
+  }
+
+  if (
+    !runtimeConfig.apiKey &&
+    !runtimeConfig.apiBase &&
+    !runtimeConfig.model &&
+    !runtimeConfig.provider &&
+    !(Number.isFinite(maxOutputTokens) && maxOutputTokens > 0)
+  ) {
     return;
   }
 
-  const response = await fetch(`${baseUrl}/api/config`, {
-    method: 'POST',
+  const response = await fetch(`${baseUrl}/api/settings`, {
+    method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      defaultProfileId,
+      profiles: nextProfiles,
+    }),
   });
   if (!response.ok) {
     throw new Error(`Unable to apply smoke runtime config: HTTP ${response.status}`);
@@ -640,13 +747,14 @@ async function main() {
   const originalConfigYaml = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : null;
   const runtimeConfig = readSmokeRuntimeConfig(explicitSmokeApiKey);
   const noSettingsWrite = process.env.SMOKE_NO_SETTINGS_WRITE === '1';
+  const allowExistingSettingsWrite = process.env.SMOKE_ALLOW_EXISTING_SETTINGS_WRITE === '1';
   const outputDir = process.env.SMOKE_OUTPUT_DIR || path.join(process.cwd(), 'logs');
   const dispatchTimeoutMs = Number.parseInt(process.env.SMOKE_DISPATCH_TIMEOUT_MS || '10000', 10);
   const responseTimeoutMs = Number.parseInt(process.env.SMOKE_RESPONSE_TIMEOUT_MS || '90000', 10);
   const prompt = process.env.SMOKE_PROMPT || 'Reply with exactly: smoke-ui-ok';
   const expectedAssistantText = extractExpectedAssistantText(prompt);
   fs.mkdirSync(outputDir, { recursive: true });
-  let smokeServer = { child: null, startedLocally: false, baseUrl: url };
+  let smokeServer = { child: null, startedLocally: false, baseUrl: url, isolatedConfigPath: null };
   let mockProvider = null;
   let browser;
   let page;
@@ -667,7 +775,11 @@ async function main() {
     } else if (smokeServer.startedLocally) {
       console.log('[smoke-ui] using configured provider for local smoke target');
     }
-    if (!noSettingsWrite && hasRuntimeConfigOverride(runtimeConfig)) {
+    const allowSettingsWrite = !noSettingsWrite && (smokeServer.startedLocally || allowExistingSettingsWrite);
+    if (!allowSettingsWrite && !noSettingsWrite) {
+      console.log('[smoke-ui] settings write disabled for existing smoke target');
+    }
+    if (allowSettingsWrite && hasRuntimeConfigOverride(runtimeConfig)) {
       await applySmokeRuntimeConfig(targetUrl, runtimeConfig);
     }
     browser = await launchSmokeBrowser();
@@ -681,23 +793,21 @@ async function main() {
     }
 
     let hasApiKey = false;
-    try {
-      const configResponse = await fetch(`${targetUrl}/api/config`);
-      if (configResponse.ok) {
-        const payload = await configResponse.json();
-        hasApiKey = Boolean(payload?.hasApiKey || payload?.api?.hasApiKey);
-      }
-    } catch {
-      // ignore config detection failure; fallback below
+    const settingsProbeResponse = await fetch(`${targetUrl}/api/settings`);
+    if (settingsProbeResponse.ok) {
+      const payload = await settingsProbeResponse.json();
+      hasApiKey = Boolean(payload?.hasApiKey);
+    } else {
+      throw new Error(`Unable to load settings for API key detection: ${settingsProbeResponse.status}`);
     }
 
-    if (!noSettingsWrite && !hasApiKey && !runtimeConfig.apiKey) {
+    if (allowSettingsWrite && !hasApiKey && !runtimeConfig.apiKey) {
       throw new Error(
         'Existing smoke target has no API key. Set SMOKE_API_KEY explicitly or use an unused SMOKE_URL so smoke can start an isolated server.'
       );
     }
 
-    if (!noSettingsWrite && !hasApiKey) {
+    if (allowSettingsWrite && !hasApiKey) {
       const passwordInput = page.locator('input[type="password"]').first();
       const modalAlreadyOpen = await passwordInput.isVisible().catch(() => false);
       if (!modalAlreadyOpen) {
@@ -706,14 +816,18 @@ async function main() {
       }
       await passwordInput.fill(runtimeConfig.apiKey);
       await saveConfigAndWaitForReload(page);
-    } else if (noSettingsWrite) {
-      console.log('[smoke-ui] settings write disabled by SMOKE_NO_SETTINGS_WRITE=1');
+    } else if (!allowSettingsWrite) {
+      console.log(
+        noSettingsWrite
+          ? '[smoke-ui] settings write disabled by SMOKE_NO_SETTINGS_WRITE=1'
+          : '[smoke-ui] settings write skipped for existing smoke target'
+      );
     }
     if (originalConfigYaml === null && fs.existsSync(configPath)) {
       smokeCreatedConfigYaml = fs.readFileSync(configPath, 'utf8');
     }
 
-    if (!noSettingsWrite) {
+    if (allowSettingsWrite) {
       const settingsResponse = await fetch(`${targetUrl}/api/settings`);
       if (!settingsResponse.ok) {
         throw new Error(`Unable to load settings for smoke verification: ${settingsResponse.status}`);
@@ -885,6 +999,7 @@ async function main() {
   } finally {
     await browser?.close();
     await stopSmokeServer(smokeServer.child);
+    removeIsolatedSmokeConfig(smokeServer.isolatedConfigPath);
     const currentConfigYaml = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : null;
     if (originalConfigYaml === null && currentConfigYaml !== null && currentConfigYaml === smokeCreatedConfigYaml) {
       try {

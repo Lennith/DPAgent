@@ -5,6 +5,7 @@
 // - Run, enable/disable, delete, history, memory, and report panels.
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
+  AgentListItemView,
   LlmProfilesConfigView,
   SessionLlmSelectionPatch,
   SessionLlmSelectionView,
@@ -19,11 +20,15 @@ import { useI18n } from '../../i18n/index.js';
 import type { ThemeConfig } from '../../styles/theme/index.js';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 
-type Frequency = 'hourly' | 'daily' | 'weekly';
+type Frequency = 'interval' | 'hourly' | 'daily' | 'weekly';
+type ApiFrequency = Frequency | 'once';
+const MIN_INTERVAL_SECONDS = 5;
+const MAX_INTERVAL_SECONDS = 60 * 60 * 24 * 30;
 
 interface AutomationScheduleView {
-  frequency: Frequency;
-  minute: number;
+  frequency: ApiFrequency;
+  intervalSeconds?: number;
+  minute?: number;
   hour?: number;
   weekday?: number;
 }
@@ -34,6 +39,7 @@ interface AutomationJobView {
   prompt: string;
   workspaceDir: string;
   skills: string[];
+  agentName?: string;
   llmSelection?: SessionLlmSelectionView;
   schedule: AutomationScheduleView;
   timezone: string;
@@ -57,6 +63,9 @@ interface AutomationRunRecordView {
   resultSummary?: string;
   error?: string;
   skippedReason?: string;
+  agentName?: string;
+  effectiveAgentName?: string;
+  agentFallbackReason?: string;
   reportPath?: string;
 }
 
@@ -102,11 +111,14 @@ interface JobFormState {
   prompt: string;
   workspaceDir: string;
   frequency: Frequency;
+  intervalSeconds: number;
+  intervalSecondsInput: string;
   minute: number;
   hour: number;
   weekday: number;
   timezone: string;
   skills: string[];
+  agentName: string;
   llmSelection: SessionLlmSelectionView;
 }
 
@@ -125,6 +137,14 @@ function normalizeNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
+function parseIntervalSecondsInput(value: string): number | null {
+  const parsed = Number.parseInt(value.trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < MIN_INTERVAL_SECONDS || parsed > MAX_INTERVAL_SECONDS) {
+    return null;
+  }
+  return parsed;
+}
+
 function createDefaultFormState(
   workspaceDir: string,
   llmProfiles: LlmProfilesConfigView | null
@@ -133,12 +153,15 @@ function createDefaultFormState(
     name: '',
     prompt: '',
     workspaceDir,
-    frequency: 'daily',
+    frequency: 'interval',
+    intervalSeconds: 3600,
+    intervalSecondsInput: '3600',
     minute: 0,
     hour: 9,
     weekday: 1,
     timezone: nowTimezone(),
     skills: [],
+    agentName: '',
     llmSelection: resolveSessionLlmSelectionView(llmProfiles),
   };
 }
@@ -149,12 +172,15 @@ function toFormState(job: AutomationJobView, llmProfiles: LlmProfilesConfigView 
     name: job.name,
     prompt: job.prompt,
     workspaceDir: job.workspaceDir,
-    frequency: job.schedule.frequency,
-    minute: normalizeNumber(job.schedule.minute, 0, 59),
+    frequency: job.schedule.frequency === 'once' ? 'interval' : job.schedule.frequency,
+    intervalSeconds: normalizeNumber(job.schedule.intervalSeconds ?? 3600, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS),
+    intervalSecondsInput: String(normalizeNumber(job.schedule.intervalSeconds ?? 3600, MIN_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)),
+    minute: normalizeNumber(job.schedule.minute ?? 0, 0, 59),
     hour: normalizeNumber(job.schedule.hour ?? 0, 0, 23),
     weekday: normalizeNumber(job.schedule.weekday ?? 1, 0, 6),
     timezone: job.timezone,
     skills: [...job.skills],
+    agentName: job.agentName ?? '',
     llmSelection: resolveSessionLlmSelectionView(llmProfiles, job.llmSelection),
   };
 }
@@ -213,6 +239,7 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [jobsError, setJobsError] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillView[]>([]);
+  const [agents, setAgents] = useState<AgentListItemView[]>([]);
   const [form, setForm] = useState<JobFormState>(() => createDefaultFormState(workspaceDir, llmProfiles));
   const [submitting, setSubmitting] = useState(false);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -243,6 +270,8 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
   const formReadOnly = Boolean(formJob?.readOnly);
   const currentProfile = resolveLlmProfileById(llmProfiles, form.llmSelection.profileId);
   const profileOptions = llmProfiles?.profiles ?? [];
+  const usingDefaultAgent = form.agentName.trim().length === 0;
+  const resolvedIntervalSeconds = parseIntervalSecondsInput(form.intervalSecondsInput);
 
   const loadJobs = useCallback(async () => {
     setLoadingJobs(true);
@@ -271,6 +300,19 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
       setSkills(payload.skills ?? []);
     } catch {
       setSkills([]);
+    }
+  }, []);
+
+  const loadAgents = useCallback(async () => {
+    try {
+      const response = await fetch('/api/agents');
+      if (!response.ok) {
+        throw new Error(await readApiError(response));
+      }
+      const payload = (await response.json()) as { agents?: AgentListItemView[] };
+      setAgents((payload.agents ?? []).filter((item) => item.source === 'bundled' || item.source === 'global'));
+    } catch {
+      setAgents([]);
     }
   }, []);
 
@@ -324,7 +366,8 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
   useEffect(() => {
     void loadJobs();
     void loadSkills();
-  }, [loadJobs, loadSkills]);
+    void loadAgents();
+  }, [loadAgents, loadJobs, loadSkills]);
 
   useEffect(() => {
     setForm((prev) => ({
@@ -390,14 +433,25 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
     if (formReadOnly || !form.name.trim() || !form.prompt.trim() || !form.workspaceDir.trim()) {
       return;
     }
+    const submitIntervalSeconds = parseIntervalSecondsInput(form.intervalSecondsInput);
+    if (form.frequency === 'interval' && submitIntervalSeconds === null) {
+      setJobsError(t('automation.form.intervalInvalid'));
+      return;
+    }
     const isEditing = Boolean(form.id);
     setSubmitting(true);
     try {
-      const schedule: AutomationScheduleView = {
-        frequency: form.frequency,
-        minute: normalizeNumber(form.minute, 0, 59),
-      };
-      if (form.frequency !== 'hourly') {
+      const schedule: AutomationScheduleView =
+        form.frequency === 'interval'
+          ? {
+              frequency: 'interval',
+              intervalSeconds: submitIntervalSeconds ?? MIN_INTERVAL_SECONDS,
+            }
+          : {
+              frequency: form.frequency,
+              minute: normalizeNumber(form.minute, 0, 59),
+            };
+      if (form.frequency !== 'interval' && form.frequency !== 'hourly') {
         schedule.hour = normalizeNumber(form.hour, 0, 23);
       }
       if (form.frequency === 'weekly') {
@@ -408,6 +462,7 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
         prompt: form.prompt.trim(),
         workspaceDir: form.workspaceDir.trim(),
         skills: form.skills,
+        agentName: form.agentName.trim() || null,
         llmSelection: form.llmSelection,
         schedule,
         timezone: form.timezone.trim() || nowTimezone(),
@@ -441,7 +496,7 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
     } finally {
       setSubmitting(false);
     }
-  }, [form, formReadOnly, llmProfiles, loadJobs, loadRuns, workspaceDir]);
+  }, [form, formReadOnly, llmProfiles, loadJobs, loadRuns, t, workspaceDir]);
 
   const handleToggle = useCallback(
     async (job: AutomationJobView) => {
@@ -553,17 +608,26 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
     { value: 6, label: t('automation.weekday.sat') },
   ];
   const frequencyOptions = [
+    { value: 'interval' as const, label: t('automation.frequency.interval') },
     { value: 'hourly' as const, label: t('automation.frequency.hourly') },
     { value: 'daily' as const, label: t('automation.frequency.daily') },
     { value: 'weekly' as const, label: t('automation.frequency.weekly') },
   ];
-  const reasoningOptions = ['off', 'low', 'medium', 'high'] as const;
+  const reasoningOptions = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
   const scheduleSummary =
-    form.frequency === 'hourly'
+    form.frequency === 'interval'
+      ? `${t('automation.frequency.interval')} ${resolvedIntervalSeconds ?? '-'}s`
+      : form.frequency === 'hourly'
       ? `${t('automation.frequency.hourly')} 00:${twoDigit(form.minute)}`
       : form.frequency === 'daily'
         ? `${t('automation.frequency.daily')} ${twoDigit(form.hour)}:${twoDigit(form.minute)}`
         : `${t('automation.frequency.weekly')} ${weekdayOptions.find((item) => item.value === form.weekday)?.label ?? ''} ${twoDigit(form.hour)}:${twoDigit(form.minute)}`;
+  const intervalNextRunPreview =
+    form.frequency === 'interval'
+      ? resolvedIntervalSeconds === null
+        ? '-'
+        : formatWhen(new Date(Date.now() + resolvedIntervalSeconds * 1000).toISOString())
+      : '';
 
   const renderChoiceButton = (
     selected: boolean,
@@ -658,6 +722,9 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
                 <div className="mt-2 text-[11px]" style={{ color: theme.colors.text.muted }}>
                   {t('automation.nextRun')}: {formatWhen(job.nextRunAt)}
                 </div>
+                <div className="mt-1 text-[11px]" style={{ color: theme.colors.text.muted }}>
+                  {t('automation.agent')}: {job.agentName || t('automation.agent.default')}
+                </div>
               </button>
             ))}
             {!loadingJobs && jobs.length === 0 && (
@@ -746,6 +813,29 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
               className="rounded-lg border px-3 py-2 md:col-span-2"
               style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.tertiary }}
             />
+
+            <div className="md:col-span-2">
+              <select
+                data-testid="automation-agent-select"
+                value={form.agentName}
+                disabled={formReadOnly}
+                onChange={(event) => setForm((prev) => ({ ...prev, agentName: event.target.value }))}
+                className="w-full rounded-lg border px-3 py-2"
+                style={fieldSurface(theme)}
+              >
+                <option value="">{t('automation.form.agent.default')}</option>
+                {agents.map((agent) => (
+                  <option key={agent.name} value={agent.name}>
+                    {agent.name}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-1 text-xs" style={{ color: theme.colors.text.muted }}>
+                {usingDefaultAgent
+                  ? t('automation.form.agent.defaultHint')
+                  : t('automation.form.agent.externalHint')}
+              </div>
+            </div>
 
             <div className="relative rounded-lg border p-1" style={fieldSurface(theme)}>
               <select
@@ -874,7 +964,7 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
                 ))}
               </select>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="grid flex-1 grid-cols-3 gap-1.5">
+                <div className="grid flex-1 grid-cols-2 gap-1.5 sm:grid-cols-4">
                   {frequencyOptions.map((item) =>
                     renderChoiceButton(
                       form.frequency === item.value,
@@ -891,6 +981,35 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
                   {scheduleSummary}
                 </div>
               </div>
+              {form.frequency === 'interval' && (
+                <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <input
+                    data-testid="automation-interval-seconds-input"
+                    type="number"
+                    min={MIN_INTERVAL_SECONDS}
+                    max={MAX_INTERVAL_SECONDS}
+                    value={form.intervalSecondsInput}
+                    onChange={(event) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        intervalSecondsInput: event.target.value,
+                      }))
+                    }
+                    placeholder={t('automation.form.intervalSeconds')}
+                    disabled={formReadOnly}
+                    className="rounded-lg border px-3 py-2"
+                    style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.secondary }}
+                  />
+                  <div className="rounded-lg px-3 py-2 text-xs" style={{ color: theme.colors.text.muted }}>
+                    {t('automation.nextRun')}: {intervalNextRunPreview}
+                    {resolvedIntervalSeconds === null && (
+                      <div style={{ color: theme.colors.toolResult.error.text }}>
+                        {t('automation.form.intervalInvalid')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               {form.frequency === 'weekly' && (
                 <div className="mt-2 grid grid-cols-7 gap-1.5">
                   {weekdayOptions.map((item) =>
@@ -905,7 +1024,8 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
                   )}
                 </div>
               )}
-              <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              {form.frequency !== 'interval' && (
+                <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                 {form.frequency !== 'hourly' && (
                   <input
                     data-testid="automation-hour-input"
@@ -932,7 +1052,8 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
                   className="rounded-lg border px-3 py-2"
                   style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.secondary }}
                 />
-              </div>
+                </div>
+              )}
             </div>
             <input
               data-testid="automation-timezone-input"
@@ -946,12 +1067,20 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
           </div>
 
           <div className="mt-3 max-h-28 space-y-1 overflow-y-auto rounded-lg border p-2" style={{ borderColor: theme.colors.border.DEFAULT }}>
-            {skills.length === 0 && (
+            <div className="text-xs font-medium" style={{ color: theme.colors.text.secondary }}>
+              {usingDefaultAgent ? t('automation.form.skills') : t('automation.form.skills.externalDisabled')}
+            </div>
+            {!usingDefaultAgent && (
+              <div className="text-xs" style={{ color: theme.colors.text.muted }}>
+                {t('automation.form.skills.externalHint')}
+              </div>
+            )}
+            {usingDefaultAgent && skills.length === 0 && (
               <div className="text-xs" style={{ color: theme.colors.text.muted }}>
                 {t('automation.form.noSkills')}
               </div>
             )}
-            {skills.map((skill) => (
+            {usingDefaultAgent && skills.map((skill) => (
               <label key={skill.name} className="flex items-center gap-2 text-xs">
                 <input
                   data-testid="automation-skill-checkbox"
@@ -1048,6 +1177,10 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
                     </div>
                     <div className="mt-2 break-all" style={{ color: theme.colors.text.muted }}>
                       {summarizeRun(run)}
+                    </div>
+                    <div className="mt-1" style={{ color: theme.colors.text.muted }}>
+                      {t('automation.agent')}: {run.effectiveAgentName || run.agentName || t('automation.agent.default')}
+                      {run.agentFallbackReason ? ` (${run.agentFallbackReason})` : ''}
                     </div>
                     {(run.sessionId || run.reportPath) && (
                       <div className="mt-2 flex flex-wrap gap-2">

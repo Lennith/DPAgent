@@ -305,6 +305,36 @@ async function testShellExecutionLogRedactsCommandSecrets(): Promise<void> {
   }
 }
 
+async function testAbortSignalCancelsRunningCommand(): Promise<void> {
+  const workspaceDir = createWorkspace('abort');
+  try {
+    const proc = new FakeChildProcess(1105);
+    const tool = new TestableShellTool(
+      {
+        workspaceDir,
+        timeout: 10_000,
+        outputIdleTimeout: 10_000,
+        maxRunTime: 10_000,
+      },
+      () => proc
+    );
+    const killedPids: number[] = [];
+    (tool as unknown as { killProcessTree: (pid: number) => Promise<void> }).killProcessTree = async (pid: number) => {
+      killedPids.push(pid);
+      proc.kill();
+    };
+    const controller = new AbortController();
+    const resultPromise = tool.execute({ command: 'long-running' }, { signal: controller.signal });
+    controller.abort();
+    const result = await resultPromise;
+    assert.equal(result.success, false);
+    assert.match(result.error ?? '', /cancelled/i);
+    assert.deepEqual(killedPids, [1105]);
+  } finally {
+    cleanupWorkspace(workspaceDir);
+  }
+}
+
 async function runAll(): Promise<void> {
   await testUnsupportedShellRejectsBeforeSpawn();
   await testPermissionDeniedSkipsSpawn();
@@ -314,6 +344,7 @@ async function runAll(): Promise<void> {
   testShellCommandAndArgsMapping();
   await testCleanupAllUsesKillTreeAndClearsRegistry();
   await testShellExecutionLogRedactsCommandSecrets();
+  await testAbortSignalCancelsRunningCommand();
   console.log('shell-tool tests passed');
 }
 

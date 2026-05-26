@@ -8,15 +8,75 @@
  * - Web/runtime support types such as MCP status, tool schemas, permissions, and shell options.
  *
  * Notable edit points:
- * - Keep API-facing wire shapes backward-compatible when adding optional fields.
- * - Prefer optional fields for persisted record migrations unless a migration is added.
+ * - Keep persisted record migrations explicit when removing or changing durable fields.
+ * - Runtime-facing configuration should expose canonical fields only.
  */
+export interface ContextBudgetConfig {
+  defaultContextWindowTokens: number;
+  compressionTriggerRatio: number;
+  postCompressionTargetRatio: number;
+  minTokensAddedAfterCompression: number;
+  compressionMaxChars: number;
+  precompressKeepLlmRounds: number;
+  precompressChunkChars: number;
+  precompressRetry: number;
+  reservedOutputTokens: number;
+  reservedReasoningTokens: number;
+  reservedProtocolTokens: number;
+  modelOverrides: Record<string, ModelContextBudgetOverride>;
+}
+
+export interface ModelContextBudgetOverride {
+  contextWindowTokens?: number;
+  compressionTriggerRatio?: number;
+  postCompressionTargetRatio?: number;
+  reservedOutputTokens?: number;
+  reservedReasoningTokens?: number;
+  reservedProtocolTokens?: number;
+}
+
+export interface ResolvedContextBudget {
+  provider: string;
+  model: string;
+  contextWindowTokens: number;
+  estimatedContextWindowChars: number;
+  compressionTriggerRatio: number;
+  postCompressionTargetRatio: number;
+  minTokensAddedAfterCompression: number;
+  compressionMaxChars: number;
+  precompressKeepLlmRounds: number;
+  precompressChunkChars: number;
+  precompressRetry: number;
+  reservedOutputTokens: number;
+  reservedReasoningTokens: number;
+  reservedProtocolTokens: number;
+  safeInputTokens: number;
+  compressionTriggerTokens: number;
+  postCompressionTargetTokens: number;
+  source: 'profile_override' | 'model_override' | 'config_default';
+}
+
+export interface ContextUsageEstimate {
+  inputTokens: number;
+  source: 'provider_usage' | 'weighted_char_estimate' | 'calibrated_weighted_estimate';
+  confidence: 'exact' | 'estimated';
+  rawChars?: number;
+}
+
+export interface RemoteAccessAuthConfig {
+  enabled: boolean;
+  passwordHash?: string;
+  passwordSalt?: string;
+  sessionTtlMs: number;
+  trustProxy: boolean;
+}
+
 export interface LLMProvider {
   type: 'anthropic' | 'openai';
 }
 
 export type APIProvider = 'anthropic' | 'openai';
-export type ReasoningPreset = 'off' | 'low' | 'medium' | 'high';
+export type ReasoningPreset = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface LlmProviderCapabilities {
   modelDiscovery?: boolean;
@@ -31,7 +91,9 @@ export interface LlmProviderProfileConfig {
   apiKey: string;
   apiBase: string;
   defaultModel: string;
+  availableModels?: string[];
   maxOutputTokens?: number;
+  contextWindowTokens?: number;
   enabled?: boolean;
   capabilities?: LlmProviderCapabilities;
   createdAt?: string;
@@ -45,7 +107,7 @@ export interface LlmProfilesConfig {
 
 export interface SessionLlmProviderOptions {
   openai?: {
-    reasoningEffort?: 'low' | 'medium' | 'high' | null;
+    reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | null;
   };
   anthropic?: {
     thinkingBudgetTokens?: number | null;
@@ -66,6 +128,15 @@ export interface SessionLlmSelectionInput {
   reasoningPreset?: ReasoningPreset;
   providerOptions?: SessionLlmProviderOptions;
   updatedAt?: string;
+}
+
+export type SessionOrigin = 'web' | 'cli' | 'automation';
+export type RunOwner = SessionOrigin;
+
+export interface SessionInteractionState {
+  mode: 'normal' | 'observe_only';
+  reason?: 'cli_active_run' | 'automation_active_run' | 'wss_controlled_active_run';
+  owner?: RunOwner;
 }
 
 export interface ResolvedLlmRuntimeConfig {
@@ -104,6 +175,42 @@ export interface LlmProfileIntrospection {
     thinkingBudget: boolean;
   };
   error?: string;
+}
+
+export interface AgentProfileConfig {
+  version?: 1;
+  description?: string;
+  llmProfileId?: string;
+  llmModel?: string;
+  reasoningPreset?: ReasoningPreset;
+  toolsetName?: string;
+  allowedTools?: string[];
+  maxSteps?: number;
+  timeoutMs?: number;
+  loadGlobalSkills?: boolean;
+  exposeAsSubagent?: boolean;
+  promptAppend?: string;
+}
+
+export interface AgentProfileConfigView extends AgentProfileConfig {
+  warnings?: string[];
+  path?: string;
+}
+
+export interface AgentRuntimeOverrides {
+  agentProfile?: {
+    source: 'workspace' | 'global' | 'bundled';
+    name: string;
+    path: string;
+  };
+  loadGlobalSkills?: boolean;
+  llmProfileId?: string;
+  llmModel?: string;
+  reasoningPreset?: ReasoningPreset;
+  toolsetName?: string;
+  allowedTools?: string[];
+  maxSteps?: number;
+  timeoutMs?: number;
 }
 
 export interface FunctionCall {
@@ -241,8 +348,10 @@ export interface ContextPrecompressEvent {
   source?: 'replay_prepare' | 'in_turn_precompress';
   observedAt: string;
   triggerChars: number;
+  triggerTokens?: number;
   triggerRatio?: number;
   triggerThresholdChars?: number;
+  triggerThresholdTokens?: number;
   keepLlmRounds: number;
   keepLlmRoundsApplied?: number;
   chunkChars: number;
@@ -271,7 +380,9 @@ export interface ContextPrecompressEvent {
   willRetriggerNextTurn?: boolean;
   postCompressRatio?: number;
   providerPayloadCharsAfter?: number;
+  providerPayloadTokensAfter?: number;
   projectedCharsAfter?: number;
+  projectedTokensAfter?: number;
   postCompactValidation?: 'provider_payload' | 'provider_payload_after_turn';
 }
 
@@ -299,14 +410,18 @@ export interface ContextOverflowEvent {
   decision: ContextOverflowDecision;
   errorRaw: string;
   contextWindowChars: number;
+  contextWindowTokens?: number;
   precompressTriggerRatio: number;
   precompressTriggerThresholdChars: number;
+  precompressTriggerThresholdTokens?: number;
   forcedTrimChars: number;
   maxErrorsBeforeTrim: number;
   beforeMessageCount: number;
   beforeChars: number;
+  beforeTokens?: number;
   afterMessageCount?: number;
   afterChars?: number;
+  afterTokens?: number;
   tailRoundsKept?: number;
   chunkCount?: number;
   retryCount?: number;
@@ -403,17 +518,26 @@ export interface ProtocolRecoveryEvent {
   nextAction?: string;
 }
 
-export type PlanStepStatus = 'pending' | 'in_progress' | 'completed';
+export type FinalizedPlanStepPriority = 'low' | 'medium' | 'high';
 
-export interface PlanStep {
-  step: string;
-  status: PlanStepStatus;
+export interface FinalizedPlanStep {
+  planStepId: string;
+  work: string;
+  detectionStandard: string;
+  priority?: FinalizedPlanStepPriority;
+  tags?: string[];
 }
 
-export interface PlanDocument {
-  explanation?: string;
-  plan: PlanStep[];
-  updatedAt: string;
+export interface FinalizedPlanView {
+  planId?: string;
+  title: string;
+  summary?: string;
+  markdown: string;
+  steps: FinalizedPlanStep[];
+  testPlan?: string[];
+  assumptions?: string[];
+  notes?: string;
+  updatedAt?: string;
 }
 
 export interface PlanOption {
@@ -428,9 +552,14 @@ export interface PlanQuestion {
   options: PlanOption[];
 }
 
+export type PlanInputRequestSource = 'request_user_input' | 'finalize_plan_approval';
+
 export interface PlanInputRequest {
   requestId: string;
   questions: PlanQuestion[];
+  turnId?: string;
+  source?: PlanInputRequestSource;
+  planPreview?: FinalizedPlanView;
 }
 
 export interface MemoryTriggerEvent {
@@ -449,6 +578,29 @@ export interface SkillTriggerEvent {
   detail?: string;
 }
 
+export type RunningInputQueueStatus = 'queued_next' | 'insert_requested';
+
+export interface RunningInputQueueItem {
+  id: string;
+  runId: string;
+  context: ContextRef;
+  prompt: string;
+  clientRequestId?: string;
+  selectedAgentName?: string;
+  fileReferences?: string[];
+  createdAt: string;
+  updatedAt: string;
+  status: RunningInputQueueStatus;
+  insertRequestedAt?: string;
+}
+
+export interface RunningInputInsertion {
+  itemId: string;
+  prompt: string;
+  selectedAgentName?: string;
+  fileReferences?: string[];
+}
+
 export interface PlanInputAnswer {
   id: string;
   selectedLabel: string;
@@ -459,7 +611,9 @@ export interface PlanInputAnswer {
 export interface ContextPendingPlanInput {
   runId: string;
   requestId: string;
+  source?: PlanInputRequestSource;
   questions: PlanQuestion[];
+  planPreview?: FinalizedPlanView;
   requestedAt: string;
   lastError?: string;
 }
@@ -467,6 +621,7 @@ export interface ContextPendingPlanInput {
 export interface AgentCallback {
   onThinking?: (thinking: string) => void;
   onToolCall?: (name: string, args: Record<string, unknown>, toolCallId?: string) => void;
+  onBeforeToolExecution?: (name: string, args: Record<string, unknown>, toolCallId?: string) => void | Promise<void>;
   onToolResult?: (name: string, result: ToolResult) => void;
   onReplayCheckpoint?: (event: ReplayCheckpointEvent) => void | Promise<void>;
   onStep?: (step: number, maxSteps: number) => void;
@@ -478,12 +633,39 @@ export interface AgentCallback {
   onSummaryMessagesAccepted?: (event: SummaryApplyAcceptedEvent) => void;
   onSummaryMessagesApplied?: (event: SummaryApplyAppliedEvent) => void;
   onMaxTokensRecovery?: (event: MaxTokensRecoveryEvent) => void | Promise<void>;
+  onContextUsageEstimate?: (event: ContextUsageEstimateEvent) => void | Promise<void>;
   onContextPrecompress?: (event: ContextPrecompressEvent) => void | Promise<void>;
   onContextOverflow?: (event: ContextOverflowEvent) => void | Promise<void>;
   onRequestUserInput?: (request: PlanInputRequest) => Promise<PlanInputAnswer[]>;
+  onConsumeRunningInput?: (event: {
+    runId?: string;
+    context?: ContextRef;
+    step: number;
+  }) => Promise<RunningInputInsertion | null | undefined>;
+  onRunningInputInserted?: (event: {
+    runId?: string;
+    context?: ContextRef;
+    itemId: string;
+    step: number;
+  }) => void | Promise<void>;
   isInAutoLoop?: () => boolean;
   requestAutoLoopExit?: (reason?: string) => { accepted: boolean; message?: string };
   onComplete?: (result: string, finishReason?: string, meta?: AgentCompletionMeta) => void;
+}
+
+export interface ContextUsageEstimateEvent {
+  observedAt: string;
+  stage: 'preflight' | 'provider_usage_anchor';
+  source: ContextUsageEstimate['source'];
+  confidence: ContextUsageEstimate['confidence'];
+  usedTokens: number;
+  limitTokens: number;
+  usedChars: number;
+  limitChars: number;
+  ratio: number;
+  anchorPromptTokens?: number;
+  deltaEstimatedTokens?: number;
+  calibrationMultiplier?: number;
 }
 
 export interface ReplayCheckpointEvent {
@@ -604,8 +786,6 @@ export interface InterruptedArtifact {
   workspaceDir?: string;
   terminalCode: Exclude<RunTerminalCode, 'completed'>;
   replayCutoffKind: 'none' | 'checkpoint';
-  resumable: boolean;
-  resumeToken?: string;
   lastSafeStep: number;
   maxSteps: number;
   errorSummary?: string;
@@ -614,7 +794,6 @@ export interface InterruptedArtifact {
   previewMessages: Message[];
   sideEffectLedger: SideEffectLedgerEntry[];
   checkpointTurnId?: string;
-  dismissedAt?: string;
 }
 
 export interface RunTerminalState {
@@ -622,8 +801,6 @@ export interface RunTerminalState {
   runFamilyId: string;
   draftId: string;
   terminalCode: RunTerminalCode;
-  resumable: boolean;
-  resumeToken?: string | null;
   lastSafeStep: number;
   maxSteps: number;
   replayCutoffKind: ReplayCutoffKind;
@@ -637,14 +814,19 @@ export interface ContextInspectableMeta {
   updatedAt?: string;
   workspaceDir?: string;
   toolsetName?: string;
+  origin?: ContextNamespaceMeta['origin'];
+  lastRunOrigin?: ContextNamespaceMeta['lastRunOrigin'];
+  lastRunAt?: ContextNamespaceMeta['lastRunAt'];
   llmSelection?: ContextNamespaceMeta['llmSelection'];
   memoryPromotionState?: MemoryPromotionState;
   compressedHistoryContext?: ContextNamespaceMeta['compressedHistoryContext'];
   autoLoopConfig?: ContextNamespaceMeta['autoLoopConfig'];
   agentInjectionState?: ContextNamespaceMeta['agentInjectionState'];
+  planningState?: ContextNamespaceMeta['planningState'];
   automationRun?: ContextNamespaceMeta['automationRun'];
   completionMarkerStats?: ContextNamespaceMeta['completionMarkerStats'];
   pendingPlanInput?: ContextNamespaceMeta['pendingPlanInput'];
+  runtimeErrors?: ContextNamespaceMeta['runtimeErrors'];
 }
 
 export interface ContextInspectState {
@@ -674,13 +856,14 @@ export interface MemoryPromotionState {
   lastError?: string;
 }
 
-export type AutomationFrequency = 'hourly' | 'daily' | 'weekly';
+export type AutomationFrequency = 'once' | 'interval' | 'hourly' | 'daily' | 'weekly';
 
 export interface AutomationSchedule {
   frequency: AutomationFrequency;
-  minute: number;
+  minute?: number;
   hour?: number;
   weekday?: number;
+  intervalSeconds?: number;
 }
 
 export type AutomationRunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
@@ -695,6 +878,9 @@ export interface AutomationRunMeta {
   runId?: string;
   scheduledBy?: 'automation';
   triggerSource?: AutomationTriggerSource;
+  agentName?: string;
+  effectiveAgentName?: string;
+  agentFallbackReason?: string;
   completedAt?: string;
 }
 
@@ -704,6 +890,7 @@ export interface AutomationJob {
   prompt: string;
   workspaceDir: string;
   skills: string[];
+  agentName?: string;
   llmSelection?: SessionLlmSelection;
   schedule: AutomationSchedule;
   timezone: string;
@@ -711,6 +898,7 @@ export interface AutomationJob {
   jobSource?: AutomationJobSource;
   systemTask?: AutomationSystemTask;
   readOnly?: boolean;
+  sessionId?: string;
   createdAt: string;
   updatedAt: string;
   lastRunAt?: string;
@@ -729,6 +917,9 @@ export interface AutomationRunRecord {
   resultSummary?: string;
   error?: string;
   skippedReason?: string;
+  agentName?: string;
+  effectiveAgentName?: string;
+  agentFallbackReason?: string;
   memorySyncStatus?: 'succeeded' | 'failed';
   memorySyncError?: string;
   reportPath?: string;
@@ -793,11 +984,42 @@ export interface AutomationRunReport {
   items: SkillGovernanceReportItem[];
 }
 
+export interface WorkspaceSkillGovernanceReport {
+  kind: 'workspace_skill_governance';
+  runId: string;
+  workspaceDir: string;
+  generatedAt: string;
+  fallback: boolean;
+  fallbackReason?: string;
+  summary: AutomationRunReportSummary;
+  items: SkillGovernanceReportItem[];
+}
+
 export interface CompletionMarkerStats {
   repairCount: number;
   lastTriggeredAt?: string;
   lastResolvedAt?: string;
   lastIssue?: 'missing_tail_marker' | 'duplicate_tail_marker';
+}
+
+export type SessionPlanningState = 'normal' | 'plan_drafting' | 'plan_executing';
+
+export interface SessionPlanningMeta {
+  state: SessionPlanningState;
+  pendingPlanId?: string;
+  activeExecutionPlanId?: string;
+  updatedAt: string;
+}
+
+export interface ContextRuntimeErrorMessage {
+  id: string;
+  runId: string;
+  message: string;
+  createdAt: string;
+  terminalCode?: Exclude<RunTerminalCode, 'completed'>;
+  replayCutoffKind?: ReplayCutoffKind;
+  lastSafeStep?: number;
+  maxSteps?: number;
 }
 
 export interface ContextNamespaceMeta {
@@ -808,7 +1030,23 @@ export interface ContextNamespaceMeta {
   updatedAt: string;
   workspaceDir?: string;
   toolsetName?: string;
+  origin?: SessionOrigin;
+  lastRunOrigin?: SessionOrigin;
+  lastRunAt?: string;
+  runtimeAttachment?: {
+    externalMcpServers?: MCPServerConfig[];
+    externalMcpServerNames?: string[];
+    externalMcpFingerprint?: string;
+    updatedAt: string;
+  };
   llmSelection?: SessionLlmSelection;
+  sessionShare?: {
+    tokenHash: string;
+    createdAt: string;
+    expiresAt: string;
+    revokedAt?: string;
+    version: number;
+  };
   memoryPromotionState?: MemoryPromotionState;
   compressedHistoryContext?: {
     sealedRoundCount: number;
@@ -833,18 +1071,32 @@ export interface ContextNamespaceMeta {
   agentInjectionState?: {
     lastProfilePath?: string;
     lastProfileName?: string;
-    lastProfileSource?: 'workspace' | 'global';
+    lastProfileSource?: 'workspace' | 'global' | 'bundled';
     lastExplicitAgentName?: string;
     updatedAt: string;
+  };
+  planningState?: SessionPlanningMeta;
+  lastPlanExecutionExit?: {
+    mode: 'normal' | 'force';
+    reason?: string;
+    planId?: string;
+    unfinishedTodoCount: number;
+    exitedAt: string;
   };
   automationRun?: AutomationRunMeta;
   completionMarkerStats?: CompletionMarkerStats;
   pendingPlanInput?: ContextPendingPlanInput;
+  runtimeErrors?: ContextRuntimeErrorMessage[];
   latestContextUtilization?: {
     observedAt: string;
     ratio: number;
     usedChars: number;
     limitChars: number;
+    usedTokens?: number;
+    limitTokens?: number;
+    source?: ContextUsageEstimate['source'];
+    anchorPromptTokens?: number;
+    deltaEstimatedTokens?: number;
     isWarning: boolean;
   };
 }
@@ -875,12 +1127,6 @@ export interface SubAgentProviderConfig {
   timeoutMs?: number;
 }
 
-export interface SubAgentPresetConfig {
-  description?: string;
-  providerId?: string;
-  systemPrompt: string;
-}
-
 export interface SubAgentArtifact {
   files: string[];
   commands: string[];
@@ -889,10 +1135,11 @@ export interface SubAgentArtifact {
 
 export interface SubAgentAssignedAgent {
   name: string;
-  source: 'global' | 'workspace';
+  source: 'bundled' | 'global' | 'workspace';
   description: string;
   path: string;
   mtime: string;
+  config?: AgentProfileConfigView;
 }
 
 export interface SubAgentAssignedAgentProfile extends SubAgentAssignedAgent {
@@ -901,6 +1148,7 @@ export interface SubAgentAssignedAgentProfile extends SubAgentAssignedAgent {
 
 export interface SubAgentCreateParams {
   parentContext: ContextRef;
+  parentTurnId?: string;
   prompt: string;
   agentName?: string;
   providerId?: string;
@@ -938,20 +1186,20 @@ export interface SubAgentStatus {
   lastHeartbeatAt?: string;
   latestResult?: SubAgentResult;
   lastError?: string;
+  lifecycleDiagnostic?: string;
   prompt?: string;
   providerId?: string;
+  agentConfig?: AgentProfileConfig;
   allowedTools?: string[];
   effectiveAllowedTools?: string[];
   workspaceDir?: string;
 }
 
-export interface MiniMaxRunOptions {
+export interface DPAgentRunOptions {
   prompt: string;
   context: ContextRef;
   runId?: string;
   runFamilyId?: string;
-  resumeToken?: string;
-  resumeRequested?: boolean;
   rawUserPrompt?: string;
   historyUserPrompt?: string;
   effectivePrompt?: string;
@@ -960,12 +1208,14 @@ export interface MiniMaxRunOptions {
   content?: string | ContentBlock[];
   assert?: (result: string) => boolean | Promise<boolean>;
   callback?: AgentCallback;
+  planningState?: SessionPlanningState;
   additionalSystemPrompt?: string;
+  agentRuntimeOverrides?: AgentRuntimeOverrides;
   workspaceDir?: string;
   additionalDirs?: string[];
 }
 
-export interface MiniMaxRunResult {
+export interface DPAgentRunResult {
   content: string;
   context: ContextRef;
   turnId: string;
@@ -1049,6 +1299,24 @@ export interface SkillConfig {
   enabled?: boolean;
 }
 
+export interface AsrConfig {
+  enabled: boolean;
+  provider: 'local-process';
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  modelId: string;
+  timeoutMs: number;
+  maxConcurrent: number;
+  maxQueueSize: number;
+  maxAudioBytes: number;
+  maxOutputBytes: number;
+  resultFormat: 'json' | 'text';
+  startupTimeoutMs: number;
+  restartBackoffMs: number;
+}
+
 export interface AgentConfig {
   api: {
     apiKey: string;
@@ -1064,25 +1332,16 @@ export interface AgentConfig {
     workspaceDir: string;
     completionMarkerEnforcementEnabled?: boolean;
     defaultToolset?: string;
-    skillWriteMode?: 'confirm' | 'auto';
     subAgentMaxParallelPerParent: number;
     subAgentGlobalMaxParallel: number;
     contextReplayMinRounds?: number;
     contextReplayMaxRounds?: number;
     contextReplayBudgetRatio?: number;
-    contextCompressionMaxChars?: number;
-    contextWindowChars?: number;
-    contextPrecompressTriggerRatio?: number;
-    contextOverflowForcedTrimChars?: number;
     contextOverflowMaxErrorsBeforeTrim?: number;
-    contextPrecompressKeepLlmRounds?: number;
-    contextPrecompressChunkChars?: number;
-    contextPrecompressRetry?: number;
     contextDir?: string;
     runtimeDataDir?: string;
     systemPromptPath?: string;
-    skillListPath?: string;
-    skillsDir?: string;  // Codex skills directory path
+    skillsDir?: string;  // Global skills directory path.
     globalAgentsDir?: string;
   };
   tools: {
@@ -1101,6 +1360,14 @@ export interface AgentConfig {
     connectTimeout: number;
     executeTimeout: number;
   };
+  toolsets?: {
+    custom?: Array<{
+      name: string;
+      description: string;
+      capabilities: string[];
+      allowUnknownTools?: boolean;
+    }>;
+  };
   retry: {
     enabled: boolean;
     maxRetries: number;
@@ -1108,8 +1375,15 @@ export interface AgentConfig {
     maxDelay: number;
     exponentialBase: number;
   };
+  web?: {
+    publicBaseUrl?: string;
+    downloadLinkTtlMs?: number;
+    sessionShareTtlHours?: number;
+  };
+  contextBudget?: ContextBudgetConfig;
+  remoteAccessAuth?: RemoteAccessAuthConfig;
   agentProviders?: SubAgentProviderConfig[];
-  subAgentPresets?: Record<string, SubAgentPresetConfig>;
+  asr?: AsrConfig;
 }
 
 export type ShellType = 'powershell' | 'cmd' | 'bash' | 'sh';

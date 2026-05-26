@@ -8,7 +8,7 @@ import {
   parseStructuredLines,
   previousRuntimeFromEvaluation,
   validateRequiredOperations,
-} from '../../scripts/eval-toolcall-context-session.ts';
+} from '../../scripts/lib/eval-toolcall-context-core.ts';
 
 function runDryRun(outputRoot: string): { rounds: Array<{ round: number; prompt: string }> } {
   const result = spawnSync(
@@ -52,8 +52,8 @@ async function runCase(): Promise<void> {
     assert.match(workPrompt, /PREV_TOKEN=<copy exact previous round TOKEN>/);
     assert.match(workPrompt, /PREV_TOKEN must be the bare token value only/);
     assert.match(workPrompt, /Final answer format is strict/);
-    assert.match(workPrompt, /Do not pass `pattern` to `list_directory` or `read_file`/);
-    assert.match(workPrompt, /do not call `list_directory` on file paths/);
+    assert.match(workPrompt, /Do not pass `pattern` to `read_file`/);
+    assert.match(workPrompt, /do not replace `read_file` with directory listing on file paths/);
     assert.match(workPrompt, /Return only the exact artifact lines followed immediately by the tail marker/);
     assert.match(workPrompt, /Do not use Markdown fences, bullets, headings, summaries, extracted-value sections, explanations, or parenthetical annotations/);
     assert.doesNotMatch(workPrompt, /SEED_CODE=BRV02/);
@@ -61,34 +61,37 @@ async function runCase(): Promise<void> {
     assert.doesNotMatch(workPrompt, /last 6 characters of PREV_TOKEN/);
     assert.doesNotMatch(workPrompt, /<PREV_SUFFIX>/);
     assert.match(reviewPrompt, /extract `TOKEN` and copy that exact value into `PREV_TOKEN`/);
+    assert.match(reviewPrompt, /extract `SEED_CODE` and copy it into `PREV_SEED_CODE`/);
+    assert.match(reviewPrompt, /extract `SEED_VALUE` and copy it into `PREV_SEED_VALUE`/);
+    assert.match(reviewPrompt, /extract `STATUS` and copy it into `STATUS`/);
     assert.match(reviewPrompt, /Set `TOKEN` exactly to `review-03`/);
     assert.match(reviewPrompt, /SEED_VALUE=<from seed file>/);
     assert.match(reviewPrompt, /PREV_TOKEN=<copy exact previous round TOKEN>/);
+    assert.match(reviewPrompt, /PREV_SEED_CODE=<copy exact previous round SEED_CODE>/);
+    assert.match(reviewPrompt, /PREV_SEED_VALUE=<copy exact previous round SEED_VALUE>/);
+    assert.match(reviewPrompt, /STATUS=<copy exact previous round STATUS>/);
     assert.doesNotMatch(reviewPrompt, /SEED_VALUE=crane-harbor-violet/);
     assert.doesNotMatch(reviewPrompt, /last 6 characters of PREV_TOKEN/);
     assert.doesNotMatch(reviewPrompt, /<PREV_SUFFIX>/);
-    assert.match(reviewPrompt, /comma-separated with ASCII commas and no spaces, in first-seen order/);
-    assert.match(reviewPrompt, /PREV_TOOLS must contain only bare tool names/);
-    assert.match(reviewPrompt, /Include `write_file` if the previous round called it/);
-    assert.match(reviewPrompt, /Example PREV_TOOLS format: list_directory,read_file,grep,write_file/);
-    assert.match(reviewPrompt, /PREV_TOOLS=<exact previous round tool names, comma-separated with no spaces>/);
+    assert.match(reviewPrompt, /derive prior-round facts from the real workspace/);
+    assert.match(reviewPrompt, /Do not summarize or reinterpret the previous round/);
     assert.match(reviewPrompt, /Final answer format is strict/);
-    assert.match(reviewPrompt, /Do not pass `pattern` to `list_directory` or `read_file`/);
-    assert.match(reviewPrompt, /do not call `list_directory` on file paths/);
+    assert.match(reviewPrompt, /Do not pass `pattern` to `read_file`/);
+    assert.match(reviewPrompt, /do not replace `read_file` with directory listing on file paths/);
 
     const parsedBulletResponse = parseStructuredLines(
       [
         'Verification complete.',
         '- **ROUND**: 03',
         '- **MODE**: REVIEW',
-        '- **PREV_TOOLS**: list_directory,read_file,write_file',
+        '- **PREV_SEED_CODE**: BRV02',
         '- **STATUS**: OK',
       ].join('\n')
     );
     assert.deepEqual(parsedBulletResponse, {
       ROUND: '03',
       MODE: 'REVIEW',
-      PREV_TOOLS: 'list_directory,read_file,write_file',
+      PREV_SEED_CODE: 'BRV02',
       STATUS: 'OK',
     });
 
@@ -97,14 +100,14 @@ async function runCase(): Promise<void> {
         'Verification complete.',
         '- **SEED_CODE=AUR01** (extracted from seed-01.txt)',
         '- **SEED_VALUE=amber-orbit-lantern** (extracted from seed-01.txt)',
-        '- **PREV_TOOLS=list_directory,read_file,write_file** (deduplicated from Round 29)',
+        '- **PREV_SEED_VALUE=amber-orbit-lantern** (copied from previous round file)',
         '- **PREV_TOKEN=work-29** (copied exactly from previous round-29.txt)',
       ].join('\n')
     );
     assert.deepEqual(parsedDecoratedResponse, {
       SEED_CODE: 'AUR01',
       SEED_VALUE: 'amber-orbit-lantern',
-      PREV_TOOLS: 'list_directory,read_file,write_file',
+      PREV_SEED_VALUE: 'amber-orbit-lantern',
       PREV_TOKEN: 'work-29',
     });
 
@@ -245,7 +248,14 @@ async function runCase(): Promise<void> {
       'required_operation_order:grep_existing_tokens_before_write_output',
     ]);
 
-    const previousState = { round: 7, token: 'review-06', uniqueToolNames: ['list_directory', 'read_file', 'write_file'] };
+    const previousState = {
+      round: 7,
+      token: 'review-06',
+      uniqueToolNames: ['list_directory', 'read_file', 'write_file'],
+      seedCode: 'GLD07',
+      seedValue: 'glide-maple-anvil',
+      status: 'OK',
+    };
     const nextState = previousRuntimeFromEvaluation(
       previousState,
       {
@@ -290,6 +300,9 @@ async function runCase(): Promise<void> {
     assert.equal(nextState.round, 8);
     assert.equal(nextState.token, 'review-06');
     assert.deepEqual(nextState.uniqueToolNames, ['list_directory']);
+    assert.equal(nextState.seedCode, 'GLD07');
+    assert.equal(nextState.seedValue, 'glide-maple-anvil');
+    assert.equal(nextState.status, 'OK');
   } finally {
     fs.rmSync(outputRoot, { recursive: true, force: true });
   }

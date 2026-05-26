@@ -1,29 +1,31 @@
-# 配置说明
+# DPAgent Configuration
 
-当前运行时的单一配置源是 `config.yaml`。
+The runtime configuration source is `config.yaml`. First package run creates a
+minimal template in the current working directory. Source-tree development can
+edit the repository-local `config.yaml`, but local config must not be committed.
 
-如果你是 npm 包用户，首次运行 `npx minimax-agent` 时会自动生成一个最小配置模板。  
-如果你是仓库用户，可以直接编辑仓库根目录下的 `config.yaml`。
-
-## 1. 最小可运行配置
-
+## Minimal Configuration
 ```yaml
-api:
-  apiKey: "YOUR_API_KEY"
-  apiBase: "https://api.minimaxi.com"
-  model: "MiniMax-M2.7-highspeed"
-  provider: "anthropic"
-  maxOutputTokens: 32768
+llmProfiles:
+  defaultProfileId: default
+  profiles:
+    - id: default
+      name: "Default Profile"
+      provider: "anthropic"
+      apiKey: "YOUR_API_KEY"
+      apiBase: "https://api.minimaxi.com"
+      defaultModel: "MiniMax-M2.7-highspeed"
+      maxOutputTokens: 32768
 
 agent:
   workspaceDir: "./workspace"
   contextDir: "./contexts"
   runtimeDataDir: "./runtime"
-  skillListPath: "./skill-list.yaml"
+  skillsDir: "C:\\Users\\...\\.codex\\skills"
+  globalAgentsDir: "./agents"
 ```
 
-## 2. 当前常用配置项
-
+## Common Agent Fields
 ```yaml
 agent:
   maxSteps: 100
@@ -32,50 +34,25 @@ agent:
   contextDir: "./contexts"
   runtimeDataDir: "./runtime"
   defaultToolset: "full-access"
-  skillWriteMode: "auto"
-  skillListPath: "./skill-list.yaml"
   skillsDir: "C:\\Users\\...\\.codex\\skills"
   globalAgentsDir: "./agents"
 ```
 
-说明：
+- `workspaceDir`: default workspace for file tools, shell, workspace memory, and skills.
+- `contextDir`: event-sourced session context directory.
+- `runtimeDataDir`: memory, skills, audit, session search, Todo, and other runtime data.
+- `defaultToolset`: default capability whitelist.
+- `skillsDir`: global skill directory. Each child skill directory contains `SKILL.md`.
+- `globalAgentsDir`: native or custom agent profile directory. Each profile lives under
+  `globalAgentsDir/<agentName>/AGENTS.md`; optional profile settings live in
+  `globalAgentsDir/<agentName>/agent.yaml`; optional agent-specific skills live under
+  `globalAgentsDir/<agentName>/skill/`. Set `loadGlobalSkills: false` in
+  `agent.yaml` when that external agent should ignore the Settings global skills
+  directory; the default is `true`. Workspace skills under `workspaceDir/skills/`
+  are runtime-generated or approved workspace sources and are not controlled by
+  `loadGlobalSkills`.
 
-- `workspaceDir`
-  默认工作目录，影响文件操作、Shell、workspace memory 和 skill 作用域
-- `contextDir`
-  上下文事件流目录
-- `runtimeDataDir`
-  runtime 下的 memory、skills、audit、session-search、todo 等数据根目录
-- `defaultToolset`
-  默认能力白名单；当前代码默认值是 `full-access`，如果希望默认更收敛，建议显式设置为 `windows-dev`
-- `skillWriteMode`
-  skill draft 是自动写入还是保留审批；当前代码默认值是 `auto`
-- `skillListPath`
-  显式配置的 skill 列表文件
-- `skillsDir`
-  外部 Codex skills 目录
-- `globalAgentsDir`
-  全局 agent 配置目录
-
-## 3. API 配置
-
-```yaml
-api:
-  apiKey: "YOUR_API_KEY"
-  apiBase: "https://api.minimaxi.com"
-  model: "MiniMax-M2.7-highspeed"
-  provider: "anthropic"
-  maxOutputTokens: 32768
-```
-
-注意：
-
-- `apiKey` 必须有效
-- `apiBase` 需要和 key 所在区域匹配
-- `maxOutputTokens` 必须是正整数
-
-## 4. tool 配置
-
+## Tool Configuration
 ```yaml
 tools:
   enableFileTools: true
@@ -85,10 +62,11 @@ tools:
   shellTimeout: 30000
 ```
 
-当前已经不再使用旧的 `enableNote` 配置。
+Removed legacy settings such as `session_note`, `enableNote`,
+`memoryWriteMode`, `skillWriteMode`, old `dpagent.yaml`, and old `history_message_*.jsonl`
+semantics are not current configuration contracts.
 
-## 5. MCP 配置
-
+## MCP Configuration
 ```yaml
 mcp:
   enabled: true
@@ -104,54 +82,15 @@ mcp:
         MINIMAX_API_HOST: "https://api.minimaxi.com"
 ```
 
-如果 `enabled: false` 或 `servers: []`，MCP 工具不会注册。
+When `enabled: false` or `servers: []`, MCP tools are not registered.
 
-## 6. retry 配置
-
-```yaml
-retry:
-  enabled: true
-  maxRetries: 3
-  initialDelay: 1
-  maxDelay: 60
-  exponentialBase: 2
-```
-
-## 7. 已移除的旧配置概念
-
-当前版本已经移除或不再建议依赖：
-
-- `session_note`
-- `enableNote`
-- `memoryWriteMode`
-- 旧的 `minimax-agent.yaml`
-- 旧的 `history_message_*.jsonl` 语义作为主上下文来源
-
-## 8. 配置更新入口
-
-运行后可以通过两种方式改配置：
-
-- 直接编辑 `config.yaml`
-- 在 Web UI 的 Settings / Config 中更新
-
-当前 Web UI 可直接更新的主要项包括：
-
-- API Base
-- 模型
-- `skillsDir`
-- `globalAgentsDir`
-- `defaultToolset`
-- `skillWriteMode`
-
-## 9. 校验建议
-
-修改配置后，建议至少检查：
+## Validation
+After config-sensitive changes, run the closest relevant checks:
 
 ```bash
-npx tsc --noEmit
 npm run build:web
+npm test
 ```
 
-如果是发版前配置收敛，请按发布门禁走：
-
-- [docs/INTERNAL_NPM_PUBLISH_STANDARD.md](docs/INTERNAL_NPM_PUBLISH_STANDARD.md)
+Release candidates follow [release gate overview](doc/playbook/release-gate-overview.md).
+Local config and release profiles follow [local config and profile hygiene](doc/playbook/local-config-profile-hygiene.md).

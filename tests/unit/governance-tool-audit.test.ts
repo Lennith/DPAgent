@@ -2,8 +2,9 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MiniMaxAgent } from '../../src/index.js';
+import { DPAgent } from '../../src/index.js';
 import { createMemoryTool, createSkillTools } from '../../src/tools/index.js';
+import { readSkillVersion } from '../../src/skills/skill-markdown.js';
 
 function createHarness(): {
   tempDir: string;
@@ -34,7 +35,7 @@ async function runCase(): Promise<void> {
   const harness = createHarness();
   const sessionId = 'governance-tool-audit';
   try {
-    const agent = new MiniMaxAgent({
+    const agent = new DPAgent({
       allowMissingApiKeyAtBoot: true,
       configPath: path.join(process.cwd(), 'config.yaml'),
       workspaceDir: harness.workspaceDir,
@@ -98,16 +99,13 @@ async function runCase(): Promise<void> {
 
     const [, , confirmSkillTool] = createSkillTools({
       skillLoader: agent.getSkillLoader(),
-      skillDraftStore: agent.getSkillDraftStore(),
+      writeSkill: (payload) => agent.writeSkill(payload),
       resolveWorkspaceDir: () => harness.workspaceDir,
       resolveSessionId: () => sessionId,
       resolveToolsetName: () => 'windows-dev',
       globalSkillsDir: path.join(harness.tempDir, 'global-skills'),
-      writeMode: 'confirm',
-      approveSkillDraft: (id) => agent.approveSkillDraft(id),
-      rejectSkillDraft: (id, reviewNote) => agent.rejectSkillDraft(id, reviewNote),
     });
-    const pendingSkill = parsePayload(
+    const appliedSkill = parsePayload(
       await confirmSkillTool.execute({
         action: 'create',
         name: 'release-audit-skill',
@@ -115,50 +113,58 @@ async function runCase(): Promise<void> {
         content: 'Always verify the package metadata before publish.',
       })
     );
-    parsePayload(
+    assert.equal(appliedSkill.mode, 'applied');
+    assert.equal(appliedSkill.record.status, 'applied');
+    assert.equal(fs.existsSync(appliedSkill.record.targetPath), true);
+    assert.equal(readSkillVersion(fs.readFileSync(appliedSkill.record.targetPath, 'utf-8')), '1');
+    const updatedSkill = parsePayload(
       await confirmSkillTool.execute({
-        action: 'approve',
-        id: pendingSkill.record.id,
+        action: 'update',
+        name: 'release-audit-skill',
+        description: 'Release workflow',
+        content: 'Always verify the package metadata and changelog before publish.',
       })
     );
-    const rejectedSkill = parsePayload(
+    assert.equal(updatedSkill.mode, 'applied');
+    assert.equal(updatedSkill.record.action, 'update');
+    assert.equal(updatedSkill.record.baseVersion, '1');
+    assert.equal(updatedSkill.record.nextVersion, '2');
+    assert.equal(readSkillVersion(fs.readFileSync(updatedSkill.record.targetPath, 'utf-8')), '2');
+    const createExistingSkill = parsePayload(
       await confirmSkillTool.execute({
         action: 'create',
-        name: 'release-audit-skill-2',
-        description: 'Release workflow v2',
-        content: 'Reject this pending draft.',
+        name: 'release-audit-skill',
+        description: 'Release workflow',
+        content: 'Always verify package metadata, changelog, and generated release notes before publish.',
       })
     );
-    parsePayload(
+    assert.equal(createExistingSkill.action, 'update');
+    assert.equal(createExistingSkill.requestedAction, 'create');
+    assert.equal(createExistingSkill.record.action, 'update');
+    assert.equal(createExistingSkill.record.baseVersion, '2');
+    assert.equal(createExistingSkill.record.nextVersion, '3');
+    assert.equal(readSkillVersion(fs.readFileSync(createExistingSkill.record.targetPath, 'utf-8')), '3');
+    const updateMissingSkill = parsePayload(
       await confirmSkillTool.execute({
-        action: 'reject',
-        id: rejectedSkill.record.id,
-        review_note: 'not needed',
+        action: 'update',
+        name: 'new-release-audit-skill',
+        description: 'New release workflow',
+        content: 'Verify newly created release workflow before publish.',
       })
     );
-
-    const [, , autoSkillTool] = createSkillTools({
-      skillLoader: agent.getSkillLoader(),
-      skillDraftStore: agent.getSkillDraftStore(),
-      resolveWorkspaceDir: () => harness.workspaceDir,
-      resolveSessionId: () => sessionId,
-      resolveToolsetName: () => 'windows-dev',
-      globalSkillsDir: path.join(harness.tempDir, 'global-skills'),
-      writeMode: 'auto',
-      approveSkillDraft: (id) => agent.approveSkillDraft(id),
-      rejectSkillDraft: (id, reviewNote) => agent.rejectSkillDraft(id, reviewNote),
+    assert.equal(updateMissingSkill.action, 'create');
+    assert.equal(updateMissingSkill.requestedAction, 'update');
+    assert.equal(updateMissingSkill.record.action, 'create');
+    assert.equal(updateMissingSkill.record.nextVersion, '1');
+    assert.equal(readSkillVersion(fs.readFileSync(updateMissingSkill.record.targetPath, 'utf-8')), '1');
+    const unsupportedRuntimeApproval = await confirmSkillTool.execute({
+      action: 'approve',
+      id: appliedSkill.record.id,
     });
-    const writtenSkill = parsePayload(
-      await autoSkillTool.execute({
-        action: 'create',
-        name: 'release-audit-skill-auto',
-        description: 'Auto approved skill',
-        content: 'This skill should be auto-approved with audit.',
-      })
-    );
-    assert.equal(writtenSkill.mode, 'written');
+    assert.equal(unsupportedRuntimeApproval.success, false);
+    assert.match(String(unsupportedRuntimeApproval.error ?? ''), /unknown action/i);
 
-    const autoObservedDraft = agent.getSkillDraftStore().observeSuccessfulTurn({
+    const autoObservedDraft = agent.getSkillWriteStore().observeSuccessfulTurn({
       sessionId,
       workspaceDir: harness.workspaceDir,
       prompt: 'Create a repeatable release verification workflow',
@@ -168,7 +174,7 @@ async function runCase(): Promise<void> {
       platform: 'win32',
     });
     assert.equal(autoObservedDraft, null);
-    const repeatedDraft = agent.getSkillDraftStore().observeSuccessfulTurn({
+    const repeatedDraft = agent.getSkillWriteStore().observeSuccessfulTurn({
       sessionId,
       workspaceDir: harness.workspaceDir,
       prompt: 'Create a repeatable release verification workflow',
@@ -178,7 +184,8 @@ async function runCase(): Promise<void> {
       platform: 'win32',
     });
     assert.ok(repeatedDraft);
-    agent.approveSkillDraft(String(repeatedDraft?.id));
+    agent.reloadSkills();
+    agent.republishAutoGeneratedWorkspaceSkills(harness.workspaceDir, sessionId);
 
     const autoPublishedPacks = agent.getSkillPackStore().listPacks({ workspaceDir: harness.workspaceDir });
     const generatedPack = autoPublishedPacks.find((item) => item.name === 'workspace-generated');
@@ -194,8 +201,7 @@ async function runCase(): Promise<void> {
     assert.equal(audit.some((item) => item.kind === 'memory_written'), true);
     assert.equal(audit.some((item) => item.kind === 'memory_replaced'), true);
     assert.equal(audit.some((item) => item.kind === 'memory_removed'), true);
-    assert.equal(audit.some((item) => item.kind === 'skill_approved'), true);
-    assert.equal(audit.some((item) => item.kind === 'skill_rejected'), true);
+    assert.equal(audit.some((item) => item.kind === 'skill_written'), true);
     assert.equal(audit.some((item) => item.kind === 'skill_pack_published'), true);
   } finally {
     cleanup(harness.tempDir);

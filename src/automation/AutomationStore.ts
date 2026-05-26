@@ -1,12 +1,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { computeNextRunAt } from './schedule.js';
+import { createStateId, nowIso, readJsonStateFile, writeJsonStateFile } from '../storage/index.js';
 import type {
   AutomationJob,
   AutomationMemoryTemplate,
   AutomationRunReport,
   AutomationRunRecord,
   AutomationSchedule,
+  AutomationTriggerSource,
 } from './types.js';
 
 interface CreateAutomationJobInput {
@@ -14,6 +16,7 @@ interface CreateAutomationJobInput {
   prompt: string;
   workspaceDir: string;
   skills?: string[];
+  agentName?: string | null;
   llmSelection?: AutomationJob['llmSelection'];
   schedule: AutomationSchedule;
   timezone: string;
@@ -21,6 +24,7 @@ interface CreateAutomationJobInput {
   jobSource?: AutomationJob['jobSource'];
   systemTask?: AutomationJob['systemTask'];
   readOnly?: boolean;
+  sessionId?: string | null;
 }
 
 interface UpdateAutomationJobInput {
@@ -28,6 +32,7 @@ interface UpdateAutomationJobInput {
   prompt?: string;
   workspaceDir?: string;
   skills?: string[];
+  agentName?: string | null;
   llmSelection?: AutomationJob['llmSelection'];
   schedule?: AutomationSchedule;
   timezone?: string;
@@ -39,29 +44,32 @@ interface UpdateAutomationJobInput {
   readOnly?: boolean;
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
+export interface ClaimAutomationRunInput {
+  jobId: string;
+  triggerAt: string;
+  triggerSource?: AutomationTriggerSource;
+  nextRunAt?: string;
+  now?: Date;
+  runId?: string;
+  sessionId?: string;
+}
+
+export interface ClaimAutomationRunResult {
+  job: AutomationJob;
+  record: AutomationRunRecord;
+  claimed: boolean;
 }
 
 function uniqueId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  return createStateId(prefix);
 }
 
 function readJsonFile<T>(filePath: string, fallback: T): T {
-  if (!fs.existsSync(filePath)) {
-    return fallback;
-  }
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
-  } catch {
-    return fallback;
-  }
+  return readJsonStateFile<T>(filePath, fallback);
 }
 
 function writeJsonFile(filePath: string, payload: unknown): void {
-  const parent = path.dirname(filePath);
-  fs.mkdirSync(parent, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+  writeJsonStateFile(filePath, payload);
 }
 
 function normalizeString(value: unknown): string {
@@ -76,6 +84,11 @@ function normalizeSkills(skills: string[] | undefined): string[] {
         .filter((item) => item.length > 0)
     )
   ).slice(0, 64);
+}
+
+function normalizeAgentName(value: unknown): string | undefined {
+  const normalized = normalizeString(value);
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeSummary(value: string): string {
@@ -109,6 +122,7 @@ export class AutomationStore {
       .map((item) => ({
         ...item,
         skills: normalizeSkills(item.skills),
+        agentName: normalizeAgentName(item.agentName),
       }))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
@@ -139,12 +153,14 @@ export class AutomationStore {
     const nextRunAt = enabled
       ? computeNextRunAt(input.schedule, input.timezone, new Date(createdAt))
       : undefined;
+    const agentName = normalizeAgentName(input.agentName);
     const next: AutomationJob = {
       id: uniqueId('automation'),
       name,
       prompt,
       workspaceDir,
       skills: normalizeSkills(input.skills),
+      ...(agentName ? { agentName } : {}),
       ...(input.llmSelection ? { llmSelection: input.llmSelection } : {}),
       schedule: input.schedule,
       timezone: input.timezone,
@@ -152,6 +168,7 @@ export class AutomationStore {
       jobSource: input.jobSource ?? 'user',
       systemTask: input.systemTask,
       readOnly: input.readOnly === true,
+      sessionId: normalizeString(input.sessionId) || undefined,
       createdAt,
       updatedAt: createdAt,
       nextRunAt,
@@ -169,6 +186,7 @@ export class AutomationStore {
       throw new Error(`automation not found: ${id}`);
     }
     const current = jobs[index];
+    const hasAgentNamePatch = Object.prototype.hasOwnProperty.call(patch, 'agentName');
     const next: AutomationJob = {
       ...current,
       ...patch,
@@ -177,6 +195,7 @@ export class AutomationStore {
       workspaceDir:
         patch.workspaceDir !== undefined ? normalizeString(patch.workspaceDir) : current.workspaceDir,
       skills: patch.skills !== undefined ? normalizeSkills(patch.skills) : current.skills,
+      agentName: hasAgentNamePatch ? normalizeAgentName(patch.agentName) : current.agentName,
       llmSelection: patch.llmSelection !== undefined ? patch.llmSelection : current.llmSelection,
       schedule: patch.schedule ?? current.schedule,
       timezone: patch.timezone !== undefined ? normalizeString(patch.timezone) : current.timezone,
@@ -241,6 +260,56 @@ export class AutomationStore {
       .slice(0, this.runRetention);
     writeJsonFile(this.getRunsPath(jobId), next);
     return next;
+  }
+
+  claimRun(input: ClaimAutomationRunInput): ClaimAutomationRunResult {
+    const jobs = this.listJobs();
+    const jobIndex = jobs.findIndex((item) => item.id === input.jobId);
+    if (jobIndex < 0) {
+      throw new Error(`automation not found: ${input.jobId}`);
+    }
+    const job = jobs[jobIndex];
+    const timestamp = input.now ? input.now.toISOString() : nowIso();
+    const runs = this.listRuns(job.id);
+    const active = runs.find((item) => item.status === 'running' && !item.completedAt);
+    const sessionId = normalizeString(input.sessionId) || (job.systemTask ? '' : `auto-${job.id}-${Date.now()}`);
+    const record: AutomationRunRecord = active
+      ? {
+          id: uniqueId('run'),
+          jobId: job.id,
+          sessionId: '',
+          status: 'skipped',
+          triggerAt: input.triggerAt,
+          ...(input.triggerSource ? { triggerSource: input.triggerSource } : {}),
+          startedAt: timestamp,
+          completedAt: timestamp,
+          skippedReason: 'overlap_running',
+          resultSummary: 'Skipped because a previous run is still active.',
+        }
+      : {
+          id: normalizeString(input.runId) || uniqueId('run'),
+          jobId: job.id,
+          sessionId,
+          status: 'running',
+          triggerAt: input.triggerAt,
+          ...(input.triggerSource ? { triggerSource: input.triggerSource } : {}),
+          startedAt: timestamp,
+        };
+    const nextRuns = [record, ...runs]
+      .sort((left, right) => right.triggerAt.localeCompare(left.triggerAt))
+      .slice(0, this.runRetention);
+    writeJsonFile(this.getRunsPath(job.id), nextRuns);
+    if (input.nextRunAt !== undefined) {
+      const nextJob: AutomationJob = {
+        ...job,
+        nextRunAt: normalizeString(input.nextRunAt) || undefined,
+        updatedAt: timestamp,
+      };
+      jobs[jobIndex] = nextJob;
+      this.saveJobs(jobs);
+      return { job: nextJob, record, claimed: !active };
+    }
+    return { job, record, claimed: !active };
   }
 
   updateRun(jobId: string, runId: string, patch: Partial<AutomationRunRecord>): AutomationRunRecord | null {

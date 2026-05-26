@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Diagnostic tool for MiniMax Agent runtime.
+ * Diagnostic tool for DPAgent runtime.
  * Reads config.yaml, logs/, contexts/, and runtime/shell-logs.
  */
 
@@ -119,7 +119,7 @@ function collectDiagnostics() {
 
 function printReport(report) {
   console.log('\n========================================');
-  console.log('MiniMax Agent Diagnostic Report');
+  console.log('DPAgent Diagnostic Report');
   console.log('========================================');
   console.log(`Generated: ${report.generatedAt}`);
   console.log(`config.yaml: ${report.config.configPath}`);

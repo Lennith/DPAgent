@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { acquireInMemoryLockOrThrow, releaseInMemoryLock } from '../storage/in-memory-lock.js';
 import type {
   ContextEvent,
   ContextNamespaceMeta,
@@ -9,6 +10,7 @@ import type {
 
 interface AppendEventOptions {
   workspaceDir?: string;
+  expectedEventCount?: number;
 }
 
 function nowIso(): string {
@@ -17,20 +19,6 @@ function nowIso(): string {
 
 function cloneMeta(meta: ContextNamespaceMeta): ContextNamespaceMeta {
   return JSON.parse(JSON.stringify(meta)) as ContextNamespaceMeta;
-}
-
-const fileLocks = new Map<string, boolean>();
-
-function acquireLock(filePath: string): boolean {
-  if (fileLocks.get(filePath)) {
-    return false;
-  }
-  fileLocks.set(filePath, true);
-  return true;
-}
-
-function releaseLock(filePath: string): void {
-  fileLocks.delete(filePath);
 }
 
 export class ContextEventStore {
@@ -50,9 +38,7 @@ export class ContextEventStore {
     if (!fs.existsSync(filePath)) {
       return 0;
     }
-    while (!acquireLock(filePath)) {
-      // spin lock
-    }
+    acquireInMemoryLockOrThrow(filePath);
     try {
       const raw = fs.readFileSync(filePath, 'utf-8').trim();
       if (!raw) {
@@ -66,7 +52,7 @@ export class ContextEventStore {
       fs.writeFileSync(filePath, kept.join('\n') + '\n', 'utf-8');
       return lines.length - keepCount;
     } finally {
-      releaseLock(filePath);
+      releaseInMemoryLock(filePath);
     }
   }
 
@@ -105,14 +91,20 @@ export class ContextEventStore {
     }
     this.ensureNamespace(scope, namespace, options.workspaceDir);
     const filePath = this.eventsFilePath(scope, namespace);
-    while (!acquireLock(filePath)) {
-      // spin lock
-    }
+    acquireInMemoryLockOrThrow(filePath);
     try {
+      if (typeof options.expectedEventCount === 'number') {
+        const actualEventCount = this.countEventsFromFile(filePath);
+        if (actualEventCount !== options.expectedEventCount) {
+          throw new Error(
+            `Context event version conflict for ${scope}:${namespace}: expected ${options.expectedEventCount}, found ${actualEventCount}`
+          );
+        }
+      }
       const content = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
       fs.appendFileSync(filePath, content, 'utf-8');
     } finally {
-      releaseLock(filePath);
+      releaseInMemoryLock(filePath);
     }
 
     const meta = this.loadMeta(scope, namespace) ?? this.createMeta(scope, namespace, options.workspaceDir);
@@ -121,6 +113,17 @@ export class ContextEventStore {
       meta.workspaceDir = options.workspaceDir;
     }
     this.saveMeta(scope, namespace, meta);
+  }
+
+  private countEventsFromFile(filePath: string): number {
+    if (!fs.existsSync(filePath)) {
+      return 0;
+    }
+    const raw = fs.readFileSync(filePath, 'utf-8').trim();
+    if (!raw) {
+      return 0;
+    }
+    return raw.split('\n').filter((line) => line.trim().length > 0).length;
   }
 
   loadMeta(scope: ContextScope, namespace: string): ContextNamespaceMeta | undefined {

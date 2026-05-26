@@ -305,17 +305,23 @@ function parseArgs() {
   if (mode !== 'preflight' && mode !== 'publish') {
     fail('Invalid --mode. Use preflight or publish.');
   }
-  return { mode };
+  const tagArgIndex = process.argv.findIndex((item) => item === '--tag');
+  const publishTag = tagArgIndex >= 0 ? String(process.argv[tagArgIndex + 1] ?? '').trim() : undefined;
+  if (publishTag !== undefined && !/^[a-z0-9][a-z0-9._-]*$/i.test(publishTag)) {
+    fail('Invalid --tag. Use a non-empty npm dist-tag such as beta.');
+  }
+  return { mode, publishTag };
 }
 
-function createPublishPlan(mode) {
+function createPublishPlan(mode, publishTag) {
   return {
     verifyReleaseEvidence: true,
     buildBeforePublish: true,
     dryRunPack: false,
-    packagedSmoke: false,
+    packagedSmoke: mode === 'publish',
     registrySmoke: mode === 'publish',
     publish: mode === 'publish',
+    publishTag,
   };
 }
 
@@ -461,6 +467,25 @@ function getInternalPublishConfig(pkg) {
   ) {
     fail('internalPublish.releaseToolcallGate.minimumPassRate must be within (0, 1].');
   }
+  if (!cfg.releaseE2EGate || typeof cfg.releaseE2EGate !== 'object') {
+    fail('internalPublish.releaseE2EGate must be set.');
+  }
+  if (typeof cfg.releaseE2EGate.outputRoot !== 'string' || cfg.releaseE2EGate.outputRoot.trim().length === 0) {
+    fail('internalPublish.releaseE2EGate.outputRoot must be set.');
+  }
+  if (typeof cfg.releaseE2EGate.aggregateFile !== 'string' || cfg.releaseE2EGate.aggregateFile.trim().length === 0) {
+    fail('internalPublish.releaseE2EGate.aggregateFile must be set.');
+  }
+  if (typeof cfg.releaseE2EGate.markdownFile !== 'string' || cfg.releaseE2EGate.markdownFile.trim().length === 0) {
+    fail('internalPublish.releaseE2EGate.markdownFile must be set.');
+  }
+  if (
+    !Array.isArray(cfg.releaseE2EGate.requiredCases) ||
+    cfg.releaseE2EGate.requiredCases.length === 0 ||
+    cfg.releaseE2EGate.requiredCases.some((item) => typeof item !== 'string' || item.trim().length === 0)
+  ) {
+    fail('internalPublish.releaseE2EGate.requiredCases must be a non-empty string array.');
+  }
 
   return {
     registry: cfg.registry.trim(),
@@ -487,6 +512,12 @@ function getInternalPublishConfig(pkg) {
       requiredProfiles: normalizeStringArray(cfg.releaseToolcallGate.requiredProfiles || []),
       requiredProfileModels: normalizeProfileModelMap(cfg.releaseToolcallGate.requiredProfileModels || {}),
       minimumPassRate: Number(cfg.releaseToolcallGate.minimumPassRate),
+    },
+    releaseE2EGate: {
+      outputRoot: cfg.releaseE2EGate.outputRoot.trim(),
+      aggregateFile: cfg.releaseE2EGate.aggregateFile.trim(),
+      markdownFile: cfg.releaseE2EGate.markdownFile.trim(),
+      requiredCases: normalizeStringArray(cfg.releaseE2EGate.requiredCases),
     },
   };
 }
@@ -677,6 +708,26 @@ function validateReleaseToolcallGateEvidence(rootDir, cfg, options = {}) {
           errors.push(`release toolcall aggregate run is missing sessionId: ${aggregatePath}`);
           continue;
         }
+        const passCount = Number(run.passCount);
+        const failCount = Number(run.failCount);
+        const accuracy = Number(run.accuracy);
+        const expectedRounds = Number(cfg.requiredRoundsPerRun);
+        const minimumPasses = Math.ceil(expectedRounds * Number(cfg.minimumPassRate));
+        if (!Number.isInteger(passCount) || passCount < 0) {
+          errors.push(`release toolcall aggregate run has invalid passCount: ${aggregatePath}`);
+        }
+        if (!Number.isInteger(failCount) || failCount < 0) {
+          errors.push(`release toolcall aggregate run has invalid failCount: ${aggregatePath}`);
+        }
+        if (Number.isInteger(passCount) && Number.isInteger(failCount) && passCount + failCount !== expectedRounds) {
+          errors.push(`release toolcall aggregate run round count mismatch: ${aggregatePath}`);
+        }
+        if (!Number.isFinite(accuracy) || Math.abs(accuracy - passCount / expectedRounds) > 0.000001) {
+          errors.push(`release toolcall aggregate run accuracy mismatch: ${aggregatePath}`);
+        }
+        if (Number.isInteger(passCount) && passCount < minimumPasses) {
+          errors.push(`release toolcall aggregate run passCount is below threshold: ${aggregatePath}`);
+        }
         const runProfile = normalizeProfileLabels([run.profile])[0];
         const expectedProfileModel = runProfile ? expectedProfileModels[runProfile] : '';
         if (expectedProfileModel && String(run.model || '').trim() !== String(expectedProfileModel).trim()) {
@@ -703,7 +754,7 @@ function validateReleaseToolcallGateEvidence(rootDir, cfg, options = {}) {
       'runMetricsChecked',
       'failureFlagsChecked',
       'fieldMismatchesChecked',
-      'toolCallContinuityChecked',
+      'historyConsistencyChecked',
       'cascadeFailuresChecked',
       'completionMarkerRepairsChecked',
       'materiallyCorrect',
@@ -782,6 +833,78 @@ function validateReleaseToolcallGateEvidence(rootDir, cfg, options = {}) {
     currentCommitSha,
     aggregate,
     review,
+  };
+}
+
+function validateReleaseE2EGateEvidence(rootDir, cfg, options = {}) {
+  const outputRoot = path.resolve(rootDir, cfg.outputRoot);
+  const aggregatePath = path.join(outputRoot, cfg.aggregateFile);
+  const markdownPath = path.join(outputRoot, cfg.markdownFile);
+  const currentCommitSha = isNonEmptyString(options.currentCommitSha)
+    ? String(options.currentCommitSha).trim()
+    : resolveGitCommitSha(rootDir);
+  const errors = [];
+
+  if (!fs.existsSync(markdownPath)) {
+    errors.push(`release e2e markdown report is missing: ${markdownPath}`);
+  }
+
+  const aggregate = readJsonFileOrError(aggregatePath, 'release e2e aggregate', errors);
+  if (aggregate) {
+    if (aggregate.gatePassed !== true) {
+      errors.push(`release e2e aggregate did not pass: ${aggregatePath}`);
+    }
+    if (!isNonEmptyString(aggregate.generatedAt)) {
+      errors.push(`release e2e aggregate is missing generatedAt: ${aggregatePath}`);
+    }
+    if (!isNonEmptyString(aggregate.sourceCommitSha)) {
+      errors.push(`release e2e aggregate is missing sourceCommitSha: ${aggregatePath}`);
+    } else if (String(aggregate.sourceCommitSha).trim() !== currentCommitSha) {
+      errors.push(`release e2e aggregate sourceCommitSha does not match current HEAD: ${aggregatePath}`);
+    }
+    const expectedCases = normalizeStringArray(cfg.requiredCases || []);
+    const aggregateRequiredCases = normalizeStringArray(aggregate.requiredCases || []);
+    if (!arraysEqual([...aggregateRequiredCases].sort(), [...expectedCases].sort())) {
+      errors.push(`release e2e aggregate requiredCases mismatch: ${aggregatePath}`);
+    }
+    if (!Array.isArray(aggregate.cases) || aggregate.cases.length === 0) {
+      errors.push(`release e2e aggregate is missing cases: ${aggregatePath}`);
+    } else {
+      const caseIds = normalizeStringArray(aggregate.cases.map((item) => item && item.id));
+      if (!arraysEqual([...caseIds].sort(), [...expectedCases].sort())) {
+        errors.push(`release e2e aggregate case ids mismatch: ${aggregatePath}`);
+      }
+      for (const item of aggregate.cases) {
+        if (!isNonEmptyString(item && item.id)) {
+          errors.push(`release e2e aggregate case is missing id: ${aggregatePath}`);
+          continue;
+        }
+        if (item.status !== 'passed') {
+          errors.push(`release e2e case ${item.id} did not pass: ${aggregatePath}`);
+        }
+        if (Number(item.exitCode) !== 0) {
+          errors.push(`release e2e case ${item.id} exitCode must be 0: ${aggregatePath}`);
+        }
+        if (item.signal !== null && item.signal !== undefined) {
+          errors.push(`release e2e case ${item.id} signal must be empty: ${aggregatePath}`);
+        }
+        if (!Number.isFinite(Number(item.durationMs)) || Number(item.durationMs) < 0) {
+          errors.push(`release e2e case ${item.id} has invalid durationMs: ${aggregatePath}`);
+        }
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(errors.join('\n'));
+  }
+
+  return {
+    outputRoot,
+    aggregatePath,
+    markdownPath,
+    currentCommitSha,
+    aggregate,
   };
 }
 
@@ -1082,6 +1205,7 @@ function runBrowserSmoke(baseUrl, outputDir) {
     env: {
       SMOKE_URL: baseUrl,
       SMOKE_OUTPUT_DIR: outputDir,
+      SMOKE_ALLOW_EXISTING_SETTINGS_WRITE: '1',
       SMOKE_RESPONSE_TIMEOUT_MS: '90000',
       SMOKE_DISPATCH_TIMEOUT_MS: '10000',
       ...runtimeEnv,
@@ -1112,7 +1236,7 @@ async function runSmoke(stageName, cfg, installTarget) {
       cfg.userSmoke.timeoutMs,
       resolveSmokeSuccessPattern(cfg.userSmoke.successPattern, smokePort),
       {
-        MINIMAX_PORT: String(smokePort),
+        DPAGENT_PORT: String(smokePort),
       },
       async () => {
         await verifySmokeServer(baseUrl);
@@ -1125,18 +1249,51 @@ async function runSmoke(stageName, cfg, installTarget) {
   }
 }
 
-function publish(registry, publishTarget) {
-  runNpm(['publish', publishTarget, '--registry', registry], { cwd: ROOT });
+function buildPublishArgs(publishTarget, registry, publishTag) {
+  const args = ['publish', publishTarget, '--registry', registry];
+  if (publishTag) {
+    args.push('--tag', publishTag);
+  }
+  return args;
+}
+
+function isPrereleaseVersion(version) {
+  return /^\d+\.\d+\.\d+-/.test(String(version || '').trim());
+}
+
+function validatePublishTagForVersion(pkg, publishTag) {
+  if (!isPrereleaseVersion(pkg.version)) {
+    return;
+  }
+  if (!publishTag || publishTag === 'latest') {
+    throw new Error(`prerelease version ${pkg.version} requires an explicit non-latest dist-tag.`);
+  }
+}
+
+function verifyPublishedDistTag(pkg, registry, publishTag) {
+  if (!publishTag) {
+    return;
+  }
+  const observed = runNpm(['view', pkg.name, `dist-tags.${publishTag}`, '--registry', registry], { cwd: ROOT }).trim();
+  if (observed !== pkg.version) {
+    fail(`dist-tag ${publishTag} points to ${observed || '<empty>'}, expected ${pkg.version}.`);
+  }
+  info(`dist-tag verified: ${publishTag} -> ${pkg.version}`);
+}
+
+function publish(registry, publishTarget, publishTag) {
+  runNpm(buildPublishArgs(publishTarget, registry, publishTag), { cwd: ROOT });
   info('publish completed.');
 }
 
 async function main() {
-  const { mode } = parseArgs();
-  const plan = createPublishPlan(mode);
+  const { mode, publishTag } = parseArgs();
+  const plan = createPublishPlan(mode, publishTag);
   const pkg = loadPackageJson();
   const cfg = getInternalPublishConfig(pkg);
 
-  info(`mode=${mode}`);
+  info(`mode=${mode}${plan.publishTag ? ` tag=${plan.publishTag}` : ''}`);
+  validatePublishTagForVersion(pkg, plan.publishTag);
   if (plan.registrySmoke && !cfg.userSmoke) {
     fail('internalPublish.userSmoke is required because publish:standard runs post-publish registry smoke.');
   }
@@ -1145,6 +1302,8 @@ async function main() {
   validateUsabilityEntrypoint(pkg, cfg);
   validateReadmeInitCommand(cfg);
   if (plan.verifyReleaseEvidence) {
+    const releaseE2EEvidence = validateReleaseE2EGateEvidence(ROOT, cfg.releaseE2EGate);
+    info(`release e2e evidence verified: ${releaseE2EEvidence.aggregatePath}`);
     const releaseGateEvidence = validateReleaseToolcallGateEvidence(ROOT, cfg.releaseToolcallGate);
     info(`release toolcall evidence verified: ${releaseGateEvidence.aggregatePath}`);
   }
@@ -1166,9 +1325,10 @@ async function main() {
     }
 
     if (plan.publish) {
-      publish(cfg.registry, tarballPath);
+      publish(cfg.registry, tarballPath, plan.publishTag);
+      verifyPublishedDistTag(pkg, cfg.registry, plan.publishTag);
       if (plan.registrySmoke) {
-        const installTarget = `${pkg.name}@${pkg.version}`;
+        const installTarget = plan.publishTag ? `${pkg.name}@${plan.publishTag}` : `${pkg.name}@${pkg.version}`;
         await runSmoke('post-publish registry', cfg, installTarget);
       }
     }
@@ -1181,11 +1341,20 @@ async function main() {
 
 module.exports = {
   createPublishPlan,
+  buildPublishArgs,
+  isPrereleaseVersion,
+  validatePublishTagForVersion,
   getInternalPublishConfig,
+  npmPackJson,
+  removePathWithRetry,
+  runFreshWebBuild,
+  runNpm,
+  runSmoke,
   fetchResponseOrFail,
   resolveSmokeRuntimeConfigFromSources,
   validatePackFileList,
   validateCleanGitWorktree,
+  validateReleaseE2EGateEvidence,
   validateReleaseToolcallGateEvidence,
 };
 

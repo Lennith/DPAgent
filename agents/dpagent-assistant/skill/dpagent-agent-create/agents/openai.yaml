@@ -1,0 +1,3 @@
+display_name: DPAgent Agent Create
+short_description: Create configured external DPAgent agents through the authoring API.
+default_prompt: Discover the DPAgent authoring capabilities, dry-run the requested external agent, then apply it after confirmation.

@@ -112,20 +112,3 @@ export function resolveMcpIndicatorState(status: MCPStatusView | null): MCPIndic
   }
   return 'idle';
 }
-
-export function buildMcpIndicatorLabel(status: MCPStatusView | null): string {
-  if (!status) {
-    return 'MCP idle';
-  }
-  const state = resolveMcpIndicatorState(status);
-  if (state === 'connected') {
-    return `MCP connected (${status.summary.connectedCount}/${status.summary.totalEnabled})`;
-  }
-  if (state === 'degraded') {
-    return 'MCP degraded';
-  }
-  if (state === 'disabled') {
-    return 'MCP disabled';
-  }
-  return 'MCP idle';
-}

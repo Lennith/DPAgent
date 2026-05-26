@@ -2,8 +2,9 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { Tool, successResult, errorResult } from './Tool.js';
-import type { ToolResult, ShellType, PermissionCheckResult } from '../types.js';
+import { successResult, errorResult } from './Tool.js';
+import { accessDeniedResult, ToolAccessBase, type ToolAccessBaseOptions } from './ToolAccessBase.js';
+import type { ToolResult, ShellType } from '../types.js';
 import { logger } from '../utils/logger.js';
 import {
   coerceShellTypeForPlatform,
@@ -41,8 +42,7 @@ function sanitizeShellCommandForLog(command: string): string {
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{10,}/gi, 'Bearer [redacted]');
 }
 
-export interface ShellToolOptions {
-  workspaceDir: string;
+export interface ShellToolOptions extends ToolAccessBaseOptions {
   shell?: ShellType;
   timeout?: number;
   outputIdleTimeout?: number;
@@ -50,7 +50,6 @@ export interface ShellToolOptions {
   maxOutputSize?: number;
   logDir?: string;
   additionalWritableDirs?: string[];
-  checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
   env?: Record<string, string>;
 }
 
@@ -75,28 +74,24 @@ const DEFAULT_OUTPUT_IDLE_TIMEOUT = 120 * 1000;
 const DEFAULT_MAX_RUN_TIME = 60 * 60 * 1000;
 const DEFAULT_MAX_OUTPUT_SIZE = 50 * 1024 * 1024;
 
-export class ShellTool extends Tool {
-  private workspaceDir: string;
+export class ShellTool extends ToolAccessBase {
   private defaultShell: ShellType;
   private defaultTimeout: number;
   private outputIdleTimeout: number;
   private maxRunTime: number;
   private maxOutputSize: number;
   private logDir: string;
-  private checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
   private extraEnv: Record<string, string>;
   private activeProcesses: Map<number, ReturnType<typeof spawn>> = new Map();
 
   constructor(options: ShellToolOptions) {
-    super();
-    this.workspaceDir = options.workspaceDir;
+    super(options);
     this.defaultShell = coerceShellTypeForPlatform(options.shell);
     this.defaultTimeout = options.timeout ?? DEFAULT_TIMEOUT;
     this.outputIdleTimeout = options.outputIdleTimeout ?? DEFAULT_OUTPUT_IDLE_TIMEOUT;
     this.maxRunTime = options.maxRunTime ?? DEFAULT_MAX_RUN_TIME;
     this.maxOutputSize = options.maxOutputSize ?? DEFAULT_MAX_OUTPUT_SIZE;
-    this.logDir = options.logDir ?? path.join(options.workspaceDir, '.minimax', 'shell-logs');
-    this.checkPermission = options.checkPermission;
+    this.logDir = options.logDir ?? path.join(options.workspaceDir, '.dpagent', 'shell-logs');
     this.extraEnv = options.env ?? {};
   }
 
@@ -136,7 +131,7 @@ export class ShellTool extends Tool {
     };
   }
 
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+  async execute(args: Record<string, unknown>, options: { signal?: AbortSignal } = {}): Promise<ToolResult> {
     const command = args.command as string;
     const requestedShell = args.shell as ShellType | undefined;
     if (requestedShell && !isShellSupportedOnPlatform(requestedShell)) {
@@ -147,23 +142,14 @@ export class ShellTool extends Tool {
     }
     const shell = coerceShellTypeForPlatform(requestedShell ?? this.defaultShell);
     const timeout = (args.timeout as number) ?? this.defaultTimeout;
-    const cwd = this.resolvePath((args.cwd as string) ?? '.');
+    const cwd = this.resolveWorkspacePath((args.cwd as string) ?? '.');
 
-    if (this.checkPermission) {
-      const perm = this.checkPermission(cwd, 'read');
-      if (!perm.allowed) {
-        return errorResult(perm.reason ?? 'Permission denied');
-      }
+    const accessDenied = accessDeniedResult(this.checkAccess(cwd, 'read'));
+    if (accessDenied) {
+      return accessDenied;
     }
 
-    return this.executeCommand(command, shell, cwd, timeout);
-  }
-
-  private resolvePath(p: string): string {
-    if (path.isAbsolute(p)) {
-      return p;
-    }
-    return path.resolve(this.workspaceDir, p);
+    return this.executeCommand(command, shell, cwd, timeout, options.signal);
   }
 
   private ensureLogDir(): void {
@@ -346,7 +332,7 @@ export class ShellTool extends Tool {
     return spawn(command, args, options);
   }
 
-  private executeCommand(command: string, shell: ShellType, cwd: string, timeout: number): Promise<ToolResult> {
+  private executeCommand(command: string, shell: ShellType, cwd: string, timeout: number, signal?: AbortSignal): Promise<ToolResult> {
     return new Promise((resolve) => {
       let stdout = '';
       let stderr = '';
@@ -398,10 +384,11 @@ export class ShellTool extends Tool {
         killReason: null,
       };
 
-      const cleanup = (reason: string | null, exitCode: number | null = null) => {
-        if (resolved) return;
+      const cleanup = (reason: string | null, exitCode: number | null = null): Promise<void> => {
+        if (resolved) return Promise.resolve();
         resolved = true;
 
+        signal?.removeEventListener('abort', abortHandler);
         clearInterval(outputIdleTimer);
         clearTimeout(maxRunTimer);
         clearTimeout(commandTimer);
@@ -412,10 +399,6 @@ export class ShellTool extends Tool {
           logProcessEvent('exit', pid, commandForLog, `reason=${reason}, exitCode=${exitCode}`);
         }
 
-        if (pid && !proc.killed && proc.exitCode === null) {
-          this.killProcessTree(pid).catch(() => {});
-        }
-
         log.finishedAt = new Date().toISOString();
         log.outputSize = stdout.length + stderr.length;
         log.killed = reason !== null;
@@ -423,24 +406,43 @@ export class ShellTool extends Tool {
         log.exitCode = exitCode;
 
         this.appendLog(log).catch(() => {});
+        if (pid && !proc.killed && proc.exitCode === null) {
+          return this.killProcessTree(pid).catch(() => undefined);
+        }
+        return Promise.resolve();
+      };
+
+      const abortHandler = () => {
+        void cleanup('cancelled').finally(() => {
+          resolve(errorResult('Command cancelled'));
+        });
       };
 
       const outputIdleTimer = setInterval(() => {
         if (Date.now() - lastOutputTime > this.outputIdleTimeout) {
-          cleanup('output_idle_timeout');
-          resolve(errorResult(`Process killed: no output for ${this.outputIdleTimeout / 1000} seconds`));
+          void cleanup('output_idle_timeout').finally(() => {
+            resolve(errorResult(`Process killed: no output for ${this.outputIdleTimeout / 1000} seconds`));
+          });
         }
       }, 5000);
 
       const maxRunTimer = setTimeout(() => {
-        cleanup('max_runtime_exceeded');
-        resolve(errorResult(`Process killed: exceeded maximum runtime of ${this.maxRunTime / 1000} seconds`));
+        void cleanup('max_runtime_exceeded').finally(() => {
+          resolve(errorResult(`Process killed: exceeded maximum runtime of ${this.maxRunTime / 1000} seconds`));
+        });
       }, this.maxRunTime);
 
       const commandTimer = setTimeout(() => {
-        cleanup('command_timeout');
-        resolve(errorResult(`Command timed out after ${timeout}ms`));
+        void cleanup('command_timeout').finally(() => {
+          resolve(errorResult(`Command timed out after ${timeout}ms`));
+        });
       }, timeout);
+
+      if (signal?.aborted) {
+        abortHandler();
+        return;
+      }
+      signal?.addEventListener('abort', abortHandler, { once: true });
 
       proc.stdout?.on('data', (data: Buffer) => {
         lastOutputTime = Date.now();
@@ -501,28 +503,29 @@ export class ShellTool extends Tool {
       proc.on('close', (code) => {
         if (resolved) return;
 
-        cleanup(null, code);
-
-        if (code === 0) {
-          resolve(successResult(stdout.trim() || '(no output)'));
-        } else {
-          const truncatedStdout = truncateForError(stdout, 500);
-          const truncatedStderr = truncateForError(stderr, 500);
-          resolve(errorResult(`Command exited with code ${code}\nStdout: ${truncatedStdout}\nStderr: ${truncatedStderr}`));
-        }
+        void cleanup(null, code).finally(() => {
+          if (code === 0) {
+            resolve(successResult(stdout.trim() || '(no output)'));
+          } else {
+            const truncatedStdout = truncateForError(stdout, 500);
+            const truncatedStderr = truncateForError(stderr, 500);
+            resolve(errorResult(`Command exited with code ${code}\nStdout: ${truncatedStdout}\nStderr: ${truncatedStderr}`));
+          }
+        });
       });
 
       proc.on('error', (err) => {
         if (resolved) return;
 
-        cleanup('spawn_error', -1);
-        resolve(errorResult(`Failed to execute command: ${err.message}`));
+        void cleanup('spawn_error', -1).finally(() => {
+          resolve(errorResult(`Failed to execute command: ${err.message}`));
+        });
       });
     });
   }
 
   /**
-   * Cleanup all active processes. Called by MiniMaxAgent.cleanup() to prevent
+   * Cleanup all active processes. Called by DPAgent.cleanup() to prevent
    * memory leaks when agent session ends.
    */
   async cleanupAll(): Promise<void> {

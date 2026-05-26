@@ -1,8 +1,9 @@
 import * as assert from 'node:assert/strict';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import { autoLoopManager } from '../../src/auto-loop/index.js';
 import { webServerLogger } from '../../src/utils/logger.js';
 import type { ContextRef } from '../../src/types.js';
+import { createWebServerDouble } from './helpers/web-server-harness.js';
+import { createWebServerTestConfig } from './web-server-test-config.js';
 
 interface ExitResponse {
   accepted: boolean;
@@ -15,9 +16,9 @@ interface LogCall {
 }
 
 function createHarness(context: ContextRef = { scope: 'session', namespace: 'sess-1' }) {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   server.agent = {
-    getConfig: () => ({
+    getConfig: () => createWebServerTestConfig({
       agent: {
         tokenLimit: 1000,
       },

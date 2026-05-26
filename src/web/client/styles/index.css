@@ -36,6 +36,63 @@ html, body, #root {
   min-width: var(--sidebar-rail-width);
 }
 
+.sidebar-collapsed-slot {
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+}
+
+.sidebar-expand-tab {
+  position: fixed;
+  left: 0;
+  top: 50%;
+  z-index: 45;
+  display: inline-flex;
+  width: 26px;
+  height: 56px;
+  transform: translateY(-50%);
+  align-items: center;
+  justify-content: center;
+  border-width: 1px 1px 1px 0;
+  border-style: solid;
+  border-radius: 0 14px 14px 0;
+  opacity: 0.92;
+}
+
+.sidebar-expand-tab:hover {
+  opacity: 1;
+  transform: translateY(-50%) translateX(2px);
+}
+
+.sidebar-auto-backdrop {
+  display: none;
+}
+
+.panel-collapse-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+
+.panel-collapse-button:hover {
+  transform: translateY(-1px);
+}
+
+.sidebar-collapse-button {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+}
+
 .app-main,
 .app-content-frame,
 .chat-panel-shell {
@@ -81,7 +138,28 @@ html, body, #root {
 }
 
 .toolbar-reopen-button {
-  position: fixed;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 20;
+}
+
+.toolbar-reopen-tab {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 999px;
+  opacity: 0.92;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.toolbar-reopen-tab:hover {
+  opacity: 1;
+  transform: translateY(-1px);
 }
 
 .chat-transcript,
@@ -114,31 +192,69 @@ html, body, #root {
 
 .composer-control-stack,
 .composer-quick-row,
-.composer-settings-row {
+.composer-settings-row,
+.composer-primary-controls,
+.composer-secondary-controls {
   min-width: 0;
 }
 
+.composer-control-stack {
+  justify-content: space-between;
+}
+
 .composer-settings-row {
-  flex-wrap: nowrap;
-  width: auto;
-  max-width: min(56%, 560px);
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  width: 100%;
+  max-width: 100%;
+}
+
+.composer-primary-controls {
+  flex: 1 1 auto;
+  max-width: 100%;
+}
+
+.composer-secondary-controls {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.composer-display-filter-group {
+  flex: 0 0 auto;
 }
 
 .composer-llm-slot {
-  flex: 0 1 auto;
-  max-width: min(340px, 36vw);
+  flex: 1 1 260px;
+  min-width: 190px;
+  max-width: 360px;
 }
 
 .composer-ralph-slot {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   max-width: 172px;
 }
 
 .session-llm-control,
 .session-llm-trigger,
+.session-share-button,
+.composer-voice-button,
 .auto-loop-compact,
 .auto-loop-trigger {
   max-width: 100%;
+}
+
+.composer-voice-button {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  flex: 0 0 44px;
+}
+
+.composer-voice-button svg {
+  width: 20px;
+  height: 20px;
+  display: block;
 }
 
 .session-llm-trigger,
@@ -242,8 +358,16 @@ html, body, #root {
     max-width: 100%;
   }
 
+  .message-width-user {
+    min-width: 66.666%;
+    max-width: 86%;
+  }
+
   .composer-control-stack {
-    flex-wrap: nowrap;
+    align-items: stretch;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .composer-quick-row {
@@ -251,21 +375,59 @@ html, body, #root {
   }
 
   .composer-settings-row {
-    flex: 0 0 auto;
+    display: flex;
+    flex: 1 1 auto;
     align-items: center;
-    max-width: min(58%, 520px);
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-start;
+    max-width: 100%;
+    width: 100%;
   }
 
-  .composer-agent-chip,
+  .composer-primary-controls,
+  .composer-secondary-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .composer-primary-controls {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+  }
+
+  .composer-secondary-controls {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .composer-agent-chip {
+    flex: 1 1 auto;
+    min-width: 92px;
+    max-width: 100%;
+  }
+
+  .composer-agent-chip {
+    order: 0;
+  }
+
   .composer-llm-slot {
-    flex: 0 1 auto;
-    max-width: min(240px, 32vw);
+    display: inline-flex;
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: max-content;
+    width: auto;
   }
 
   .composer-ralph-slot {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    margin-left: 0;
     width: max-content;
-    max-width: 128px;
+    max-width: 112px;
   }
 
   .session-llm-trigger,
@@ -274,18 +436,40 @@ html, body, #root {
     justify-content: flex-start;
   }
 
-  .session-llm-provider {
+  .session-llm-control {
+    width: max-content;
+  }
+
+  .session-llm-provider,
+  .session-llm-model,
+  .session-llm-reasoning,
+  .session-share-label {
     display: none !important;
   }
 
-  .session-llm-model {
-    max-width: min(42vw, 190px);
+  .session-llm-trigger {
+    gap: 4px;
+    padding-inline: 9px;
   }
 
-  .session-llm-popover,
+  .session-share-button {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+  }
+
+  .auto-loop-trigger {
+    gap: 5px;
+    padding-inline: 8px;
+  }
+
+  .auto-loop-trigger > button:last-child {
+    max-width: 68px;
+  }
+
   .auto-loop-popover {
     position: fixed !important;
-    left: calc(var(--sidebar-rail-width) + 12px) !important;
+    left: 12px !important;
     right: 12px !important;
     bottom: 172px !important;
     width: auto !important;
@@ -298,9 +482,54 @@ html, body, #root {
     max-height: 100%;
   }
 
+  .toolbar-reopen-button {
+    position: fixed;
+    top: 50%;
+    right: 0;
+    z-index: 45;
+    transform: translateY(-50%);
+  }
+
+  .toolbar-reopen-tab {
+    width: 26px;
+    height: 56px;
+    border-width: 1px 0 1px 1px;
+    border-radius: 14px 0 0 14px;
+  }
+
+  .toolbar-reopen-tab:hover {
+    transform: translateX(-2px);
+  }
+
   .right-toolbar-todo {
     min-height: 96px;
     max-height: 38%;
+  }
+
+  .app-sidebar[data-auto-rail='true'][data-collapsed='false'] {
+    position: fixed;
+    top: var(--app-chrome-gap);
+    bottom: var(--app-chrome-gap);
+    left: var(--app-chrome-gap);
+    z-index: 50;
+    width: min(var(--sidebar-expanded-width), calc(100vw - (var(--app-chrome-gap) * 2)));
+    min-width: 0;
+    max-width: calc(100vw - (var(--app-chrome-gap) * 2));
+    border-radius: 1.35rem;
+  }
+
+  .sidebar-auto-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    display: block;
+    border: 0;
+    background: rgba(0, 0, 0, 0.34);
+  }
+
+  .sidebar-collapse-button,
+  .right-toolbar-collapse-button {
+    min-width: 56px;
   }
 
   .subagent-metric-grid {
@@ -324,6 +553,10 @@ html, body, #root {
     padding: 0;
   }
 
+  .app-main {
+    padding: 8px;
+  }
+
   .chat-messages-viewport {
     padding: 10px var(--chat-rail-padding);
   }
@@ -342,11 +575,42 @@ html, body, #root {
 
   .composer-settings-row {
     gap: 6px;
-    max-width: min(62%, 420px);
+  }
+
+  .composer-primary-controls,
+  .composer-secondary-controls {
+    gap: 6px;
   }
 
   .composer-llm-slot {
-    max-width: min(190px, 38vw);
+    flex-basis: auto;
+  }
+
+  .session-llm-control {
+    width: max-content;
+  }
+
+  .session-llm-trigger {
+    flex: 0 0 auto;
+    min-width: 0;
+    width: auto;
+  }
+
+  .session-share-button {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+  }
+
+  .composer-voice-button {
+    width: 40px;
+    height: 40px;
+    flex-basis: 40px;
+    padding: 0;
+  }
+
+  .session-share-label {
+    display: none;
   }
 
   .composer-ralph-slot {
@@ -354,12 +618,18 @@ html, body, #root {
     max-width: 112px;
   }
 
+  .composer-display-filter-button {
+    height: 32px;
+    min-width: 32px;
+    padding-inline: 7px;
+  }
+
   .auto-loop-trigger {
-    padding-inline: 8px;
+    padding-inline: 7px;
   }
 
   .auto-loop-trigger > button:last-child {
-    max-width: 64px;
+    max-width: 62px;
   }
 
   .session-llm-reasoning {
@@ -590,12 +860,6 @@ body {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
-.connection-status-badge.polling {
-  background-color: rgba(251, 191, 36, 0.15);
-  color: #f59e0b;
-  border: 1px solid rgba(251, 191, 36, 0.3);
-}
-
 @keyframes status-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
@@ -616,8 +880,7 @@ body {
   background-color: #ef4444;
 }
 
-.connection-status-badge.reconnecting .status-dot,
-.connection-status-badge.polling .status-dot {
+.connection-status-badge.reconnecting .status-dot {
   background-color: #f59e0b;
   animation: status-pulse 1s ease-in-out infinite;
 }

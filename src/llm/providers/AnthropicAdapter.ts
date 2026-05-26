@@ -1,29 +1,30 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { llmLogger } from '../../utils/logger.js';
 import { messageTextContent } from '../message-preparation.js';
-import { buildToolProtocolFrames } from '../tool-protocol.js';
-import type { LLMClientConfig, LLMRequestOptions, LLMStreamEvent } from '../runtime-types.js';
+import { prepareToolProtocol } from '../tool-protocol-analyzer.js';
+import {
+  createReasoningReplayPolicy,
+  ReasoningReplayPolicy,
+} from '../thinking-replay.js';
+import { resolveAnthropicReasoningEffort, resolveAnthropicThinkingBudgetTokens } from '../anthropic-thinking-budget.js';
+import { resolveProviderRuntimeBaseUrl } from '../provider-endpoints.js';
+import { normalizeTokenUsage } from '../token-usage.js';
+import type { LLMClientConfig, LLMRequestOptions, LLMStreamEvent, PreparedProviderPayload } from '../runtime-types.js';
 import type { LLMResponse, Message, ResolvedLlmRuntimeConfig, TokenUsage, ToolCall, ToolSchema } from '../../types.js';
-
-const MINIMAX_DOMAINS = ['api.minimax.io', 'api.minimaxi.com'];
 
 export class AnthropicAdapter {
   private client: Anthropic;
   private readonly model: string;
   private readonly maxTokens: number;
   private readonly llmRuntime?: ResolvedLlmRuntimeConfig;
+  private readonly reasoningReplayPolicy: ReasoningReplayPolicy;
 
   constructor(config: LLMClientConfig) {
     this.model = config.model;
     this.maxTokens = config.maxTokens;
     this.llmRuntime = config.llmRuntime;
-
-    let apiBase = config.apiBase.replace(/\/$/, '');
-    const isMinimax = MINIMAX_DOMAINS.some((domain) => apiBase.includes(domain));
-    if (isMinimax) {
-      apiBase = apiBase.replace('/anthropic', '').replace('/v1', '');
-      apiBase = `${apiBase}/anthropic`;
-    }
+    this.reasoningReplayPolicy = createReasoningReplayPolicy(this.llmRuntime);
+    const apiBase = resolveProviderRuntimeBaseUrl('anthropic', config.apiBase);
 
     this.client = new Anthropic({
       apiKey: config.apiKey,
@@ -32,28 +33,31 @@ export class AnthropicAdapter {
   }
 
   async generate(
-    messages: Message[],
+    payload: PreparedProviderPayload,
     tools?: ToolSchema[],
-    systemPrompt?: string,
     options?: LLMRequestOptions
   ): Promise<LLMResponse> {
-    const requestParams = this.buildRequestParams(messages, tools, systemPrompt, options);
-    const response = await this.client.messages.create(requestParams);
+    const requestParams = this.buildRequestParams(payload, tools, options);
+    const response = await this.client.messages.create(requestParams, {
+      signal: options?.signal,
+    });
     return this.convertResponse(response as Anthropic.Messages.Message);
   }
 
   async *generateStream(
-    messages: Message[],
+    payload: PreparedProviderPayload,
     tools?: ToolSchema[],
-    systemPrompt?: string,
     options?: LLMRequestOptions
   ): AsyncGenerator<LLMStreamEvent, LLMResponse, unknown> {
-    const requestParams = this.buildRequestParams(messages, tools, systemPrompt, options);
-    const stream = this.client.messages.stream(requestParams);
+    const requestParams = this.buildRequestParams(payload, tools, options);
+    const stream = this.client.messages.stream(requestParams, {
+      signal: options?.signal,
+    });
 
     let thinking = '';
     let thinkingSignature: string | undefined;
     let usage: TokenUsage | undefined;
+    let streamPromptTokens: number | undefined;
 
     for await (const event of stream) {
       if (event.type === 'content_block_delta') {
@@ -66,25 +70,27 @@ export class AnthropicAdapter {
         } else if (delta.type === 'signature_delta') {
           thinkingSignature = delta.signature;
         } else if (delta.type === 'input_json_delta') {
-          yield { type: 'tool_input', data: delta.partial_json };
+          yield { type: 'tool_input', data: { chunk: delta.partial_json, index: event.index } };
         } else {
           llmLogger.warn(`Unknown delta type: ${delta.type}`);
         }
       } else if (event.type === 'content_block_start') {
         const block = event.content_block;
         if (block.type === 'tool_use') {
-          yield { type: 'tool_start', data: { id: block.id, name: block.name } };
+          yield { type: 'tool_start', data: { id: block.id, name: block.name, index: event.index } };
         }
       } else if (event.type === 'message_start') {
-        usage = {
-          promptTokens: event.message.usage.input_tokens,
-          completionTokens: 0,
-          totalTokens: event.message.usage.input_tokens,
-        };
+        streamPromptTokens = event.message.usage.input_tokens;
+        usage = undefined;
       } else if (event.type === 'message_delta') {
-        if (usage && event.usage) {
-          usage.completionTokens = event.usage.output_tokens;
-          usage.totalTokens = usage.promptTokens + usage.completionTokens;
+        if (typeof streamPromptTokens === 'number' && event.usage) {
+          usage = normalizeTokenUsage(
+            {
+              input_tokens: streamPromptTokens,
+              output_tokens: event.usage.output_tokens,
+            },
+            'anthropic'
+          );
         }
       }
     }
@@ -99,20 +105,27 @@ export class AnthropicAdapter {
     return response;
   }
 
-  private buildRequestParams(
-    messages: Message[],
+  buildPromptEstimationPayload(
+    payload: PreparedProviderPayload,
     tools?: ToolSchema[],
-    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ): unknown {
+    return this.buildRequestParams(payload, tools, options);
+  }
+
+  private buildRequestParams(
+    payload: PreparedProviderPayload,
+    tools?: ToolSchema[],
     options?: LLMRequestOptions
   ): Anthropic.Messages.MessageCreateParams {
     const requestParams: Anthropic.Messages.MessageCreateParams = {
       model: this.model,
       max_tokens: options?.maxTokens ?? this.maxTokens,
-      messages: this.convertMessages(messages),
+      messages: this.convertMessages(payload.messages),
     };
 
-    if (systemPrompt) {
-      requestParams.system = systemPrompt;
+    if (payload.systemPrompt) {
+      requestParams.system = payload.systemPrompt;
     }
 
     if (tools && tools.length > 0) {
@@ -131,11 +144,18 @@ export class AnthropicAdapter {
       };
     }
 
+    const reasoningEffort = resolveAnthropicReasoningEffort(this.llmRuntime);
+    if (reasoningEffort !== undefined) {
+      (requestParams as unknown as Record<string, unknown>).output_config = {
+        effort: reasoningEffort,
+      };
+    }
+
     return requestParams;
   }
 
   private convertMessages(messages: Message[]): Anthropic.Messages.MessageParam[] {
-    const protocol = buildToolProtocolFrames(messages);
+    const protocol = prepareToolProtocol(messages);
     const payload: Anthropic.Messages.MessageParam[] = [];
 
     if (protocol.assistantToolBundleCount > 0) {
@@ -146,7 +166,10 @@ export class AnthropicAdapter {
 
     for (const frame of protocol.frames) {
       if (frame.kind === 'assistant_tool_bundle') {
-        if (this.hasNonReplayableThinking(frame.assistant)) {
+        if (
+          this.reasoningReplayPolicy.shouldCollapseAnthropicToolBundle(frame.assistant) ||
+          this.reasoningReplayPolicy.hasNonReplayableThinking(frame.assistant)
+        ) {
           const textContent = messageTextContent(frame.assistant.content);
           if (textContent) {
             payload.push(this.convertAssistantMessage({
@@ -170,21 +193,10 @@ export class AnthropicAdapter {
         continue;
       }
 
-      if (this.hasNonReplayableThinking(frame.message)) {
+      if (this.reasoningReplayPolicy.hasNonReplayableThinking(frame.message)) {
         payload.push({
           role: 'user' as const,
           content: this.buildNonReplayableThinkingMessageNotice(frame.message),
-        });
-        continue;
-      }
-
-      if (this.hasUnbundledToolCalls(frame.message)) {
-        payload.push(this.convertAssistantMessage({ ...frame.message, toolCalls: undefined }));
-        payload.push({
-          role: 'user' as const,
-          content: this.buildMalformedToolProtocolNotice(
-            `assistant tool_use replay was dropped because aligned tool_result messages were missing`
-          ),
         });
         continue;
       }
@@ -197,25 +209,18 @@ export class AnthropicAdapter {
 
   private convertSingleMessage(message: Message): Anthropic.Messages.MessageParam {
     if (message.role === 'assistant') {
+      if (message.toolCalls && message.toolCalls.length > 0) {
+        throw new Error('[AnthropicAdapter] provider payload must not contain unbundled assistant tool calls');
+      }
       return this.convertAssistantMessage(message);
     }
 
     if (message.role === 'tool') {
-      const toolUseId = message.toolCallId?.trim() ?? '';
-      if (!toolUseId) {
-        return {
-          role: 'user' as const,
-          content: this.buildMalformedToolProtocolNotice('orphan tool_result replay was converted to user note'),
-        };
-      }
-      return {
-        role: 'user' as const,
-        content: [this.convertToolResultBlock(message)],
-      };
+      throw new Error('[AnthropicAdapter] provider payload must not contain unbundled tool_result messages');
     }
 
     if (message.role === 'system') {
-      return { role: 'user' as const, content: messageTextContent(message.content) };
+      throw new Error('[AnthropicAdapter] provider payload must not contain system role messages');
     }
 
     if (typeof message.content === 'string') {
@@ -227,14 +232,15 @@ export class AnthropicAdapter {
 
   private convertAssistantMessage(message: Message): Anthropic.Messages.MessageParam {
     const content: Anthropic.Messages.ContentBlockParam[] = [];
+    const replayableThinking = this.reasoningReplayPolicy.getReplayableThinkingBlock(message);
 
-    if (message.thinking && message.thinkingSignature && this.canReplayThinking(message)) {
+    if (replayableThinking) {
       content.push({
         type: 'thinking',
-        thinking: message.thinking,
-        signature: message.thinkingSignature,
+        thinking: replayableThinking.thinking,
+        ...(replayableThinking.signature ? { signature: replayableThinking.signature } : {}),
       } as Anthropic.Messages.ContentBlockParam);
-    } else if (message.thinking) {
+    } else if (this.reasoningReplayPolicy.hasNonReplayableThinking(message)) {
       llmLogger.debug('Dropping non-replayable thinking block from replay payload');
     }
 
@@ -270,36 +276,6 @@ export class AnthropicAdapter {
       tool_use_id: toolUseId,
       content: messageTextContent(message.content),
     } as Anthropic.Messages.ContentBlockParam;
-  }
-
-  private hasUnbundledToolCalls(message: Message): boolean {
-    return message.role === 'assistant' && Array.isArray(message.toolCalls) && message.toolCalls.length > 0;
-  }
-
-  private hasNonReplayableThinking(message: Message): boolean {
-    if (message.role !== 'assistant') {
-      return false;
-    }
-    if (message.thinking) {
-      return !this.canReplayThinking(message);
-    }
-    return Boolean(message.thinkingSignature);
-  }
-
-  private canReplayThinking(message: Message): boolean {
-    if (!message.thinking || !message.thinkingSignature) {
-      return false;
-    }
-    if (!this.llmRuntime) {
-      return true;
-    }
-    const metadata = message.metadata;
-    return (
-      metadata?.thinkingComplete === true &&
-      metadata.llmProvider === this.llmRuntime.provider &&
-      metadata.llmModel === this.llmRuntime.model &&
-      metadata.llmProviderProfileId === this.llmRuntime.profileId
-    );
   }
 
   private convertUserContent(content: Message['content']): string | Anthropic.Messages.ContentBlockParam[] {
@@ -350,10 +326,6 @@ export class AnthropicAdapter {
     }
 
     return blocks;
-  }
-
-  private buildMalformedToolProtocolNotice(reason: string): string {
-    return `[TOOLCALL_FAILED] ${reason}. next_action=Issue fresh tool calls and continue from latest valid state.`;
   }
 
   private buildNonReplayableThinkingToolBundleNotice(assistant: Message, toolResults: Message[]): string {
@@ -420,16 +392,12 @@ export class AnthropicAdapter {
     }
 
     if (!usage && response.usage) {
-      usage = {
-        promptTokens: response.usage.input_tokens,
-        completionTokens: response.usage.output_tokens,
-        totalTokens: response.usage.input_tokens + response.usage.output_tokens,
-      };
+      usage = normalizeTokenUsage(response.usage, 'anthropic');
     }
 
     const finishReason = String(response.stop_reason ?? (toolCalls.length > 0 ? 'tool_use' : 'end_turn'));
     llmLogger.info(
-      `[AnthropicAdapter] Response normalized: raw_stop_reason=${String(response.stop_reason ?? 'undefined')} finishReason=${finishReason} toolCalls=${toolCalls.length} contentChars=${content.length} thinkingChars=${thinking?.length ?? 0}`
+      `[AnthropicAdapter] Response normalized: raw_stop_reason=${String(response.stop_reason ?? 'undefined')} finishReason=${finishReason} toolCalls=${toolCalls.length} contentChars=${content.length} thinkingChars=${thinking?.length ?? 0} usage=${usage ? `prompt=${usage.promptTokens} completion=${usage.completionTokens} total=${usage.totalTokens}` : 'none'}`
     );
 
     return {
@@ -440,27 +408,5 @@ export class AnthropicAdapter {
       finishReason,
       usage,
     };
-  }
-}
-
-function resolveAnthropicThinkingBudgetTokens(llmRuntime: ResolvedLlmRuntimeConfig | undefined): number | undefined {
-  if (!llmRuntime || llmRuntime.reasoningPreset === 'off' || llmRuntime.capabilities.thinkingBudget !== true) {
-    return undefined;
-  }
-
-  const override = llmRuntime.providerOptions?.anthropic?.thinkingBudgetTokens;
-  if (typeof override === 'number' && Number.isFinite(override) && override > 0) {
-    return Math.floor(override);
-  }
-
-  switch (llmRuntime.reasoningPreset) {
-    case 'low':
-      return 1024;
-    case 'medium':
-      return 4096;
-    case 'high':
-      return 8192;
-    default:
-      return undefined;
   }
 }

@@ -1,34 +1,28 @@
 import { ContextManager } from '../context/index.js';
 import type {
   ContextRef,
-  PlanDocument,
+  FinalizedPlanStep,
+  FinalizedPlanStepPriority,
+  FinalizedPlanView,
   PlanInputAnswer,
   PlanInputRequest,
   PlanOption,
   PlanQuestion,
-  PlanStep,
-  PlanStepStatus,
   ToolResult,
 } from '../types.js';
 import { Tool, errorResult, successResult } from './Tool.js';
 
-const PLAN_CURRENT_KEY = 'plan_mode.current_plan';
 const PLAN_FINAL_MARKDOWN_KEY = 'plan_mode.final_plan_markdown';
 const PLAN_FINAL_SNAPSHOT_KEY = 'plan_mode.final_plan_snapshot';
-
-const ALLOWED_STEP_STATUS: PlanStepStatus[] = ['pending', 'in_progress', 'completed'];
+const PLAN_FINAL_STEPS_KEY = 'plan_mode.final_plan_steps';
+const PLAN_PENDING_ID_KEY = 'plan_mode.pending_plan_id';
 
 export interface PlanModeToolsOptions {
   contextManager: ContextManager;
   resolveActiveContext: () => ContextRef | null;
   resolveActiveTurnId: () => string | null;
   requestUserInput?: (request: PlanInputRequest) => Promise<PlanInputAnswer[]>;
-}
-
-interface NormalizePlanResult {
-  ok: true;
-  steps: PlanStep[];
-  explanation?: string;
+  requestPlanApproval?: (request: PlanInputRequest) => Promise<PlanInputAnswer[]>;
 }
 
 interface NormalizeQuestionsResult {
@@ -36,57 +30,17 @@ interface NormalizeQuestionsResult {
   questions: PlanQuestion[];
 }
 
+interface NormalizeFinalPlanStepsResult {
+  ok: true;
+  steps: FinalizedPlanStep[];
+}
+
 function createRequestId(): string {
   return `plan-input-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-function normalizeStepStatus(value: unknown): PlanStepStatus | null {
-  const text = String(value ?? '')
-    .trim()
-    .toLowerCase();
-  if ((ALLOWED_STEP_STATUS as string[]).includes(text)) {
-    return text as PlanStepStatus;
-  }
-  return null;
-}
-
-function normalizePlan(args: Record<string, unknown>): NormalizePlanResult | { ok: false; error: string } {
-  if (!Array.isArray(args.plan)) {
-    return { ok: false, error: 'plan must be an array' };
-  }
-  const steps: PlanStep[] = [];
-  for (let i = 0; i < args.plan.length; i += 1) {
-    const raw = args.plan[i];
-    if (!raw || typeof raw !== 'object') {
-      return { ok: false, error: `plan[${i}] must be an object` };
-    }
-    const item = raw as { step?: unknown; status?: unknown };
-    const step = String(item.step ?? '').trim();
-    const status = normalizeStepStatus(item.status);
-    if (!step) {
-      return { ok: false, error: `plan[${i}].step is required` };
-    }
-    if (!status) {
-      return {
-        ok: false,
-        error: `plan[${i}].status must be one of: ${ALLOWED_STEP_STATUS.join(', ')}`,
-      };
-    }
-    steps.push({ step, status });
-  }
-  if (steps.length === 0) {
-    return { ok: false, error: 'plan must contain at least one step' };
-  }
-  const inProgressCount = steps.filter((item) => item.status === 'in_progress').length;
-  if (inProgressCount > 1) {
-    return { ok: false, error: 'plan can contain at most one in_progress step' };
-  }
-  const explanationRaw = String(args.explanation ?? '').trim();
-  return {
-    ok: true,
-    steps,
-    explanation: explanationRaw.length > 0 ? explanationRaw : undefined,
-  };
+function createPlanId(): string {
+  return `plan-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
 function normalizeOptions(value: unknown, questionIndex: number): PlanOption[] | { error: string } {
@@ -178,10 +132,55 @@ function normalizeStringArray(value: unknown): string[] {
     .filter((item) => item.length > 0);
 }
 
-function buildPlanMarkdown(args: Record<string, unknown>): string {
+function normalizePriority(value: unknown): FinalizedPlanStepPriority | undefined {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (text === 'low' || text === 'medium' || text === 'high') {
+    return text;
+  }
+  return undefined;
+}
+
+function normalizeFinalPlanSteps(args: Record<string, unknown>): NormalizeFinalPlanStepsResult | { ok: false; error: string } {
+  if (!Array.isArray(args.steps) || args.steps.length === 0) {
+    return { ok: false, error: 'steps must be a non-empty array' };
+  }
+  const steps: FinalizedPlanStep[] = [];
+  for (let i = 0; i < args.steps.length; i += 1) {
+    const raw = args.steps[i];
+    if (!raw || typeof raw !== 'object') {
+      return { ok: false, error: `steps[${i}] must be an object` };
+    }
+    const item = raw as {
+      work?: unknown;
+      detection_standard?: unknown;
+      detectionStandard?: unknown;
+      priority?: unknown;
+      tags?: unknown;
+    };
+    const work = String(item.work ?? '').trim();
+    const detectionStandard = String(item.detection_standard ?? item.detectionStandard ?? '').trim();
+    if (!work) {
+      return { ok: false, error: `steps[${i}].work is required` };
+    }
+    if (!detectionStandard) {
+      return { ok: false, error: `steps[${i}].detection_standard is required` };
+    }
+    const priority = normalizePriority(item.priority);
+    const tags = normalizeStringArray(item.tags);
+    steps.push({
+      planStepId: `step-${String(i + 1).padStart(3, '0')}`,
+      work,
+      detectionStandard,
+      ...(priority ? { priority } : {}),
+      ...(tags.length > 0 ? { tags } : {}),
+    });
+  }
+  return { ok: true, steps };
+}
+
+function buildPlanMarkdown(args: Record<string, unknown>, steps: FinalizedPlanStep[]): string {
   const title = String(args.title ?? '').trim() || 'Implementation Plan';
   const summary = String(args.summary ?? '').trim();
-  const keyChanges = normalizeStringArray(args.key_changes);
   const testPlan = normalizeStringArray(args.test_plan);
   const assumptions = normalizeStringArray(args.assumptions);
   const notes = String(args.notes ?? '').trim();
@@ -190,10 +189,16 @@ function buildPlanMarkdown(args: Record<string, unknown>): string {
   if (summary) {
     lines.push('', '### Summary', summary);
   }
-  if (keyChanges.length > 0) {
-    lines.push('', '### Implementation Changes');
-    for (const item of keyChanges) {
-      lines.push(`- ${item}`);
+  if (steps.length > 0) {
+    lines.push('', '### Implementation Steps');
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i];
+      const priority = step.priority ? ` priority=${step.priority}` : '';
+      lines.push(`${i + 1}. [${step.planStepId}] ${step.work}${priority}`);
+      lines.push(`   - detection_standard: ${step.detectionStandard}`);
+      if (step.tags && step.tags.length > 0) {
+        lines.push(`   - tags: ${step.tags.join(', ')}`);
+      }
     }
   }
   if (testPlan.length > 0) {
@@ -212,6 +217,31 @@ function buildPlanMarkdown(args: Record<string, unknown>): string {
     lines.push('', '### Notes', notes);
   }
   return lines.join('\n').trim();
+}
+
+function findExecutionApprovalAnswer(answers: PlanInputAnswer[]): PlanInputAnswer | undefined {
+  return answers.find((answer) => answer.id === 'plan_execution_approval');
+}
+
+function getPlanApprovalDecision(answers: PlanInputAnswer[]): 'approved' | 'revise' | 'rejected' {
+  const answer = findExecutionApprovalAnswer(answers);
+  const label = String(answer?.selectedLabel ?? '').trim().toLowerCase();
+  if (label === 'approve execution') {
+    return 'approved';
+  }
+  if (label === 'reject' || label === 'rejected' || label === 'do not execute') {
+    return 'rejected';
+  }
+  return 'revise';
+}
+
+function getPlanApprovalFeedback(answers: PlanInputAnswer[]): string {
+  const answer = findExecutionApprovalAnswer(answers);
+  const freeText = String(answer?.freeText ?? '').trim();
+  if (freeText) {
+    return freeText;
+  }
+  return String(answer?.selectedLabel ?? '').trim();
 }
 
 abstract class PlanModeToolBase extends Tool {
@@ -248,71 +278,6 @@ abstract class PlanModeToolBase extends Tool {
   }
 }
 
-export class UpdatePlanTool extends PlanModeToolBase {
-  get name(): string {
-    return 'update_plan';
-  }
-
-  get description(): string {
-    return 'Update current plan steps with status. Validates plan and persists to context.';
-  }
-
-  get parameters(): Record<string, unknown> {
-    return {
-      type: 'object',
-      properties: {
-        explanation: {
-          type: 'string',
-          description: 'Optional explanation for why plan was updated.',
-        },
-        plan: {
-          type: 'array',
-          description: 'Plan steps. At most one step may be in_progress.',
-          items: {
-            type: 'object',
-            properties: {
-              step: { type: 'string' },
-              status: {
-                type: 'string',
-                enum: ALLOWED_STEP_STATUS,
-              },
-            },
-            required: ['step', 'status'],
-          },
-        },
-      },
-      required: ['plan'],
-    };
-  }
-
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const normalized = normalizePlan(args);
-    if (!normalized.ok) {
-      return errorResult(normalized.error);
-    }
-    const document: PlanDocument = {
-      explanation: normalized.explanation,
-      plan: normalized.steps,
-      updatedAt: new Date().toISOString(),
-    };
-    const persisted = this.persistContextValue(PLAN_CURRENT_KEY, JSON.stringify(document));
-    if (!persisted.ok) {
-      return errorResult(persisted.error);
-    }
-    return successResult(
-      JSON.stringify(
-        {
-          ok: true,
-          planKey: PLAN_CURRENT_KEY,
-          document,
-        },
-        null,
-        2
-      )
-    );
-  }
-}
-
 export class RequestUserInputTool extends PlanModeToolBase {
   private readonly requestUserInput?: (request: PlanInputRequest) => Promise<PlanInputAnswer[]>;
 
@@ -326,7 +291,7 @@ export class RequestUserInputTool extends PlanModeToolBase {
   }
 
   get description(): string {
-    return 'Request structured user input with 1-3 questions and wait for user responses.';
+    return 'Request structured user input with 1-3 clarification questions and wait for user responses. Do not use this tool for execution approval.';
   }
 
   get parameters(): Record<string, unknown> {
@@ -372,7 +337,9 @@ export class RequestUserInputTool extends PlanModeToolBase {
     }
     const request: PlanInputRequest = {
       requestId: createRequestId(),
+      source: 'request_user_input',
       questions: normalized.questions,
+      turnId: this.resolveActiveTurnId() ?? undefined,
     };
     try {
       const answers = await this.requestUserInput(request);
@@ -382,6 +349,8 @@ export class RequestUserInputTool extends PlanModeToolBase {
             ok: true,
             requestId: request.requestId,
             answers,
+            systemHint:
+              'Use these answers to update the plan. If any high-impact requirement, boundary, tradeoff, assumption, edge case, or verification detail is still unclear, or if the user answers contradict prior input or verified project context, continue asking with request_user_input before calling finalize_plan. Do not fabricate missing answers or silently resolve contradictions.',
           },
           null,
           2
@@ -395,12 +364,19 @@ export class RequestUserInputTool extends PlanModeToolBase {
 }
 
 export class FinalizePlanTool extends PlanModeToolBase {
+  private readonly requestPlanApproval?: (request: PlanInputRequest) => Promise<PlanInputAnswer[]>;
+
+  constructor(options: PlanModeToolsOptions) {
+    super(options);
+    this.requestPlanApproval = options.requestPlanApproval;
+  }
+
   get name(): string {
     return 'finalize_plan';
   }
 
   get description(): string {
-    return 'Generate final plan markdown and persist final plan snapshot to context.';
+    return 'Freeze the final plan, show the execution approval card, and wait for the user approval or revision decision.';
   }
 
   get parameters(): Record<string, unknown> {
@@ -415,10 +391,31 @@ export class FinalizePlanTool extends PlanModeToolBase {
           type: 'string',
           description: 'Short summary paragraph.',
         },
-        key_changes: {
+        steps: {
           type: 'array',
-          items: { type: 'string' },
-          description: 'Implementation changes.',
+          description: 'Final executable plan steps. Each step must be independently verifiable.',
+          items: {
+            type: 'object',
+            properties: {
+              work: {
+                type: 'string',
+                description: 'Concrete work to perform in this step.',
+              },
+              detection_standard: {
+                type: 'string',
+                description: 'External verification standard for completing this step.',
+              },
+              priority: {
+                type: 'string',
+                enum: ['low', 'medium', 'high'],
+              },
+              tags: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['work', 'detection_standard'],
+          },
         },
         test_plan: {
           type: 'array',
@@ -435,15 +432,25 @@ export class FinalizePlanTool extends PlanModeToolBase {
           description: 'Optional free-form notes.',
         },
       },
+      required: ['steps'],
     };
   }
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const markdown = buildPlanMarkdown(args);
-    const finalSnapshot = {
+    const normalizedSteps = normalizeFinalPlanSteps(args);
+    if (!normalizedSteps.ok) {
+      return errorResult(normalizedSteps.error);
+    }
+    if (!this.requestPlanApproval) {
+      return errorResult('finalize_plan approval callback is not available in current runtime');
+    }
+    const markdown = buildPlanMarkdown(args, normalizedSteps.steps);
+    const planId = createPlanId();
+    const finalSnapshot: FinalizedPlanView = {
+      planId,
       title: String(args.title ?? '').trim() || 'Implementation Plan',
       summary: String(args.summary ?? '').trim(),
-      keyChanges: normalizeStringArray(args.key_changes),
+      steps: normalizedSteps.steps,
       testPlan: normalizeStringArray(args.test_plan),
       assumptions: normalizeStringArray(args.assumptions),
       notes: String(args.notes ?? '').trim(),
@@ -459,13 +466,86 @@ export class FinalizePlanTool extends PlanModeToolBase {
     if (!saveSnapshot.ok) {
       return errorResult(saveSnapshot.error);
     }
-    return successResult(markdown);
+    const saveSteps = this.persistContextValue(PLAN_FINAL_STEPS_KEY, JSON.stringify(normalizedSteps.steps));
+    if (!saveSteps.ok) {
+      return errorResult(saveSteps.error);
+    }
+    const savePlanRecord = this.persistContextValue(`plan_mode.plans.${planId}`, JSON.stringify(finalSnapshot));
+    if (!savePlanRecord.ok) {
+      return errorResult(savePlanRecord.error);
+    }
+    const savePendingId = this.persistContextValue(PLAN_PENDING_ID_KEY, planId);
+    if (!savePendingId.ok) {
+      return errorResult(savePendingId.error);
+    }
+    const request: PlanInputRequest = {
+      requestId: createRequestId(),
+      source: 'finalize_plan_approval',
+      turnId: this.resolveActiveTurnId() ?? undefined,
+      planPreview: finalSnapshot,
+      questions: [
+        {
+          header: 'Execute Plan',
+          id: 'plan_execution_approval',
+          question: 'Review the finalized plan. Approve execution or provide revision feedback.',
+          options: [
+            {
+              label: 'Approve execution',
+              description: 'Create Todo items from this plan and start execution after this planning turn ends.',
+            },
+            {
+              label: 'Request changes',
+              description: 'Return feedback to revise the plan before execution.',
+            },
+          ],
+        },
+      ],
+    };
+    try {
+      const answers = await this.requestPlanApproval(request);
+      const decision = getPlanApprovalDecision(answers);
+      const feedback = getPlanApprovalFeedback(answers);
+      return successResult(
+        JSON.stringify(
+          {
+            ok: true,
+            planId,
+            requestId: request.requestId,
+            decision,
+            markdown,
+            steps: normalizedSteps.steps,
+            answers,
+            ...(decision === 'approved'
+              ? {
+                  executionContinuation: 'approved_new_turn',
+                  message:
+                    'The user approved execution. Do not implement or call more tools in this planning turn. Briefly acknowledge approval and end the current planning turn; the server will create todos and start the execution loop after this turn completes.',
+                }
+              : decision === 'rejected'
+                ? {
+                    feedback,
+                    message:
+                      'The user rejected execution. Do not execute the plan. Ask for next direction or stop planning.',
+                  }
+                : {
+                    feedback,
+                    message:
+                      'The user requested changes. Revise the plan using the feedback, then call finalize_plan again with the updated final plan.',
+                  }),
+          },
+          null,
+          2
+        )
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return errorResult(`finalize_plan approval failed: ${message}`);
+    }
   }
 }
 
 export function createPlanModeTools(options: PlanModeToolsOptions): Tool[] {
   return [
-    new UpdatePlanTool(options),
     new RequestUserInputTool(options),
     new FinalizePlanTool(options),
   ];

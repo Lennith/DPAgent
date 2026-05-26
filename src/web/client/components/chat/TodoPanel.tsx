@@ -1,4 +1,3 @@
-import React from 'react';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 import { useI18n } from '../../i18n/index.js';
 
@@ -6,7 +5,7 @@ export interface TodoPanelItem {
   id: string;
   work: string;
   detectionStandard: string;
-  status: 'pending' | 'in_progress' | 'blocked' | 'completed';
+  status: 'pending' | 'in_progress' | 'blocked' | 'completed' | 'dismissed';
   priority: 'low' | 'medium' | 'high';
   blockedReason?: string;
   completionTaskId?: string;
@@ -18,6 +17,8 @@ export interface TodoPanelItem {
 interface TodoPanelProps {
   items: TodoPanelItem[];
   compact?: boolean;
+  onResumeTodo?: (id: string) => void;
+  onDismissTodo?: (id: string) => void;
 }
 
 function StatusBadge({
@@ -51,6 +52,7 @@ function sortTodoItems(items: TodoPanelItem[]): TodoPanelItem[] {
     blocked: 1,
     pending: 2,
     completed: 3,
+    dismissed: 4,
   };
   return [...items].sort((left, right) => {
     const byStatus = order[left.status] - order[right.status];
@@ -61,13 +63,18 @@ function sortTodoItems(items: TodoPanelItem[]): TodoPanelItem[] {
   });
 }
 
-export function TodoPanel({ items, compact = false }: TodoPanelProps) {
+function isOpenTodo(item: TodoPanelItem): boolean {
+  return item.status !== 'completed' && item.status !== 'dismissed';
+}
+
+export function TodoPanel({ items, compact = false, onResumeTodo, onDismissTodo }: TodoPanelProps) {
   const theme = useThemeConfig();
   const { t } = useI18n();
-  const unfinished = items.filter((item) => item.status !== 'completed');
-  const orderedItems = sortTodoItems(items);
+  const activeItems = items.filter((item) => item.status !== 'dismissed');
+  const unfinished = activeItems.filter(isOpenTodo);
+  const orderedItems = sortTodoItems(activeItems);
 
-  if (items.length === 0) {
+  if (activeItems.length === 0) {
     return null;
   }
 
@@ -99,6 +106,16 @@ export function TodoPanel({ items, compact = false }: TodoPanelProps) {
           border="rgba(34, 197, 94, 0.45)"
           color="#16a34a"
           background="rgba(34, 197, 94, 0.12)"
+        />
+      );
+    }
+    if (item.status === 'dismissed') {
+      return (
+        <StatusBadge
+          label={t('todo.status.dismissed')}
+          border={theme.colors.border.DEFAULT}
+          color={theme.colors.text.muted}
+          background={theme.colors.bg.tertiary}
         />
       );
     }
@@ -182,6 +199,38 @@ export function TodoPanel({ items, compact = false }: TodoPanelProps) {
                 </div>
                 {renderStatusBadge(item)}
               </div>
+              {isBlocked && (onResumeTodo || onDismissTodo) && (
+                <div className="mt-2 flex items-center justify-end gap-2">
+                  {onResumeTodo && (
+                    <button
+                      type="button"
+                      onClick={() => onResumeTodo(item.id)}
+                      className="rounded-md border px-2 py-1 text-[11px] font-medium"
+                      style={{
+                        borderColor: theme.colors.border.DEFAULT,
+                        color: theme.colors.text.secondary,
+                        backgroundColor: theme.colors.bg.tertiary,
+                      }}
+                    >
+                      {t('todo.action.resume')}
+                    </button>
+                  )}
+                  {onDismissTodo && (
+                    <button
+                      type="button"
+                      onClick={() => onDismissTodo(item.id)}
+                      className="rounded-md border px-2 py-1 text-[11px] font-medium"
+                      style={{
+                        borderColor: theme.colors.toolResult.error.border,
+                        color: theme.colors.toolResult.error.text,
+                        backgroundColor: theme.colors.toolResult.error.bg,
+                      }}
+                    >
+                      {t('todo.action.dismiss')}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}

@@ -1,5 +1,6 @@
 import type {
   APIProvider,
+  ContextUsageEstimate,
   LLMResponse,
   Message,
   PreparedMessagesResult,
@@ -8,11 +9,14 @@ import type {
   ToolSchema,
 } from '../types.js';
 import { llmLogger } from '../utils/logger.js';
-import { prepareMessagesForModel } from './message-preparation.js';
-import { buildToolProtocolFrames } from './tool-protocol.js';
+import { estimateMessagesCharacters, prepareMessagesForModel } from './message-preparation.js';
+import { assertReplaySafeToolProtocol, prepareToolProtocol } from './tool-protocol-analyzer.js';
+import { estimateContextUsageFromPayload } from '../runtime/context-window-budget.js';
+import { buildPreparedInputUsageSnapshot } from '../runtime/context-window-budget.js';
 import type {
   LLMClientConfig,
   LLMRequestOptions,
+  PreparedProviderPayload,
   LLMRuntime,
   LLMStreamEvent,
   StreamCallbacks,
@@ -22,17 +26,20 @@ import { OpenAICompatibleAdapter } from './providers/OpenAICompatibleAdapter.js'
 
 interface LLMProviderAdapter {
   generate(
-    messages: Message[],
+    payload: PreparedProviderPayload,
     tools?: ToolSchema[],
-    systemPrompt?: string,
     options?: LLMRequestOptions
   ): Promise<LLMResponse>;
   generateStream(
-    messages: Message[],
+    payload: PreparedProviderPayload,
     tools?: ToolSchema[],
-    systemPrompt?: string,
     options?: LLMRequestOptions
   ): AsyncGenerator<LLMStreamEvent, LLMResponse, unknown>;
+  buildPromptEstimationPayload(
+    payload: PreparedProviderPayload,
+    tools?: ToolSchema[],
+    options?: LLMRequestOptions
+  ): unknown;
 }
 
 export class LLMClient implements LLMRuntime {
@@ -61,12 +68,9 @@ export class LLMClient implements LLMRuntime {
     systemPrompt?: string,
     options?: LLMRequestOptions
   ): Promise<LLMResponse> {
-    const prepared = prepareMessagesForModel(messages, {
-      trimOptions: options?.trimOptions,
-    });
-    this.emitPreparedMessagesSnapshot(options?.snapshotStage ?? 'initial', prepared);
-    assertPreparedMessagesValid(prepared.postTrimSanitized.messages);
-    return this.adapter.generate(prepared.postTrimSanitized.messages, tools, systemPrompt, options);
+    const payload = this.prepareProviderPayload(messages, systemPrompt, options);
+    this.emitPreparedMessagesSnapshot(options?.snapshotStage ?? 'initial', payload.preparation);
+    return this.adapter.generate(payload, tools, options);
   }
 
   async *generateStream(
@@ -75,12 +79,9 @@ export class LLMClient implements LLMRuntime {
     systemPrompt?: string,
     options?: LLMRequestOptions
   ): AsyncGenerator<LLMStreamEvent, LLMResponse, unknown> {
-    const prepared = prepareMessagesForModel(messages, {
-      trimOptions: options?.trimOptions,
-    });
-    this.emitPreparedMessagesSnapshot(options?.snapshotStage ?? 'initial', prepared);
-    assertPreparedMessagesValid(prepared.postTrimSanitized.messages);
-    const generator = this.adapter.generateStream(prepared.postTrimSanitized.messages, tools, systemPrompt, options);
+    const payload = this.prepareProviderPayload(messages, systemPrompt, options);
+    this.emitPreparedMessagesSnapshot(options?.snapshotStage ?? 'initial', payload.preparation);
+    const generator = this.adapter.generateStream(payload, tools, options);
     return yield* generator;
   }
 
@@ -91,9 +92,34 @@ export class LLMClient implements LLMRuntime {
     systemPrompt?: string,
     options?: LLMRequestOptions
   ): Promise<LLMResponse> {
-    const generator = this.generateStream(messages, tools, systemPrompt, options);
+    return this.consumeStreamWithCallbacks(
+      this.generateStream(messages, tools, systemPrompt, options),
+      callbacks
+    );
+  }
+
+  async generatePreparedWithCallbacks(
+    messages: Message[],
+    callbacks: StreamCallbacks,
+    tools?: ToolSchema[],
+    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ): Promise<LLMResponse> {
+    const payload = this.prepareTrustedProviderPayload(messages, systemPrompt);
+    this.emitPreparedMessagesSnapshot(options?.snapshotStage ?? 'initial', payload.preparation);
+    return this.consumeStreamWithCallbacks(
+      this.adapter.generateStream(payload, tools, options),
+      callbacks
+    );
+  }
+
+  private async consumeStreamWithCallbacks(
+    generator: AsyncGenerator<LLMStreamEvent, LLMResponse, unknown>,
+    callbacks: StreamCallbacks
+  ): Promise<LLMResponse> {
     let finalResponse: LLMResponse | undefined;
     const toolInputBuffer = new Map<string, { name: string; rawInput: string }>();
+    const toolIndexToId = new Map<number, string>();
     const emittedToolUseInputs = new Map<string, Record<string, unknown>>();
 
     for await (const event of generator) {
@@ -106,6 +132,9 @@ export class LLMClient implements LLMRuntime {
           callbacks.onThinking?.(event.data);
           break;
         case 'tool_start':
+          if (typeof event.data.index === 'number') {
+            toolIndexToId.set(event.data.index, event.data.id);
+          }
           toolInputBuffer.set(event.data.id, {
             name: event.data.name,
             rawInput: '',
@@ -116,16 +145,15 @@ export class LLMClient implements LLMRuntime {
           }
           break;
         case 'tool_input': {
-          const activeToolId = Array.from(toolInputBuffer.keys()).pop();
-          if (activeToolId) {
-            const existing = toolInputBuffer.get(activeToolId);
-            if (existing) {
-              toolInputBuffer.set(activeToolId, {
-                ...existing,
-                rawInput: existing.rawInput + event.data,
-              });
-            }
+          const activeToolId = resolveToolInputDeltaId(event.data, toolIndexToId, toolInputBuffer);
+          const existing = toolInputBuffer.get(activeToolId);
+          if (!existing) {
+            throw new Error(`[INVALID_TOOL_STREAM_DELTA] tool_input referenced unknown tool id=${activeToolId}`);
           }
+          toolInputBuffer.set(activeToolId, {
+            ...existing,
+            rawInput: existing.rawInput + event.data.chunk,
+          });
           break;
         }
         case 'complete':
@@ -141,6 +169,30 @@ export class LLMClient implements LLMRuntime {
     }
 
     return finalResponse;
+  }
+
+  estimatePreparedInputUsage(
+    messages: Message[],
+    tools?: ToolSchema[],
+    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ): ContextUsageEstimate {
+    const payload = this.prepareTrustedProviderPayload(messages, systemPrompt);
+    return estimateContextUsageFromPayload(
+      this.adapter.buildPromptEstimationPayload(payload, tools, options)
+    );
+  }
+
+  capturePreparedInputUsageSnapshot(
+    messages: Message[],
+    tools?: ToolSchema[],
+    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ) {
+    const payload = this.prepareTrustedProviderPayload(messages, systemPrompt);
+    return buildPreparedInputUsageSnapshot(
+      this.adapter.buildPromptEstimationPayload(payload, tools, options)
+    );
   }
 
   private emitPreparedMessagesSnapshot(
@@ -183,6 +235,89 @@ export class LLMClient implements LLMRuntime {
       messages: prepared.postTrimSanitized.messages,
     });
   }
+
+  private prepareProviderPayload(
+    messages: Message[],
+    systemPrompt?: string,
+    options?: LLMRequestOptions
+  ): PreparedProviderPayload {
+    const preparation = prepareMessagesForModel(messages, {
+      trimOptions: options?.trimOptions,
+    });
+    return this.buildProviderPayloadFromPreparation(preparation, systemPrompt);
+  }
+
+  private prepareTrustedProviderPayload(
+    messages: Message[],
+    systemPrompt?: string
+  ): PreparedProviderPayload {
+    return this.buildProviderPayloadFromPreparation(
+      buildTrustedPreparedMessagesResult(messages),
+      systemPrompt
+    );
+  }
+
+  private buildProviderPayloadFromPreparation(
+    preparation: PreparedMessagesResult,
+    systemPrompt?: string
+  ): PreparedProviderPayload {
+    const preparedMessages = preparation.postTrimSanitized.messages;
+    assertPreparedMessagesValid(preparedMessages);
+    const { providerMessages, systemPrompt: canonicalSystemPrompt } = splitSystemMessages(preparedMessages, systemPrompt);
+    assertProviderPayloadMessages(providerMessages);
+    return {
+      messages: providerMessages,
+      systemPrompt: canonicalSystemPrompt,
+      preparation,
+    };
+  }
+}
+
+function splitSystemMessages(
+  messages: Message[],
+  systemPrompt?: string
+): {
+  providerMessages: Message[];
+  systemPrompt?: string;
+} {
+  const systemMessages: string[] = [];
+  const providerMessages: Message[] = [];
+  for (const message of messages) {
+    if (message.role === 'system') {
+      systemMessages.push(messageTextForSystem(message));
+      continue;
+    }
+    providerMessages.push(message);
+  }
+  const explicitSystemPrompt = String(systemPrompt ?? '').trim();
+  const parts = [
+    ...(explicitSystemPrompt.length > 0 ? [explicitSystemPrompt] : []),
+    ...systemMessages.filter((item) => item.trim().length > 0),
+  ];
+  return {
+    providerMessages,
+    systemPrompt: parts.length > 0 ? parts.join('\n\n') : undefined,
+  };
+}
+
+function messageTextForSystem(message: Message): string {
+  if (typeof message.content === 'string') {
+    return message.content;
+  }
+  return message.content
+    .map((block) => {
+      if (block.type === 'text') {
+        return block.text ?? '';
+      }
+      return '';
+    })
+    .join('\n');
+}
+
+function assertProviderPayloadMessages(messages: Message[]): void {
+  if (messages.some((message) => message.role === 'system')) {
+    throw new Error('[INVALID_PROVIDER_PAYLOAD] provider messages must not contain system role messages.');
+  }
 }
 
 function normalizeProvider(provider?: APIProvider): APIProvider {
@@ -224,46 +359,56 @@ function emitToolUseCallbacks(
   }
 }
 
+function resolveToolInputDeltaId(
+  data: Extract<LLMStreamEvent, { type: 'tool_input' }>['data'],
+  toolIndexToId: Map<number, string>,
+  toolInputBuffer: Map<string, { name: string; rawInput: string }>
+): string {
+  if (data.id) {
+    return data.id;
+  }
+  if (typeof data.index === 'number') {
+    const id = toolIndexToId.get(data.index);
+    if (id) {
+      return id;
+    }
+    throw new Error(`[INVALID_TOOL_STREAM_DELTA] tool_input index=${data.index} has no matching tool_start`);
+  }
+  if (toolInputBuffer.size === 1) {
+    throw new Error('[INVALID_TOOL_STREAM_DELTA] tool_input must include id or index even when only one tool is active');
+  }
+  throw new Error('[INVALID_TOOL_STREAM_DELTA] tool_input must include id or index');
+}
+
 function assertPreparedMessagesValid(messages: Message[]): void {
-  const frames = buildToolProtocolFrames(messages);
-  const bundledToolIds = new Set<string>();
-  for (const frame of frames.frames) {
-    if (frame.kind !== 'assistant_tool_bundle') {
-      continue;
-    }
-    for (const toolResult of frame.toolResults) {
-      if (toolResult.toolCallId?.trim()) {
-        bundledToolIds.add(toolResult.toolCallId.trim());
-      }
-    }
-  }
-  for (const message of messages) {
-    if (message.role !== 'tool') {
-      continue;
-    }
-    const toolCallId = message.toolCallId?.trim();
-    if (!toolCallId || !bundledToolIds.has(toolCallId)) {
-      throw new Error('[INVALID_REPLAY_PROTOCOL] tool_result message is not part of a valid assistant/tool bundle.');
-    }
-  }
-  for (let i = 0; i < messages.length; i += 1) {
-    const message = messages[i];
-    if (message.role !== 'assistant' || !message.toolCalls || message.toolCalls.length === 0) {
-      continue;
-    }
-    const expectedIds = message.toolCalls.map((toolCall) => toolCall.id?.trim() ?? '');
-    if (expectedIds.some((id) => id.length === 0) || new Set(expectedIds).size !== expectedIds.length) {
-      throw new Error('[INVALID_REPLAY_PROTOCOL] assistant tool bundle contains missing or duplicate tool_call ids.');
-    }
-    const followingTools = messages.slice(i + 1, i + 1 + expectedIds.length);
-    if (followingTools.length !== expectedIds.length || followingTools.some((entry) => entry.role !== 'tool')) {
-      throw new Error('[INVALID_REPLAY_PROTOCOL] assistant tool bundle is missing aligned tool_result messages.');
-    }
-    const actualIds = followingTools.map((entry) => entry.toolCallId?.trim() ?? '');
-    if (new Set(actualIds).size !== expectedIds.length || expectedIds.some((id) => !actualIds.includes(id))) {
-      throw new Error('[INVALID_REPLAY_PROTOCOL] assistant tool bundle has misaligned tool_result ids.');
-    }
-  }
+  assertReplaySafeToolProtocol(messages);
+}
+
+function buildTrustedPreparedMessagesResult(messages: Message[]): PreparedMessagesResult {
+  const chars = estimateMessagesCharacters(messages);
+  const protocol = prepareToolProtocol(messages);
+  const sanitized = {
+    messages: [...messages],
+    correctedCount: 0,
+    orphanToolCallFixed: 0,
+    orphanToolResultFixed: 0,
+  };
+  return {
+    preTrimSanitized: sanitized,
+    trim: {
+      messages: [...messages],
+      originalChars: chars,
+      trimmedChars: chars,
+      removedCount: 0,
+      truncatedCount: 0,
+    },
+    postTrimSanitized: sanitized,
+    toolProtocol: {
+      assistantToolBundleCount: protocol.assistantToolBundleCount,
+      toolResultMessageCount: protocol.toolResultMessageCount,
+      maxToolResultsPerBundle: protocol.maxToolResultsPerBundle,
+    },
+  };
 }
 
 function shouldEmitToolUse(

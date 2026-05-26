@@ -2,6 +2,7 @@ import {
   createManualLlmIntrospection,
   getResolvedProfileCapabilities,
 } from './provider-profiles.js';
+import { buildModelDiscoveryCandidates } from './provider-model-discovery-policy.js';
 import type { DiscoveredModel, LlmProfileIntrospection, LlmProviderProfileConfig } from '../types.js';
 
 interface CachedIntrospection {
@@ -17,10 +18,7 @@ export class ProfileIntrospectionService {
     const cached = this.cache.get(profile.id);
 
     try {
-      const result =
-        profile.provider === 'openai'
-          ? await this.discoverOpenAiCompatibleModels(profile)
-          : await this.discoverAnthropicCompatibleModels(profile);
+      const result = await this.discoverProfileModels(profile);
       this.cache.set(profile.id, {
         signature,
         result,
@@ -52,62 +50,26 @@ export class ProfileIntrospectionService {
     });
   }
 
-  private async discoverOpenAiCompatibleModels(
+  private async discoverProfileModels(
     profile: LlmProviderProfileConfig
   ): Promise<LlmProfileIntrospection> {
-    const models = await this.fetchModelsFromCandidates(profile, buildOpenAiModelUrls(profile.apiBase), {
-      Authorization: `Bearer ${profile.apiKey}`,
-    });
-    const capabilities = getResolvedProfileCapabilities(profile);
-    return {
-      profileId: profile.id,
-      source: 'live',
-      fetchedAt: new Date().toISOString(),
-      models: models.map((model) => ({
-        ...model,
-        provider: profile.provider,
-        supportsReasoningEffort: capabilities.reasoningEffort,
-        supportsThinkingBudget: capabilities.thinkingBudget,
-      })),
-      manualModelEntryAllowed: true,
-      capabilities,
-    };
-  }
-
-  private async discoverAnthropicCompatibleModels(
-    profile: LlmProviderProfileConfig
-  ): Promise<LlmProfileIntrospection> {
-    const anthropicErrors: string[] = [];
-    let models = await this.fetchModelsFromCandidates(
-      profile,
-      buildAnthropicModelUrls(profile.apiBase),
-      {
-        'x-api-key': profile.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      anthropicErrors
-    ).catch(() => [] as DiscoveredModel[]);
-
-    if (models.length === 0) {
-      const openAiFallbackUrls = buildAnthropicCompatibleOpenAiModelUrls(profile.apiBase);
-      if (openAiFallbackUrls.length > 0) {
-        const fallbackErrors: string[] = [];
-        models = await this.fetchModelsFromCandidates(
-          profile,
-          openAiFallbackUrls,
-          {
-            Authorization: `Bearer ${profile.apiKey}`,
-          },
-          fallbackErrors
-        ).catch(() => [] as DiscoveredModel[]);
-        anthropicErrors.push(...fallbackErrors);
+    const errors: string[] = [];
+    let models: DiscoveredModel[] = [];
+    for (const candidate of buildModelDiscoveryCandidates(profile)) {
+      models = await this.fetchModelsFromCandidates(
+        profile,
+        candidate.urls,
+        candidate.headers,
+        errors
+      ).catch(() => [] as DiscoveredModel[]);
+      if (models.length > 0) {
+        break;
       }
     }
 
     if (models.length === 0) {
-      throw new Error(`Model discovery failed for ${profile.id}: ${anthropicErrors.join('; ')}`);
+      throw new Error(`Model discovery failed for ${profile.id}: ${errors.join('; ')}`);
     }
-
     const capabilities = getResolvedProfileCapabilities(profile);
     return {
       profileId: profile.id,
@@ -153,53 +115,6 @@ export class ProfileIntrospectionService {
 
     throw new Error(`Model discovery failed for ${profile.id}: ${errors.join('; ')}`);
   }
-}
-
-function buildAnthropicCompatibleOpenAiModelUrls(apiBase: string): string[] {
-  const normalized = trimTrailingSlash(apiBase);
-  const candidates = new Set<string>();
-  const withoutAnthropicSuffix = normalized.replace(/\/anthropic(?:\/v\d+)?$/u, '');
-  if (withoutAnthropicSuffix !== normalized) {
-    candidates.add(`${withoutAnthropicSuffix}/models`);
-    candidates.add(`${withoutAnthropicSuffix}/v1/models`);
-  }
-  return [...candidates];
-}
-
-function buildOpenAiModelUrls(apiBase: string): string[] {
-  const normalized = trimTrailingSlash(apiBase);
-  const candidates = new Set<string>();
-  if (normalized.endsWith('/models')) {
-    candidates.add(normalized);
-  } else {
-    candidates.add(`${normalized}/models`);
-    if (!/\/v\d+$/u.test(normalized)) {
-      candidates.add(`${normalized}/v1/models`);
-    }
-  }
-  return [...candidates];
-}
-
-function buildAnthropicModelUrls(apiBase: string): string[] {
-  const normalized = trimTrailingSlash(apiBase);
-  const candidates = new Set<string>();
-  if (normalized.endsWith('/v1/models')) {
-    candidates.add(normalized);
-  } else if (normalized.endsWith('/v1')) {
-    candidates.add(`${normalized}/models`);
-  } else if (normalized.endsWith('/anthropic/v1')) {
-    candidates.add(`${normalized}/models`);
-  } else {
-    candidates.add(`${normalized}/v1/models`);
-    if (!normalized.endsWith('/anthropic')) {
-      candidates.add(`${normalized}/anthropic/v1/models`);
-    }
-  }
-  return [...candidates];
-}
-
-function trimTrailingSlash(value: string): string {
-  return String(value ?? '').trim().replace(/\/+$/u, '');
 }
 
 function extractDiscoveredModels(payload: unknown, provider: LlmProviderProfileConfig['provider']): DiscoveredModel[] {

@@ -5,11 +5,14 @@ import type {
   ContextRef,
   MemoryTriggerEvent,
   PlanInputRequest,
+  RunOwner,
   RunTerminalState,
+  SessionInteractionState,
+  SessionOrigin,
   SkillTriggerEvent,
   ResolvedLlmRuntimeConfig,
 } from '../../types.js';
-import { toInterruptedArtifactView, toRunTerminalStateView } from './interrupted-artifact-view.js';
+import { toRunTerminalStateView } from './interrupted-artifact-view.js';
 
 export interface ServerWsMessage {
   type: string;
@@ -20,6 +23,9 @@ interface CallbackEventScope {
   runId: string;
   context: ContextRef;
   llmRuntime?: ResolvedLlmRuntimeConfig;
+  origin?: SessionOrigin;
+  owner?: RunOwner;
+  interactionState?: SessionInteractionState;
 }
 
 interface ContextUtilizationPayload {
@@ -27,6 +33,11 @@ interface ContextUtilizationPayload {
   ratio: number;
   usedChars: number;
   limitChars: number;
+  usedTokens?: number;
+  limitTokens?: number;
+  source?: string;
+  anchorPromptTokens?: number;
+  deltaEstimatedTokens?: number;
   triggerRatio?: number;
   isWarning: boolean;
   message?: string;
@@ -39,6 +50,8 @@ interface ContextPrecompressPayload {
   ratio: number;
   usedChars: number;
   limitChars: number;
+  usedTokens?: number;
+  limitTokens?: number;
   progressPercent?: number;
   chunkIndex?: number;
   chunkTotal?: number;
@@ -48,6 +61,7 @@ interface ContextPrecompressPayload {
   willRetriggerImmediately?: boolean;
   willRetriggerNextTurn?: boolean;
   providerPayloadCharsAfter?: number;
+  providerPayloadTokensAfter?: number;
 }
 
 interface ContextOverflowPayload {
@@ -55,6 +69,8 @@ interface ContextOverflowPayload {
   error: string;
   stage: ContextOverflowEvent['stage'];
   checkpointId: ContextOverflowEvent['contextOverflowSnapshotPath'] | null;
+  usedTokens?: number;
+  limitTokens?: number;
 }
 
 export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
@@ -62,19 +78,23 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
     runId: scope.runId,
     context: scope.context,
   };
+  const withCreatedAt = () => ({
+    ...base,
+    createdAt: new Date().toISOString(),
+  });
 
   return {
     thinking(thinking: string): ServerWsMessage {
       return {
         type: 'thinking',
-        data: { ...base, thinking },
+        data: { ...withCreatedAt(), thinking },
       };
     },
     toolCall(name: string, args: Record<string, unknown>, toolCallId?: string): ServerWsMessage {
       const data =
         typeof toolCallId === 'string' && toolCallId.trim().length > 0
-          ? { ...base, name, args, toolCallId }
-          : { ...base, name, args };
+          ? { ...withCreatedAt(), name, args, toolCallId }
+          : { ...withCreatedAt(), name, args };
       return {
         type: 'tool_call',
         data,
@@ -83,7 +103,7 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
     toolResult(name: string, result: unknown): ServerWsMessage {
       return {
         type: 'tool_result',
-        data: { ...base, name, result },
+        data: { ...withCreatedAt(), name, result },
       };
     },
     step(step: number, maxSteps: number): ServerWsMessage {
@@ -103,7 +123,7 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
         : undefined;
       return {
         type: 'message',
-        data: { ...base, role, content, ...(llmRuntime ? { llmRuntime } : {}) },
+        data: { ...withCreatedAt(), role, content, ...(llmRuntime ? { llmRuntime } : {}) },
       };
     },
     memoryTrigger(event: MemoryTriggerEvent): ServerWsMessage {
@@ -140,6 +160,15 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
           utilizationRatio: payload.ratio,
           usedChars: payload.usedChars,
           limitChars: payload.limitChars,
+          ...(typeof payload.usedTokens === 'number' ? { usedTokens: payload.usedTokens } : {}),
+          ...(typeof payload.limitTokens === 'number' ? { limitTokens: payload.limitTokens } : {}),
+          ...(payload.source ? { source: payload.source } : {}),
+          ...(typeof payload.anchorPromptTokens === 'number'
+            ? { anchorPromptTokens: payload.anchorPromptTokens }
+            : {}),
+          ...(typeof payload.deltaEstimatedTokens === 'number'
+            ? { deltaEstimatedTokens: payload.deltaEstimatedTokens }
+            : {}),
           triggerRatio: payload.triggerRatio,
           isWarning: payload.isWarning,
           message: payload.message,
@@ -157,6 +186,8 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
           ratio: payload.ratio,
           usedChars: payload.usedChars,
           limitChars: payload.limitChars,
+          ...(typeof payload.usedTokens === 'number' ? { usedTokens: payload.usedTokens } : {}),
+          ...(typeof payload.limitTokens === 'number' ? { limitTokens: payload.limitTokens } : {}),
           ...(typeof payload.progressPercent === 'number'
             ? { progressPercent: payload.progressPercent }
             : {}),
@@ -174,6 +205,9 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
           ...(typeof payload.providerPayloadCharsAfter === 'number'
             ? { providerPayloadCharsAfter: payload.providerPayloadCharsAfter }
             : {}),
+          ...(typeof payload.providerPayloadTokensAfter === 'number'
+            ? { providerPayloadTokensAfter: payload.providerPayloadTokensAfter }
+            : {}),
         },
       };
     },
@@ -186,6 +220,8 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
           error: payload.error,
           stage: payload.stage,
           checkpointId: payload.checkpointId ?? null,
+          ...(typeof payload.usedTokens === 'number' ? { usedTokens: payload.usedTokens } : {}),
+          ...(typeof payload.limitTokens === 'number' ? { limitTokens: payload.limitTokens } : {}),
         },
       };
     },
@@ -195,7 +231,18 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
         data: {
           ...base,
           requestId: request.requestId,
+          ...(request.source ? { source: request.source } : {}),
           questions: request.questions,
+          ...(request.planPreview ? { planPreview: request.planPreview } : {}),
+        },
+      };
+    },
+    runningInputInserted(itemId: string): ServerWsMessage {
+      return {
+        type: 'running_input_inserted',
+        data: {
+          ...base,
+          itemId,
         },
       };
     },
@@ -203,7 +250,7 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
       return {
         type: 'complete',
         data: {
-          ...base,
+          ...withCreatedAt(),
           content,
           completionMarkerStats: completionMarkerStats ?? null,
           sessionId: scope.context.scope === 'session' ? scope.context.namespace : undefined,
@@ -247,6 +294,9 @@ export function createCallbackEventMessageFactory(scope: CallbackEventScope) {
         data: {
           ...base,
           startedAt,
+          ...(scope.origin ? { origin: scope.origin } : {}),
+          ...(scope.owner ? { owner: scope.owner } : {}),
+          ...(scope.interactionState ? { interactionState: scope.interactionState } : {}),
           ...(llmRuntime
             ? {
                 llmRuntime: {

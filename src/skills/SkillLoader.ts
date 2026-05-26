@@ -1,21 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as yaml from 'js-yaml';
 import { getRuntimePlatformCapabilities } from '../runtime-platform.js';
-import type { SkillConfig } from '../types.js';
 import { skillLogger } from '../utils/logger.js';
 import { parseSkillMarkdown, type ParsedSkillMarkdown } from './skill-markdown.js';
-
-export interface SkillListFile {
-  skills: SkillConfig[];
-}
 
 export interface SkillCatalogEntry {
   name: string;
   description: string;
   path: string;
   skillDir?: string;
-  source: 'traditional' | 'global' | 'workspace' | 'team_pack' | 'workspace_pack';
+  source: 'global' | 'agent' | 'workspace' | 'team_pack' | 'workspace_pack';
   content: string;
   metadata?: Record<string, unknown>;
   tags: string[];
@@ -43,6 +37,10 @@ export interface SkillPromptCapabilities {
   canManageSkills: boolean;
 }
 
+const SKILL_SOURCE_BOUNDARY_LINES = [
+  'Skill source boundaries: workspace skills are project-local, agent skills are bundled with the selected agent profile, and global skills are shared runtime skills.',
+];
+
 function compareVersionStrings(left: string, right: string): number {
   return left.localeCompare(right, undefined, {
     numeric: true,
@@ -51,25 +49,9 @@ function compareVersionStrings(left: string, right: string): number {
 }
 
 export class SkillLoader {
-  private skillListPath: string | null = null;
   private skillsDir: string | null = null;
-  private traditionalSkills: SkillConfig[] = [];
   private globalSkills: SkillCatalogEntry[] = [];
   private supplementalDirectoriesResolver?: (workspaceDir?: string) => SupplementalSkillDirectory[];
-
-  loadSkillList(filePath: string): SkillConfig[] {
-    this.skillListPath = path.resolve(filePath);
-    if (!fs.existsSync(this.skillListPath)) {
-      this.traditionalSkills = [];
-      return [];
-    }
-    const content = fs.readFileSync(this.skillListPath, 'utf-8');
-    const parsed = yaml.load(content) as SkillListFile;
-    this.traditionalSkills = Array.isArray(parsed?.skills)
-      ? parsed.skills.filter((item) => item.enabled !== false)
-      : [];
-    return [...this.traditionalSkills];
-  }
 
   loadCodexSkills(skillsDir: string): SkillCatalogEntry[] {
     this.skillsDir = path.resolve(skillsDir);
@@ -78,9 +60,6 @@ export class SkillLoader {
   }
 
   reload(): void {
-    if (this.skillListPath) {
-      this.loadSkillList(this.skillListPath);
-    }
     if (this.skillsDir) {
       this.loadCodexSkills(this.skillsDir);
     }
@@ -92,18 +71,35 @@ export class SkillLoader {
     this.supplementalDirectoriesResolver = resolver;
   }
 
-  getSkillCatalog(options: { workspaceDir?: string; toolsetName?: string; includeDeprecated?: boolean } = {}): SkillCatalogEntry[] {
-    const workspaceSkills = options.workspaceDir ? this.scanWorkspaceSkills(options.workspaceDir) : [];
-    const supplementalSkills = (this.supplementalDirectoriesResolver?.(options.workspaceDir) ?? []).flatMap((entry) =>
-      this.scanDirectoryForSkills(entry.dir, entry.source, {
-        packName: entry.packName,
-        packVersion: entry.packVersion,
-      })
-    );
+  getSkillCatalog(options: {
+    workspaceDir?: string;
+    agentSkillDir?: string;
+    includeGlobalSkills?: boolean;
+    includeWorkspaceSkills?: boolean;
+    includePackSkills?: boolean;
+    toolsetName?: string;
+    includeDeprecated?: boolean;
+  } = {}): SkillCatalogEntry[] {
+    const agentSkills = options.agentSkillDir
+      ? this.scanDirectoryForSkills(options.agentSkillDir, 'agent')
+      : [];
+    const workspaceSkills =
+      options.includeWorkspaceSkills !== false && options.workspaceDir
+        ? this.scanWorkspaceSkills(options.workspaceDir)
+        : [];
+    const supplementalSkills =
+      options.includePackSkills !== false
+        ? (this.supplementalDirectoriesResolver?.(options.workspaceDir) ?? []).flatMap((entry) =>
+            this.scanDirectoryForSkills(entry.dir, entry.source, {
+              packName: entry.packName,
+              packVersion: entry.packVersion,
+            })
+          )
+        : [];
     const all = [
-      ...this.traditionalSkills.map((item) => this.fromTraditionalSkill(item)),
-      ...this.globalSkills,
+      ...(options.includeGlobalSkills === false ? [] : this.globalSkills),
       ...supplementalSkills,
+      ...agentSkills,
       ...workspaceSkills,
     ];
     const deduped = new Map<string, SkillCatalogEntry>();
@@ -125,31 +121,38 @@ export class SkillLoader {
 
   getSkillByName(
     name: string,
-    options: { workspaceDir?: string; toolsetName?: string; includeDeprecated?: boolean } = {}
+    options: {
+      workspaceDir?: string;
+      agentSkillDir?: string;
+      includeGlobalSkills?: boolean;
+      includeWorkspaceSkills?: boolean;
+      includePackSkills?: boolean;
+      toolsetName?: string;
+      includeDeprecated?: boolean;
+    } = {}
   ): SkillCatalogEntry | undefined {
     const normalized = name.trim().toLowerCase();
     return this.getSkillCatalog(options).find((entry) => entry.name.trim().toLowerCase() === normalized);
-  }
-
-  getSkills(): SkillConfig[] {
-    return [...this.traditionalSkills];
   }
 
   getCodexSkills(): SkillCatalogEntry[] {
     return [...this.globalSkills];
   }
 
-  getSkillCounts(): { traditional: number; codex: number; total: number } {
+  getSkillCounts(): { global: number; total: number } {
     return {
-      traditional: this.traditionalSkills.length,
-      codex: this.globalSkills.length,
-      total: this.traditionalSkills.length + this.globalSkills.length,
+      global: this.globalSkills.length,
+      total: this.globalSkills.length,
     };
   }
 
   generateSkillCatalogPrompt(
     options: {
       workspaceDir?: string;
+      agentSkillDir?: string;
+      includeGlobalSkills?: boolean;
+      includeWorkspaceSkills?: boolean;
+      includePackSkills?: boolean;
       toolsetName?: string;
       capabilities?: SkillPromptCapabilities;
     } = {}
@@ -170,6 +173,7 @@ export class SkillLoader {
         return lines.join('\n');
       }
       lines.push('Rely only on the catalog summary shown here, and do not assume full skill content is already loaded into context.');
+      lines.push(...SKILL_SOURCE_BOUNDARY_LINES);
       lines.push('');
       lines.push('### Skill Catalog');
       for (const entry of catalog.slice(0, 24)) {
@@ -187,9 +191,11 @@ export class SkillLoader {
         '## Skills Runtime',
         'No approved skills are currently available.',
         'You can develop the workflow directly for this turn.',
+        ...SKILL_SOURCE_BOUNDARY_LINES,
       ];
       if (capabilities.canManageSkills) {
-        lines.push('If the resulting method proves reusable, capture it as a skill draft with `skill_manage`.');
+        lines.push('Use `skill_manage` only to apply reusable workflow skill create/update writes, not to edit selected-agent bundled skills directly.');
+        lines.push('If the resulting method proves reusable, capture or update it as an approved skill with `skill_manage`.');
       }
       return lines.join('\n');
     }
@@ -198,15 +204,17 @@ export class SkillLoader {
       'Approved skills are available as on-demand references.',
       'Do not assume full skill content is already loaded into context.',
       'Inspect candidate skills before inventing a workflow.',
+      ...SKILL_SOURCE_BOUNDARY_LINES,
       'Use `skills_list` to scan candidates. If one looks relevant, call `skills_view` and rely on the loaded procedure before improvising.',
       '',
       '### Skill Catalog',
     ];
     if (capabilities.canManageSkills) {
       lines.splice(
-        4,
+        5,
         0,
-        'When a method proves reusable and `skill_manage` is available, capture or update it as a skill draft.'
+        'Use `skill_manage` only to apply reusable workflow skill create/update writes, not to edit selected-agent bundled skills directly.',
+        'When a method proves reusable and `skill_manage` is available, capture or update it as an approved skill.'
       );
     }
     for (const entry of catalog.slice(0, 24)) {
@@ -223,28 +231,6 @@ export class SkillLoader {
     return this.generateSkillCatalogPrompt();
   }
 
-  private fromTraditionalSkill(skill: SkillConfig): SkillCatalogEntry {
-    const content = fs.existsSync(skill.path) ? fs.readFileSync(skill.path, 'utf-8') : '';
-    const parsed = this.parseSkillMarkdown(content);
-    return {
-      name: parsed.name || skill.name,
-      description: parsed.description || skill.description || '',
-      path: skill.path,
-      source: 'traditional',
-      content: parsed.body,
-      metadata: parsed.metadata,
-      tags: this.readStringArray(parsed.metadata?.tags),
-      triggers: this.readStringArray(parsed.metadata?.triggers),
-      platforms: this.readStringArray(parsed.metadata?.platforms),
-      toolsets: this.readStringArray(parsed.metadata?.toolsets),
-      reviewStatus: typeof parsed.metadata?.reviewStatus === 'string' ? String(parsed.metadata?.reviewStatus) : undefined,
-      version: typeof parsed.metadata?.version === 'string' ? String(parsed.metadata.version) : undefined,
-      skillSource: typeof parsed.metadata?.source === 'string' ? String(parsed.metadata.source) : undefined,
-      packName: typeof parsed.metadata?.packName === 'string' ? String(parsed.metadata.packName) : undefined,
-      packVersion: typeof parsed.metadata?.packVersion === 'string' ? String(parsed.metadata.packVersion) : undefined,
-    };
-  }
-
   private scanWorkspaceSkills(workspaceDir: string): SkillCatalogEntry[] {
     const skillsDir = path.join(path.resolve(workspaceDir), 'skills');
     return this.scanDirectoryForSkills(skillsDir, 'workspace');
@@ -252,7 +238,7 @@ export class SkillLoader {
 
   private scanDirectoryForSkills(
     rootDir: string,
-    source: 'global' | 'workspace' | 'team_pack' | 'workspace_pack',
+    source: 'global' | 'agent' | 'workspace' | 'team_pack' | 'workspace_pack',
     injectedMetadata: {
       packName?: string;
       packVersion?: string;
@@ -379,13 +365,13 @@ export class SkillLoader {
 
   private getSourcePriority(source: SkillCatalogEntry['source']): number {
     switch (source) {
-      case 'traditional':
-        return 1;
       case 'global':
-        return 2;
+        return 1;
       case 'team_pack':
-        return 3;
+        return 2;
       case 'workspace_pack':
+        return 3;
+      case 'agent':
         return 4;
       case 'workspace':
         return 5;

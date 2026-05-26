@@ -1,39 +1,8 @@
 import * as assert from 'node:assert/strict';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import type { MCPStatusResponse } from '../../src/types.js';
-
-type RouteHandler = (req: unknown, res: unknown) => void;
-
-function createAppHarness() {
-  const routes = new Map<string, RouteHandler>();
-  const app = {
-    use: () => undefined,
-    get: (route: string, handler: RouteHandler) => {
-      routes.set(route, handler);
-    },
-    post: () => undefined,
-    put: () => undefined,
-    patch: () => undefined,
-    delete: () => undefined,
-  };
-  return { app, routes };
-}
-
-function createResponseRecorder() {
-  const recorder = {
-    statusCode: 200,
-    payload: undefined as unknown,
-    status(code: number) {
-      recorder.statusCode = code;
-      return recorder;
-    },
-    json(data: unknown) {
-      recorder.payload = data;
-      return recorder;
-    },
-  };
-  return recorder;
-}
+import { createWebServerDouble } from './helpers/web-server-harness.js';
+import { createWebServerTestConfig } from './web-server-test-config.js';
+import { createResponseRecorder, createRouteAppHarness } from './helpers/web-route-harness.js';
 
 function flushMicrotasks(): Promise<void> {
   return new Promise((resolve) => {
@@ -41,9 +10,25 @@ function flushMicrotasks(): Promise<void> {
   });
 }
 
+function installStartTestHarness(server: any): void {
+  server.automationScheduler = { start: () => undefined, stop: () => undefined };
+  server.startDiagnosticsHeartbeat = () => undefined;
+  server.getAsrRuntime = () => ({
+    start: async () => undefined,
+    getStatus: () => ({ configured: false, state: 'stopped' }),
+  });
+  server.server = {
+    once: () => server.server,
+    off: () => server.server,
+    listen: (_port: number, callback: () => void) => {
+      callback();
+    },
+  };
+}
+
 function testMcpStatusRouteReturnsAgentSnapshot(): void {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, routes } = createAppHarness();
+  const server = createWebServerDouble();
+  const { app, getRoutes } = createRouteAppHarness();
   server.app = app;
   server.wss = { clients: new Set() };
 
@@ -67,13 +52,14 @@ function testMcpStatusRouteReturnsAgentSnapshot(): void {
   };
 
   server.agent = {
+    getConfig: () => createWebServerTestConfig(),
     getMcpStatus: () => expected,
   };
   server.hasUsableApiKey = () => true;
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = routes.get('/api/mcp/status');
+  const handler = getRoutes.get('/api/mcp/status');
   assert.ok(handler, 'expected /api/mcp/status route to be registered');
   const res = createResponseRecorder();
   handler?.({}, res);
@@ -81,12 +67,13 @@ function testMcpStatusRouteReturnsAgentSnapshot(): void {
   assert.deepEqual(res.payload, expected);
 }
 
-function testMcpStatusRouteReturnsFallbackWhenAgentThrows(): void {
-  const server = Object.create(WebServer.prototype) as any;
-  const { app, routes } = createAppHarness();
+function testMcpStatusRouteFailsWhenAgentThrows(): void {
+  const server = createWebServerDouble();
+  const { app, getRoutes } = createRouteAppHarness();
   server.app = app;
   server.wss = { clients: new Set() };
   server.agent = {
+    getConfig: () => createWebServerTestConfig(),
     getMcpStatus: () => {
       throw new Error('status_failed');
     },
@@ -95,38 +82,29 @@ function testMcpStatusRouteReturnsFallbackWhenAgentThrows(): void {
   server.automationRoutes = { register: () => undefined };
 
   server.setupRoutes();
-  const handler = routes.get('/api/mcp/status');
+  const handler = getRoutes.get('/api/mcp/status');
   assert.ok(handler, 'expected /api/mcp/status route to be registered');
   const res = createResponseRecorder();
   handler?.({}, res);
   assert.equal(res.statusCode, 500);
   assert.deepEqual(res.payload, {
-    enabled: false,
-    summary: {
-      state: 'disabled',
-      connectedCount: 0,
-      totalEnabled: 0,
-    },
-    servers: [],
+    error: 'status_failed',
+    code: 'MCP_STATUS_UNAVAILABLE',
   });
 }
 
 async function testStartTriggersInitializeWhenApiKeyExists(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   server.port = 53721;
   let initializeCalls = 0;
   server.agent = {
+    getConfig: () => createWebServerTestConfig(),
     initialize: async () => {
       initializeCalls += 1;
     },
   };
   server.hasUsableApiKey = () => true;
-  server.automationScheduler = { start: () => undefined, stop: () => undefined };
-  server.server = {
-    listen: (_port: number, callback: () => void) => {
-      callback();
-    },
-  };
+  installStartTestHarness(server);
 
   await server.start();
   await flushMicrotasks();
@@ -134,21 +112,17 @@ async function testStartTriggersInitializeWhenApiKeyExists(): Promise<void> {
 }
 
 async function testStartSkipsInitializeWithoutApiKey(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   server.port = 53721;
   let initializeCalls = 0;
   server.agent = {
+    getConfig: () => createWebServerTestConfig(),
     initialize: async () => {
       initializeCalls += 1;
     },
   };
   server.hasUsableApiKey = () => false;
-  server.automationScheduler = { start: () => undefined, stop: () => undefined };
-  server.server = {
-    listen: (_port: number, callback: () => void) => {
-      callback();
-    },
-  };
+  installStartTestHarness(server);
 
   await server.start();
   await flushMicrotasks();
@@ -156,22 +130,18 @@ async function testStartSkipsInitializeWithoutApiKey(): Promise<void> {
 }
 
 async function testStartDoesNotBlockWhenInitializeFails(): Promise<void> {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   server.port = 53721;
   let initializeCalls = 0;
   server.agent = {
+    getConfig: () => createWebServerTestConfig(),
     initialize: async () => {
       initializeCalls += 1;
       throw new Error('init_failed');
     },
   };
   server.hasUsableApiKey = () => true;
-  server.automationScheduler = { start: () => undefined, stop: () => undefined };
-  server.server = {
-    listen: (_port: number, callback: () => void) => {
-      callback();
-    },
-  };
+  installStartTestHarness(server);
 
   await server.start();
   await flushMicrotasks();
@@ -180,7 +150,7 @@ async function testStartDoesNotBlockWhenInitializeFails(): Promise<void> {
 
 async function runAll(): Promise<void> {
   testMcpStatusRouteReturnsAgentSnapshot();
-  testMcpStatusRouteReturnsFallbackWhenAgentThrows();
+  testMcpStatusRouteFailsWhenAgentThrows();
   await testStartTriggersInitializeWhenApiKeyExists();
   await testStartSkipsInitializeWithoutApiKey();
   await testStartDoesNotBlockWhenInitializeFails();

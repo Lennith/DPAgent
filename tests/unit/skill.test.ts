@@ -1,96 +1,62 @@
-import { createAgent } from '../src/index.js';
-import type { AgentCallback } from '../src/types.js';
+import * as assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createAgent } from '../../src/index.js';
 
-const API_KEY = 'sk-cp-6VmqjCaCEtLrtmM1B2qAlObOAa_3XVf6fzqgwpk_oleR87SzhFT6ViXmPcGJyWI2nzGbQNFRkxsI-itPbLoSGU5dSwQJHI0CO1SdNqylAz2KZZbcHz82CSE';
+function createTempDirs(): {
+  tempDir: string;
+  workspaceDir: string;
+  runtimeDir: string;
+  contextDir: string;
+} {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-offline-'));
+  const workspaceDir = path.join(tempDir, 'workspace');
+  const runtimeDir = path.join(tempDir, 'runtime');
+  const contextDir = path.join(tempDir, 'contexts');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.mkdirSync(contextDir, { recursive: true });
+  return { tempDir, workspaceDir, runtimeDir, contextDir };
+}
 
-async function testSkill() {
-  console.log('=== Skill Integration Test ===\n');
-
-  const callback: AgentCallback = {
-    onThinking: (thinking) => {
-      console.log('\n[Thinking]');
-      console.log(thinking.substring(0, 200) + '...');
-    },
-    onToolCall: (name, args) => {
-      console.log(`\n[Tool Call] ${name}`);
-      console.log('Args:', JSON.stringify(args, null, 2).substring(0, 200));
-    },
-    onToolResult: (name, result) => {
-      console.log(`\n[Tool Result] ${name}: ${result.success ? 'Success' : 'Error'}`);
-      if (result.content) {
-        console.log('Content:', result.content.substring(0, 300));
-      }
-    },
-    onStep: (step, maxSteps) => {
-      console.log(`\n--- Step ${step}/${maxSteps} ---`);
-    },
-    onComplete: () => {
-      console.log('\n[Complete]');
-    },
-  };
-
+async function testSkillBootstrapDoesNotRequireLiveApiKey(): Promise<void> {
+  const dirs = createTempDirs();
   const agent = createAgent({
-    apiKey: API_KEY,
-    workspaceDir: './workspace',
-    skillListPath: './skill-list.yaml',
+    allowMissingApiKeyAtBoot: true,
+    workspaceDir: dirs.workspaceDir,
+    runtimeDataDir: dirs.runtimeDir,
+    contextDir: dirs.contextDir,
     config: {
       api: {
-        apiKey: API_KEY,
-        apiBase: 'https://api.minimaxi.com',
-        model: 'MiniMax-M2.5',
-        provider: 'anthropic',
-      },
-      agent: {
-        maxSteps: 20,
-        tokenLimit: 80000,
-        workspaceDir: './workspace',
-        skillListPath: './skill-list.yaml',
-      },
-      tools: {
-        enableFileTools: true,
-        enableShell: true,
-        shellType: 'powershell',
-        shellTimeout: 60000,
+        apiKey: '',
       },
       mcp: {
         enabled: false,
         servers: [],
-        connectTimeout: 10,
-        executeTimeout: 60,
-      },
-      retry: {
-        enabled: true,
-        maxRetries: 3,
-        initialDelay: 1,
-        maxDelay: 60,
-        exponentialBase: 2,
       },
     },
   });
 
   try {
-    console.log('Initializing agent with skills...\n');
-    await agent.initialize(callback);
-
-    console.log('Config:', JSON.stringify(agent.getConfig().agent, null, 2));
-
-    console.log('\n=== Running: Organize Desktop ===\n');
-    
-    const result = await agent.runWithResult({
-      prompt: '请帮我整理桌面。先读取 skill 文件了解如何操作，然后执行整理。',
-      workspaceDir: './workspace',
-    });
-
-    console.log('\n--- Final Result ---');
-    console.log('Session ID:', result.sessionId);
-    console.log('Content:', result.content);
-    console.log('Usage:', result.usage);
-
-  } catch (error) {
-    console.error('Test failed:', error);
+    await agent.initialize();
+    const config = agent.getConfig();
+    assert.equal(config.api.apiKey, '');
+    assert.equal(config.agent.workspaceDir, dirs.workspaceDir);
+    assert.equal(config.agent.runtimeDataDir, dirs.runtimeDir);
+    assert.equal(config.agent.contextDir, dirs.contextDir);
+    assert.equal(agent.getMcpStatus().summary.totalEnabled, 0);
   } finally {
     await agent.cleanup();
+    fs.rmSync(dirs.tempDir, { recursive: true, force: true });
   }
 }
 
-testSkill().catch(console.error);
+testSkillBootstrapDoesNotRequireLiveApiKey()
+  .then(() => {
+    console.log('skill tests passed');
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

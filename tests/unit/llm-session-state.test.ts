@@ -16,6 +16,7 @@ function createProfiles(): LlmProfilesConfigView {
         provider: 'anthropic',
         apiBase: 'https://api.minimaxi.com',
         defaultModel: 'MiniMax-M2.7',
+        availableModels: ['MiniMax-M2.7', 'MiniMax-M2.5-Reasoning'],
         maxOutputTokens: 4096,
         hasApiKey: true,
         capabilities: {
@@ -31,6 +32,7 @@ function createProfiles(): LlmProfilesConfigView {
         provider: 'openai',
         apiBase: 'https://openai.local/v1',
         defaultModel: 'gpt-4.1-mini',
+        availableModels: ['gpt-4.1-mini'],
         maxOutputTokens: 2048,
         hasApiKey: true,
         capabilities: {
@@ -48,7 +50,7 @@ function testResolveSelectionFallsBackToDefaultProfile(): void {
   const selection = resolveSessionLlmSelectionView(createProfiles(), null);
   assert.equal(selection.profileId, 'anthropic-default');
   assert.equal(selection.model, 'MiniMax-M2.7');
-  assert.equal(selection.reasoningPreset, 'off');
+  assert.equal(selection.reasoningPreset, 'high');
 }
 
 function testApplyPatchResetsModelAndProviderOptionsWhenProfileChanges(): void {
@@ -121,12 +123,50 @@ function testApplyPatchAcceptsExplicitUpdatedAt(): void {
   assert.equal(next.updatedAt, '2026-04-24T02:00:00.000Z');
 }
 
+function testResolveSelectionFallsBackWhenModelIsUnavailable(): void {
+  const selection = resolveSessionLlmSelectionView(createProfiles(), {
+    profileId: 'anthropic-default',
+    model: 'live-discovered-but-not-enabled',
+    reasoningPreset: 'high',
+  });
+
+  assert.equal(selection.model, 'MiniMax-M2.7');
+}
+
+function testResolveSelectionKeepsExtendedReasoningPresets(): void {
+  const xhigh = resolveSessionLlmSelectionView(createProfiles(), {
+    profileId: 'openai-alt',
+    model: 'gpt-4.1-mini',
+    reasoningPreset: 'xhigh',
+    providerOptions: {
+      openai: {
+        reasoningEffort: 'xhigh',
+      },
+    },
+  });
+  const max = resolveSessionLlmSelectionView(createProfiles(), {
+    profileId: 'anthropic-default',
+    model: 'MiniMax-M2.7',
+    reasoningPreset: 'max',
+  });
+
+  assert.equal(xhigh.reasoningPreset, 'xhigh');
+  assert.deepEqual(xhigh.providerOptions, {
+    openai: {
+      reasoningEffort: 'xhigh',
+    },
+  });
+  assert.equal(max.reasoningPreset, 'max');
+}
+
 function runAll(): void {
   testResolveSelectionFallsBackToDefaultProfile();
   testApplyPatchResetsModelAndProviderOptionsWhenProfileChanges();
   testResolveSelectionFiltersInactiveProviderOptions();
   testCreateNextSelectionUpdatedAtIsMonotonic();
   testApplyPatchAcceptsExplicitUpdatedAt();
+  testResolveSelectionFallsBackWhenModelIsUnavailable();
+  testResolveSelectionKeepsExtendedReasoningPresets();
   console.log('llm-session-state tests passed');
 }
 

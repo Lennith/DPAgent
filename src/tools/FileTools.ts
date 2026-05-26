@@ -1,116 +1,23 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Tool, successResult, errorResult } from './Tool.js';
-import type { ToolResult, PermissionCheckResult } from '../types.js';
+import { accessDeniedResult, ToolAccessBase, type ToolAccessBaseOptions } from './ToolAccessBase.js';
+import type { ToolResult } from '../types.js';
+import { isBinaryFile, readInteger, readLineWindow } from './file-tool-read-utils.js';
 
-export interface FileToolsOptions {
-  workspaceDir: string;
+export interface FileToolsOptions extends ToolAccessBaseOptions {
   additionalWritableDirs?: string[];
-  checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
   exemptDirs?: string[]; // Directories exempt from permission checks (e.g., skills directory)
 }
 
-function isPathWithinDir(filePath: string, dirPath: string): boolean {
-  const resolvedFilePath = resolveRealPathForContainment(filePath);
-  const resolvedDirPath = resolveRealPathForContainment(dirPath);
-  if (!resolvedFilePath || !resolvedDirPath) {
-    return false;
-  }
-  const relativePath = path.relative(resolvedDirPath, resolvedFilePath);
-  return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
-}
-
-function resolveRealPathForContainment(targetPath: string): string | null {
-  const missingParts: string[] = [];
-  let current = path.resolve(targetPath);
-  while (!fs.existsSync(current)) {
-    const parent = path.dirname(current);
-    if (parent === current) {
-      return path.resolve(targetPath);
-    }
-    missingParts.unshift(path.basename(current));
-    current = parent;
-  }
-  try {
-    const realBase = fs.realpathSync.native(current);
-    return missingParts.length > 0 ? path.resolve(realBase, ...missingParts) : realBase;
-  } catch {
-    return null;
-  }
-}
-
-export class ReadFileTool extends Tool {
-  private static readonly DEFAULT_LINE_LIMIT = 200;
+export class ReadFileTool extends ToolAccessBase {
+  private static readonly DEFAULT_LINE_LIMIT = 400;
   private static readonly MAX_LINE_LIMIT = 2000;
   private static readonly MAX_OUTPUT_CHARS = 240000;
   private static readonly MAX_SCAN_BYTES = 16 * 1024 * 1024;
-  private static readonly DEFAULT_LIMIT_NOTICE = '[READ_FILE_DEFAULT_LIMIT_APPLIED limit=200]';
-  private static readonly BINARY_EXTENSIONS = new Set([
-    // Images
-    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp', '.svg', '.ico',
-    // Audio/Video
-    '.mp3', '.mp4', '.wav', '.flac', '.avi', '.mkv', '.mov', '.webm',
-    // Archives
-    '.zip', '.tar', '.gz', '.bz2', '.7z', '.rar', '.xz',
-    // Executables/Binaries
-    '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
-    // Documents
-    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-    // Others
-    '.db', '.sqlite', '.ttf', '.otf', '.woff', '.woff2', '.eot',
-  ]);
-  private workspaceDir: string;
-  private checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
-  private exemptDirs: string[];
-
+  private static readonly DEFAULT_LIMIT_NOTICE = '[READ_FILE_DEFAULT_LIMIT_APPLIED limit=400]';
   constructor(options: FileToolsOptions) {
-    super();
-    this.workspaceDir = options.workspaceDir;
-    this.checkPermission = options.checkPermission;
-    this.exemptDirs = options.exemptDirs?.map(d => path.resolve(d)) ?? [];
-  }
-
-  private isExempt(filePath: string): boolean {
-    return this.exemptDirs.some((exemptDir) => isPathWithinDir(filePath, exemptDir));
-  }
-
-  private isBinaryFile(filePath: string): boolean {
-    // 1. Check file extension
-    const ext = path.extname(filePath).toLowerCase();
-    if (ReadFileTool.BINARY_EXTENSIONS.has(ext)) {
-      return true;
-    }
-
-    // 2. Check file content for null bytes
-    let fd: number | undefined;
-    try {
-      const stats = fs.statSync(filePath);
-      const sampleSize = Math.min(4096, stats.size);
-      if (sampleSize === 0) {
-        return false;
-      }
-      const buffer = Buffer.alloc(sampleSize);
-      fd = fs.openSync(filePath, 'r');
-      fs.readSync(fd, buffer, 0, sampleSize, 0);
-      let nullCount = 0;
-      for (let i = 0; i < buffer.length; i++) {
-        if (buffer[i] === 0) {
-          nullCount++;
-        }
-      }
-      // If more than 10% null bytes, consider it binary
-      return nullCount / buffer.length > 0.1;
-    } catch {
-      return false;
-    } finally {
-      if (fd !== undefined) {
-        try {
-          fs.closeSync(fd);
-        } catch {
-          // ignore
-        }
-      }
-    }
+    super(options);
   }
 
   get name(): string {
@@ -118,7 +25,7 @@ export class ReadFileTool extends Tool {
   }
 
   get description(): string {
-    return 'Read a text file. By default this returns only the first 200 lines unless limit is provided, supports offset/limit windowing, and rejects binary files.';
+    return 'Read a text file. By default this returns only the first 400 lines unless limit is provided, supports offset/limit windowing, and rejects binary files.';
   }
 
   get parameters(): Record<string, unknown> {
@@ -136,7 +43,7 @@ export class ReadFileTool extends Tool {
         },
         limit: {
           type: 'number',
-          description: 'Optional maximum number of lines to return after offset. If omitted, the default 200-line cap is applied.',
+          description: 'Optional maximum number of lines to return after offset. If omitted, the default 400-line cap is applied.',
         },
         encoding: {
           type: 'string',
@@ -149,10 +56,10 @@ export class ReadFileTool extends Tool {
   }
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const filePath = this.resolvePath(args.path as string);
+    const filePath = this.resolveWorkspacePath(args.path as string);
     const encoding = (args.encoding as BufferEncoding) ?? 'utf-8';
-    const offset = this.readInteger(args.offset, 0);
-    const explicitLimit = this.readInteger(args.limit, undefined);
+    const offset = readInteger(args.offset, 0);
+    const explicitLimit = readInteger(args.limit, undefined);
     const defaultLimitApplied = explicitLimit === undefined;
     const requestedLimit = defaultLimitApplied ? ReadFileTool.DEFAULT_LINE_LIMIT : explicitLimit;
     const effectiveLimit =
@@ -160,12 +67,9 @@ export class ReadFileTool extends Tool {
         ? ReadFileTool.MAX_LINE_LIMIT
         : Math.min(ReadFileTool.MAX_LINE_LIMIT, Math.max(0, requestedLimit));
 
-    // Check permission unless path is exempt
-    if (this.checkPermission && !this.isExempt(filePath)) {
-      const perm = this.checkPermission(filePath, 'read');
-      if (!perm.allowed) {
-        return errorResult(perm.reason ?? 'Permission denied');
-      }
+    const accessDenied = accessDeniedResult(this.checkAccessUnlessExempt(filePath, 'read'));
+    if (accessDenied) {
+      return accessDenied;
     }
 
     if (!fs.existsSync(filePath)) {
@@ -173,7 +77,7 @@ export class ReadFileTool extends Tool {
     }
 
     // Check if file is binary
-    if (this.isBinaryFile(filePath)) {
+    if (isBinaryFile(filePath)) {
       return errorResult(
         `Cannot read binary file: ${filePath}. ` +
         `This appears to be a binary file (based on extension or content). ` +
@@ -183,7 +87,7 @@ export class ReadFileTool extends Tool {
 
     try {
       const start = Math.max(0, offset ?? 0);
-      const window = this.readLineWindow(
+      const window = readLineWindow(
         filePath,
         encoding,
         start,
@@ -210,96 +114,11 @@ export class ReadFileTool extends Tool {
     }
   }
 
-  private resolvePath(p: string): string {
-    if (path.isAbsolute(p)) {
-      return p;
-    }
-    return path.resolve(this.workspaceDir, p);
-  }
-
-  private readInteger(value: unknown, fallback: number | undefined): number | undefined {
-    if (value === undefined || value === null) {
-      return fallback;
-    }
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return Math.max(0, Math.floor(value));
-    }
-    if (typeof value === 'string' && value.trim().length > 0) {
-      const parsed = Number(value.trim());
-      if (Number.isFinite(parsed)) {
-        return Math.max(0, Math.floor(parsed));
-      }
-    }
-    return fallback;
-  }
-
-  private readLineWindow(
-    filePath: string,
-    encoding: BufferEncoding,
-    offset: number,
-    limit: number,
-    maxChars: number,
-    maxScanBytes: number
-  ): { content: string; outputTruncated: boolean; scanLimitReached: boolean } {
-    const fd = fs.openSync(filePath, 'r');
-    const buffer = Buffer.alloc(64 * 1024);
-    let carry = '';
-    let skipped = 0;
-    let emitted = 0;
-    let out = '';
-    let position = 0;
-    let outputTruncated = false;
-    let scanLimitReached = false;
-    try {
-      while (emitted < limit && out.length < maxChars && position < maxScanBytes) {
-        const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
-        if (bytesRead <= 0) {
-          break;
-        }
-        position += bytesRead;
-        const chunk = carry + buffer.toString(encoding, 0, bytesRead).replace(/\r\n/g, '\n');
-        const lines = chunk.split('\n');
-        carry = lines.pop() ?? '';
-        for (const line of lines) {
-          if (skipped < offset) {
-            skipped += 1;
-            continue;
-          }
-          if (emitted >= limit || out.length >= maxChars) {
-            break;
-          }
-          out += (out.length > 0 ? '\n' : '') + line;
-          emitted += 1;
-        }
-      }
-      if (carry.length > 0 && emitted < limit && out.length < maxChars && skipped >= offset) {
-        out += (out.length > 0 ? '\n' : '') + carry;
-      }
-      if (out.length > maxChars) {
-        out = out.slice(0, maxChars);
-        outputTruncated = true;
-      }
-      if (position >= maxScanBytes && emitted < limit) {
-        scanLimitReached = true;
-      }
-      if (out.length >= maxChars) {
-        outputTruncated = true;
-      }
-      return { content: out, outputTruncated, scanLimitReached };
-    } finally {
-      fs.closeSync(fd);
-    }
-  }
 }
 
-export class WriteFileTool extends Tool {
-  private workspaceDir: string;
-  private checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
-
+export class WriteFileTool extends ToolAccessBase {
   constructor(options: FileToolsOptions) {
-    super();
-    this.workspaceDir = options.workspaceDir;
-    this.checkPermission = options.checkPermission;
+    super(options);
   }
 
   get name(): string {
@@ -333,15 +152,13 @@ export class WriteFileTool extends Tool {
   }
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const filePath = this.resolvePath(args.path as string);
+    const filePath = this.resolveWorkspacePath(args.path as string);
     const content = args.content as string;
     const encoding = (args.encoding as BufferEncoding) ?? 'utf-8';
 
-    if (this.checkPermission) {
-      const perm = this.checkPermission(filePath, 'write');
-      if (!perm.allowed) {
-        return errorResult(perm.reason ?? 'Permission denied');
-      }
+    const accessDenied = accessDeniedResult(this.checkAccess(filePath, 'write'));
+    if (accessDenied) {
+      return accessDenied;
     }
 
     try {
@@ -357,22 +174,11 @@ export class WriteFileTool extends Tool {
     }
   }
 
-  private resolvePath(p: string): string {
-    if (path.isAbsolute(p)) {
-      return p;
-    }
-    return path.resolve(this.workspaceDir, p);
-  }
 }
 
-export class EditFileTool extends Tool {
-  private workspaceDir: string;
-  private checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
-
+export class EditFileTool extends ToolAccessBase {
   constructor(options: FileToolsOptions) {
-    super();
-    this.workspaceDir = options.workspaceDir;
-    this.checkPermission = options.checkPermission;
+    super(options);
   }
 
   get name(): string {
@@ -405,15 +211,13 @@ export class EditFileTool extends Tool {
   }
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const filePath = this.resolvePath(args.path as string);
+    const filePath = this.resolveWorkspacePath(args.path as string);
     const oldStr = args.oldStr as string;
     const newStr = args.newStr as string;
 
-    if (this.checkPermission) {
-      const perm = this.checkPermission(filePath, 'write');
-      if (!perm.allowed) {
-        return errorResult(perm.reason ?? 'Permission denied');
-      }
+    const accessDenied = accessDeniedResult(this.checkAccess(filePath, 'write'));
+    if (accessDenied) {
+      return accessDenied;
     }
 
     if (!fs.existsSync(filePath)) {
@@ -436,28 +240,11 @@ export class EditFileTool extends Tool {
     }
   }
 
-  private resolvePath(p: string): string {
-    if (path.isAbsolute(p)) {
-      return p;
-    }
-    return path.resolve(this.workspaceDir, p);
-  }
 }
 
-export class ListDirectoryTool extends Tool {
-  private workspaceDir: string;
-  private checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
-  private exemptDirs: string[];
-
+export class ListDirectoryTool extends ToolAccessBase {
   constructor(options: FileToolsOptions) {
-    super();
-    this.workspaceDir = options.workspaceDir;
-    this.checkPermission = options.checkPermission;
-    this.exemptDirs = options.exemptDirs?.map(d => path.resolve(d)) ?? [];
-  }
-
-  private isExempt(filePath: string): boolean {
-    return this.exemptDirs.some((exemptDir) => isPathWithinDir(filePath, exemptDir));
+    super(options);
   }
 
   get name(): string {
@@ -482,14 +269,11 @@ export class ListDirectoryTool extends Tool {
   }
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const dirPath = this.resolvePath((args.path as string) ?? '.');
+    const dirPath = this.resolveWorkspacePath((args.path as string) ?? '.');
 
-    // Check permission unless path is exempt
-    if (this.checkPermission && !this.isExempt(dirPath)) {
-      const perm = this.checkPermission(dirPath, 'read');
-      if (!perm.allowed) {
-        return errorResult(perm.reason ?? 'Permission denied');
-      }
+    const accessDenied = accessDeniedResult(this.checkAccessUnlessExempt(dirPath, 'read'));
+    if (accessDenied) {
+      return accessDenied;
     }
 
     if (!fs.existsSync(dirPath)) {
@@ -509,22 +293,11 @@ export class ListDirectoryTool extends Tool {
     }
   }
 
-  private resolvePath(p: string): string {
-    if (path.isAbsolute(p)) {
-      return p;
-    }
-    return path.resolve(this.workspaceDir, p);
-  }
 }
 
-export class GlobTool extends Tool {
-  private workspaceDir: string;
-  private checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
-
+export class GlobTool extends ToolAccessBase {
   constructor(options: FileToolsOptions) {
-    super();
-    this.workspaceDir = options.workspaceDir;
-    this.checkPermission = options.checkPermission;
+    super(options);
   }
 
   get name(): string {
@@ -554,13 +327,11 @@ export class GlobTool extends Tool {
 
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
     const pattern = args.pattern as string;
-    const basePath = this.resolvePath((args.path as string) ?? '.');
+    const basePath = this.resolveWorkspacePath((args.path as string) ?? '.');
 
-    if (this.checkPermission) {
-      const perm = this.checkPermission(basePath, 'read');
-      if (!perm.allowed) {
-        return errorResult(perm.reason ?? 'Permission denied');
-      }
+    const accessDenied = accessDeniedResult(this.checkAccess(basePath, 'read'));
+    if (accessDenied) {
+      return accessDenied;
     }
 
     try {
@@ -569,13 +340,6 @@ export class GlobTool extends Tool {
     } catch (err) {
       return errorResult(`Failed to search: ${err}`);
     }
-  }
-
-  private resolvePath(p: string): string {
-    if (path.isAbsolute(p)) {
-      return p;
-    }
-    return path.resolve(this.workspaceDir, p);
   }
 
   private globSearch(basePath: string, pattern: string): string[] {
@@ -617,14 +381,9 @@ export class GlobTool extends Tool {
   }
 }
 
-export class GrepTool extends Tool {
-  private workspaceDir: string;
-  private checkPermission?: (filePath: string, operation: 'read' | 'write') => PermissionCheckResult;
-
+export class GrepTool extends ToolAccessBase {
   constructor(options: FileToolsOptions) {
-    super();
-    this.workspaceDir = options.workspaceDir;
-    this.checkPermission = options.checkPermission;
+    super(options);
   }
 
   get name(): string {
@@ -672,12 +431,10 @@ export class GrepTool extends Tool {
     } catch (err) {
       return errorResult(`Invalid regex pattern: ${err}`);
     }
-    const basePath = this.resolvePath((args.path as string) ?? '.');
-    if (this.checkPermission) {
-      const perm = this.checkPermission(basePath, 'read');
-      if (!perm.allowed) {
-        return errorResult(perm.reason ?? 'Permission denied');
-      }
+    const basePath = this.resolveWorkspacePath((args.path as string) ?? '.');
+    const accessDenied = accessDeniedResult(this.checkAccess(basePath, 'read'));
+    if (accessDenied) {
+      return accessDenied;
     }
     const includePatterns = this.normalizeIncludePatterns(args.include);
     const maxResults = this.readInteger(args.max_results, 200);
@@ -771,13 +528,6 @@ export class GrepTool extends Tool {
       }
     }
     return files;
-  }
-
-  private resolvePath(p: string): string {
-    if (path.isAbsolute(p)) {
-      return p;
-    }
-    return path.resolve(this.workspaceDir, p);
   }
 
   private readInteger(value: unknown, fallback: number): number {

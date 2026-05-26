@@ -6,15 +6,15 @@ import type {
   AutomationRunReport,
   AutomationRunStatus,
   AutomationTriggerSource,
+  AgentRuntimeOverrides,
   ContextNamespaceMeta,
   ContextRef,
   Message,
+  ResolvedLlmRuntimeConfig,
+  SessionLlmSelection,
 } from '../types.js';
 import type { AutomationStore } from './AutomationStore.js';
-
-function createRunId(): string {
-  return `run-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
-}
+import { AutomationRunCoordinator } from './AutomationRunCoordinator.js';
 
 interface RuntimeAgentLike {
   updateContextNamespaceMeta: (
@@ -26,7 +26,17 @@ interface RuntimeAgentLike {
     context: ContextRef;
     workspaceDir: string;
     additionalSystemPrompt: string;
+    agentRuntimeOverrides?: AgentRuntimeOverrides;
   }) => Promise<{ content: string }>;
+}
+
+interface AutomationAgentRuntimeResolution {
+  llmSelection?: SessionLlmSelection;
+  llmRuntime?: ResolvedLlmRuntimeConfig;
+  agentRuntimeOverrides?: AgentRuntimeOverrides;
+  agentName?: string;
+  effectiveAgentName?: string;
+  fallbackReason?: string;
 }
 
 interface SystemTaskExecutionResult {
@@ -41,7 +51,9 @@ interface AutomationExecutionServiceDeps {
   store: AutomationStore;
   ensureSessionRuntime: (
     sessionId: string,
-    workspaceDir: string
+    workspaceDir: string,
+    llmRuntime?: ResolvedLlmRuntimeConfig,
+    llmSelection?: SessionLlmSelection
   ) => Promise<{ agent: RuntimeAgentLike; reused: boolean }>;
   cleanupSessionRuntime: (sessionId: string) => Promise<void>;
   trackActiveRun?: (runId: string, context: ContextRef) => (() => void);
@@ -65,6 +77,7 @@ interface AutomationExecutionServiceDeps {
     triggerSource: AutomationTriggerSource;
     workspaceDir: string;
   }) => Promise<SystemTaskExecutionResult>;
+  resolveAutomationAgentRuntime?: (job: AutomationJob) => AutomationAgentRuntimeResolution;
   logger: {
     warn: (message: string) => void;
   };
@@ -80,6 +93,7 @@ export class AutomationExecutionService {
   private readonly getContextMessages: AutomationExecutionServiceDeps['getContextMessages'];
   private readonly mutateWorkspaceMemory: AutomationExecutionServiceDeps['mutateWorkspaceMemory'];
   private readonly executeSystemTask?: AutomationExecutionServiceDeps['executeSystemTask'];
+  private readonly resolveAutomationAgentRuntime?: AutomationExecutionServiceDeps['resolveAutomationAgentRuntime'];
   private readonly logger: AutomationExecutionServiceDeps['logger'];
 
   constructor(deps: AutomationExecutionServiceDeps) {
@@ -92,6 +106,7 @@ export class AutomationExecutionService {
     this.getContextMessages = deps.getContextMessages;
     this.mutateWorkspaceMemory = deps.mutateWorkspaceMemory;
     this.executeSystemTask = deps.executeSystemTask;
+    this.resolveAutomationAgentRuntime = deps.resolveAutomationAgentRuntime;
     this.logger = deps.logger;
   }
 
@@ -100,43 +115,37 @@ export class AutomationExecutionService {
     triggerAt: string,
     options: {
       triggerSource?: AutomationTriggerSource;
+      claimedRunRecord?: AutomationRunRecord;
     } = {}
   ): Promise<AutomationRunRecord> {
     const triggerSource = options.triggerSource ?? 'schedule';
-    const existingRunning = this.store
-      .listRuns(job.id)
-      .find((item) => item.status === 'running' && !item.completedAt);
-    if (existingRunning) {
-      const skippedRecord: AutomationRunRecord = {
-        id: createRunId(),
-        jobId: job.id,
-        sessionId: '',
-        status: 'skipped',
-        triggerAt,
-        triggerSource,
-        startedAt: new Date().toISOString(),
-        completedAt: new Date().toISOString(),
-        skippedReason: 'overlap_running',
-        resultSummary: 'Skipped because a previous run is still active.',
-      };
-      this.store.appendRun(job.id, skippedRecord);
-      return skippedRecord;
-    }
-
-    const runId = createRunId();
     const workspaceDir = job.workspaceDir || this.getDefaultWorkspaceDir();
-    let sessionId = job.systemTask ? '' : `auto-${job.id}-${Date.now()}`;
-    const startedAt = new Date().toISOString();
-    const runningRecord: AutomationRunRecord = {
-      id: runId,
-      jobId: job.id,
-      sessionId,
-      status: 'running',
+    const runningRecord = this.resolveClaimedRunRecord({
+      job,
       triggerAt,
       triggerSource,
-      startedAt,
-    };
-    this.store.appendRun(job.id, runningRecord);
+      claimedRunRecord: options.claimedRunRecord,
+    });
+    if (runningRecord.status === 'skipped') {
+      return runningRecord;
+    }
+    const runId = runningRecord.id;
+    let sessionId = runningRecord.sessionId;
+    const agentRuntime = job.systemTask
+      ? undefined
+      : this.resolveAutomationAgentRuntime?.(job) ?? this.createDefaultAgentRuntimeResolution(job);
+    if (agentRuntime?.fallbackReason) {
+      this.logger.warn(
+        `[Automation] agent fallback: job=${job.id} requested=${agentRuntime.agentName ?? ''} reason=${agentRuntime.fallbackReason}`
+      );
+    }
+    this.store.updateRun(job.id, runId, {
+      sessionId,
+      triggerSource,
+      ...(agentRuntime?.agentName ? { agentName: agentRuntime.agentName } : {}),
+      ...(agentRuntime?.effectiveAgentName ? { effectiveAgentName: agentRuntime.effectiveAgentName } : {}),
+      ...(agentRuntime?.fallbackReason ? { agentFallbackReason: agentRuntime.fallbackReason } : {}),
+    });
 
     let status: AutomationRunStatus = 'failed';
     let summary = '';
@@ -171,11 +180,17 @@ export class AutomationExecutionService {
             status: 'running',
             runId,
             triggerSource,
+            agentRuntime,
           }),
-          ...(job.llmSelection ? { llmSelection: job.llmSelection } : {}),
+          ...(agentRuntime?.llmSelection ? { llmSelection: agentRuntime.llmSelection } : {}),
         };
         this.updateContextNamespaceMetaSafe(context, metaPatch);
-        const runtime = await this.ensureSessionRuntime(sessionId, workspaceDir);
+        const runtime = await this.ensureSessionRuntime(
+          sessionId,
+          workspaceDir,
+          agentRuntime?.llmRuntime,
+          agentRuntime?.llmSelection
+        );
         const runAgent = runtime.agent;
         const currentTemplate = this.store.getMemoryTemplate(job.id);
         runAgent.updateContextNamespaceMeta(context, metaPatch);
@@ -187,13 +202,22 @@ export class AutomationExecutionService {
             prompt: job.prompt,
             context,
             workspaceDir,
-            additionalSystemPrompt: this.buildAutomationAdditionalSystemPrompt(job, currentTemplate, triggerSource),
+            additionalSystemPrompt: this.buildAutomationAdditionalSystemPrompt(
+              job,
+              currentTemplate,
+              triggerSource,
+              agentRuntime
+            ),
+            ...(agentRuntime?.agentRuntimeOverrides
+              ? { agentRuntimeOverrides: agentRuntime.agentRuntimeOverrides }
+              : {}),
           });
         } finally {
           releaseActiveRun?.();
         }
         status = 'succeeded';
         summary = this.summarizeText(result.content, 320) || 'Automation run completed.';
+        if (job.sessionId && job.schedule.frequency === "once") { this.store.updateJob(job.id, { enabled: false }); }
         completedAt = new Date().toISOString();
         runAgent.updateContextNamespaceMeta(context, {
           automationRun: this.createAutomationRunMeta({
@@ -203,6 +227,7 @@ export class AutomationExecutionService {
             runId,
             triggerSource,
             completedAt,
+            agentRuntime,
           }),
         });
       }
@@ -221,6 +246,7 @@ export class AutomationExecutionService {
               runId,
               triggerSource,
               completedAt,
+              agentRuntime,
             }),
           }
         );
@@ -232,6 +258,9 @@ export class AutomationExecutionService {
         completedAt,
         resultSummary: summary,
         error: status === 'failed' ? summary : undefined,
+        ...(agentRuntime?.agentName ? { agentName: agentRuntime.agentName } : {}),
+        ...(agentRuntime?.effectiveAgentName ? { effectiveAgentName: agentRuntime.effectiveAgentName } : {}),
+        ...(agentRuntime?.fallbackReason ? { agentFallbackReason: agentRuntime.fallbackReason } : {}),
         reportPath,
       }) ?? {
         ...runningRecord,
@@ -240,6 +269,9 @@ export class AutomationExecutionService {
         completedAt,
         resultSummary: summary,
         error: status === 'failed' ? summary : undefined,
+        ...(agentRuntime?.agentName ? { agentName: agentRuntime.agentName } : {}),
+        ...(agentRuntime?.effectiveAgentName ? { effectiveAgentName: agentRuntime.effectiveAgentName } : {}),
+        ...(agentRuntime?.fallbackReason ? { agentFallbackReason: agentRuntime.fallbackReason } : {}),
         reportPath,
       };
       this.store.updateJob(job.id, {
@@ -265,6 +297,23 @@ export class AutomationExecutionService {
 
       return finalRecord;
     }
+  }
+
+  private resolveClaimedRunRecord(input: {
+    job: AutomationJob;
+    triggerAt: string;
+    triggerSource: AutomationTriggerSource;
+    claimedRunRecord?: AutomationRunRecord;
+  }): AutomationRunRecord {
+    if (input.claimedRunRecord) {
+      return input.claimedRunRecord;
+    }
+    return this.store.claimRun({
+      jobId: input.job.id,
+      triggerAt: input.triggerAt,
+      triggerSource: input.triggerSource,
+      runId: AutomationRunCoordinator.createRunId(),
+    }).record;
   }
 
   async saveManualCorrectionFromSession(input: {
@@ -303,6 +352,7 @@ export class AutomationExecutionService {
     status: AutomationRunStatus;
     runId: string;
     triggerSource: AutomationTriggerSource;
+    agentRuntime?: AutomationAgentRuntimeResolution;
     completedAt?: string;
   }): AutomationRunMeta {
     return {
@@ -312,7 +362,21 @@ export class AutomationExecutionService {
       runId: input.runId,
       scheduledBy: 'automation',
       triggerSource: input.triggerSource,
+      ...(input.agentRuntime?.agentName ? { agentName: input.agentRuntime.agentName } : {}),
+      ...(input.agentRuntime?.effectiveAgentName
+        ? { effectiveAgentName: input.agentRuntime.effectiveAgentName }
+        : {}),
+      ...(input.agentRuntime?.fallbackReason
+        ? { agentFallbackReason: input.agentRuntime.fallbackReason }
+        : {}),
       completedAt: input.completedAt,
+    };
+  }
+
+  private createDefaultAgentRuntimeResolution(job: AutomationJob): AutomationAgentRuntimeResolution {
+    return {
+      ...(job.llmSelection ? { llmSelection: job.llmSelection } : {}),
+      effectiveAgentName: 'default',
     };
   }
 
@@ -365,17 +429,23 @@ export class AutomationExecutionService {
   private buildAutomationAdditionalSystemPrompt(
     job: AutomationJob,
     template: AutomationMemoryTemplate | undefined,
-    triggerSource: AutomationTriggerSource
+    triggerSource: AutomationTriggerSource,
+    agentRuntime?: AutomationAgentRuntimeResolution
   ): string {
+    const effectiveAgentName = agentRuntime?.effectiveAgentName ?? 'default';
     const segments: string[] = [
       '[AUTOMATION_RUN]',
       `job_id=${job.id}`,
       `job_name=${job.name}`,
       `timezone=${job.timezone}`,
       `trigger_source=${triggerSource}`,
+      `agent=${effectiveAgentName}`,
       'This run executes in an isolated session.',
     ];
-    if (job.skills.length > 0) {
+    if (agentRuntime?.fallbackReason) {
+      segments.push(`agent_fallback_reason=${agentRuntime.fallbackReason}`);
+    }
+    if (!agentRuntime?.agentRuntimeOverrides && job.skills.length > 0) {
       segments.push(`Preferred skills: ${job.skills.join(', ')}`);
     }
     segments.push('## Automation Memory Template');

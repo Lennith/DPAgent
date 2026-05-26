@@ -5,6 +5,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { Tool, successResult, errorResult } from '../tools/Tool.js';
 import type { ToolResult, MCPServerConfig } from '../types.js';
+import { ManagedInterval, retryWithBackoff, withTimeout } from '../runtime/async-primitives.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 const RECONNECT_BACKOFF_MS = [1000, 2000, 5000] as const;
@@ -136,7 +137,7 @@ export class MCPConnector {
   private defaultExecuteTimeoutMs: number;
   private connectTimeoutMs: number;
   private healthCheckIntervalMs: number;
-  private healthCheckTimer: NodeJS.Timeout | null = null;
+  private readonly healthCheckTimer = new ManagedInterval();
   private healthCheckInProgress = false;
 
   constructor(defaultExecuteTimeoutMs: number = 60000, options: MCPConnectorOptions = {}) {
@@ -302,10 +303,11 @@ export class MCPConnector {
     }
 
     mcpLogger.mcpToolCall(toolName, serverName);
-    const result = await Promise.race([
+    const result = await withTimeout(
       liveConnection.client.callTool({ name: toolName, arguments: args }),
-      this.createTimeout(timeoutMs, `Timeout after ${timeoutMs}ms`),
-    ]);
+      timeoutMs,
+      `Timeout after ${timeoutMs}ms`
+    );
     return result;
   }
 
@@ -359,26 +361,30 @@ export class MCPConnector {
       createToolsIfMissing: boolean;
     }
   ): Promise<boolean> {
-    const maxAttempts = Math.max(1, options.maxAttempts);
     let lastError: string | undefined;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await retryWithBackoff({
+        maxAttempts: options.maxAttempts,
+        delaysMs: RECONNECT_BACKOFF_MS,
+        run: async (attempt) => {
       this.updateStatus(connection, 'reconnecting', { retryCount: attempt });
-      try {
         const transport = await this.createTransport(connection.config);
         const client = new Client(
-          { name: 'minimax-agent', version: '1.0.0' },
+          { name: 'dpagent', version: '1.0.0' },
           { capabilities: {} }
         );
 
-        await Promise.race([
+        await withTimeout(
           client.connect(transport),
-          this.createTimeout(this.connectTimeoutMs, `MCP connect timeout after ${this.connectTimeoutMs}ms`),
-        ]);
-        const toolsResult = await Promise.race([
+          this.connectTimeoutMs,
+          `MCP connect timeout after ${this.connectTimeoutMs}ms`
+        );
+        const toolsResult = await withTimeout(
           client.listTools(),
-          this.createTimeout(this.defaultExecuteTimeoutMs, 'MCP listTools timeout'),
-        ]);
+          this.defaultExecuteTimeoutMs,
+          'MCP listTools timeout'
+        );
 
         connection.transport = transport;
         connection.client = client;
@@ -411,21 +417,22 @@ export class MCPConnector {
           `loaded ${connection.state.toolCount} tools (reason=${options.reason}, attempt=${attempt})`
         );
         return true;
-      } catch (err) {
-        lastError = this.errorToMessage(err);
-        this.updateStatus(connection, 'reconnecting', {
-          retryCount: attempt,
-          lastError,
-        });
-        if (attempt < maxAttempts) {
-          const backoffMs = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
-          await this.sleep(backoffMs);
+        },
+        onFailedAttempt: (err, attempt) => {
+          lastError = this.errorToMessage(err);
+          this.updateStatus(connection, 'reconnecting', {
+            retryCount: attempt,
+            lastError,
+          });
         }
-      }
+      });
+      return true;
+    } catch {
+      // lastError is captured by onFailedAttempt for status reporting.
     }
 
     this.updateStatus(connection, 'failed', {
-      retryCount: maxAttempts,
+      retryCount: Math.max(1, options.maxAttempts),
       lastError,
     });
     mcpLogger.mcpConnect(
@@ -458,10 +465,11 @@ export class MCPConnector {
         }
 
         try {
-          const toolsResult = await Promise.race([
+          const toolsResult = await withTimeout(
             connection.client.listTools(),
-            this.createTimeout(this.defaultExecuteTimeoutMs, 'MCP health-check listTools timeout'),
-          ]);
+            this.defaultExecuteTimeoutMs,
+            'MCP health-check listTools timeout'
+          );
           this.updateStatus(connection, 'connected', {
             toolCount: toolsResult.tools.length,
           });
@@ -480,20 +488,16 @@ export class MCPConnector {
   }
 
   private startHealthCheck(): void {
-    if (this.healthCheckTimer) {
+    if (this.healthCheckTimer.active) {
       return;
     }
-    this.healthCheckTimer = setInterval(() => {
+    this.healthCheckTimer.start(() => {
       void this.runHealthCheck();
     }, this.healthCheckIntervalMs);
   }
 
   private stopHealthCheck(): void {
-    if (!this.healthCheckTimer) {
-      return;
-    }
-    clearInterval(this.healthCheckTimer);
-    this.healthCheckTimer = null;
+    this.healthCheckTimer.clear();
   }
 
   private hasAnyEnabledServer(): boolean {
@@ -604,18 +608,6 @@ export class MCPConnector {
       }
     }
     return env;
-  }
-
-  private createTimeout(ms: number, message: string): Promise<never> {
-    return new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(message)), ms);
-    });
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => {
-      setTimeout(resolve, ms);
-    });
   }
 
   private errorToMessage(err: unknown): string {

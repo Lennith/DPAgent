@@ -31,6 +31,7 @@ async function runStoreSuite(): Promise<void> {
       prompt: 'sync workspace',
       workspaceDir: 'D:\\repo',
       skills: ['checks', 'checks', 'lint'],
+      agentName: 'browser',
       llmSelection: {
         profileId: 'minimax',
         model: 'MiniMax-M2.7',
@@ -46,6 +47,7 @@ async function runStoreSuite(): Promise<void> {
     assert.equal(created.name, 'Hourly Sync');
     assert.equal(created.workspaceDir, 'D:\\repo');
     assert.deepEqual(created.skills, ['checks', 'lint']);
+    assert.equal(created.agentName, 'browser');
     assert.equal(created.llmSelection?.profileId, 'minimax');
     assert.equal(created.llmSelection?.model, 'MiniMax-M2.7');
     assert.equal(created.enabled, true);
@@ -53,6 +55,7 @@ async function runStoreSuite(): Promise<void> {
 
     const paused = store.updateJob(created.id, {
       enabled: false,
+      agentName: '',
       llmSelection: {
         profileId: 'deepseek',
         model: 'deepseek-v4',
@@ -61,6 +64,7 @@ async function runStoreSuite(): Promise<void> {
       },
     });
     assert.equal(paused.enabled, false);
+    assert.equal(paused.agentName, undefined);
     assert.equal(paused.llmSelection?.profileId, 'deepseek');
     assert.equal(paused.llmSelection?.reasoningPreset, 'medium');
     assert.equal(paused.nextRunAt, undefined);
@@ -85,6 +89,36 @@ async function runStoreSuite(): Promise<void> {
     });
     assert.equal(updatedRun?.resultSummary, 'success with extra spaces');
     assert.equal(updatedRun?.error, '');
+
+    const claimed = store.claimRun({
+      jobId: created.id,
+      triggerAt: '2026-01-01T01:00:00.000Z',
+      triggerSource: 'schedule',
+      nextRunAt: '2026-01-01T02:00:00.000Z',
+      runId: 'claimed-run',
+      sessionId: 'claimed-session',
+      now: new Date('2026-01-01T01:00:00.000Z'),
+    });
+    assert.equal(claimed.claimed, true);
+    assert.equal(claimed.record.status, 'running');
+    assert.equal(claimed.record.id, 'claimed-run');
+    assert.equal(claimed.record.sessionId, 'claimed-session');
+    assert.equal(store.getJob(created.id)?.nextRunAt, '2026-01-01T02:00:00.000Z');
+
+    const overlapClaim = store.claimRun({
+      jobId: created.id,
+      triggerAt: '2026-01-01T01:30:00.000Z',
+      triggerSource: 'manual',
+      now: new Date('2026-01-01T01:30:00.000Z'),
+    });
+    assert.equal(overlapClaim.claimed, false);
+    assert.equal(overlapClaim.record.status, 'skipped');
+    assert.equal(overlapClaim.record.skippedReason, 'overlap_running');
+    store.updateRun(created.id, 'claimed-run', {
+      status: 'succeeded',
+      completedAt: '2026-01-01T01:05:00.000Z',
+      resultSummary: 'done',
+    });
 
     const templateV1 = store.updateMemoryTemplate({
       jobId: created.id,
@@ -134,6 +168,26 @@ async function runStoreSuite(): Promise<void> {
     assert.equal(systemJob.jobSource, 'system');
     assert.equal(systemJob.readOnly, true);
     assert.equal(store.findSystemJob('auto_generated_skill_governance')?.id, systemJob.id);
+
+    const scheduledFromSession = store.createJob({
+      name: 'Session-owned follow-up',
+      prompt: 'follow up in the owning session',
+      workspaceDir: 'D:\\repo',
+      schedule: normalizeAutomationSchedule({ frequency: 'interval', intervalSeconds: 60 }),
+      timezone: 'UTC',
+      enabled: true,
+      sessionId: 'visible-session',
+    });
+    const scheduledClaim = store.claimRun({
+      jobId: scheduledFromSession.id,
+      triggerAt: '2026-01-01T03:00:00.000Z',
+      triggerSource: 'schedule',
+      now: new Date('2026-01-01T03:00:00.000Z'),
+    });
+    assert.equal(scheduledClaim.claimed, true);
+    assert.notEqual(scheduledClaim.record.sessionId, 'visible-session');
+    assert.match(scheduledClaim.record.sessionId, /^auto-/);
+    assert.equal(store.getJob(scheduledFromSession.id)?.sessionId, 'visible-session');
 
     assert.equal(store.deleteJob(created.id), true);
     assert.equal(store.getRunReport(created.id, 'run-4'), undefined);

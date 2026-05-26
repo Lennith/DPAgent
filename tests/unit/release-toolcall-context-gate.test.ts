@@ -11,12 +11,12 @@ import {
   type GateArgs,
   type SessionReport,
   writeGateArtifacts,
-} from '../../scripts/release-toolcall-context-gate.ts';
+} from '../../scripts/lib/release-toolcall-context-gate-core.ts';
 
 function createArgs(outputRoot: string): GateArgs {
   return {
     runs: 3,
-    rounds: 20,
+    rounds: 10,
     minPassRate: 0.9,
     model: 'multi-profile',
     profiles: ['kimi', 'deepseek', 'minimax'],
@@ -65,16 +65,16 @@ function createSessionReport(
   accuracy: number,
   failureFlagCounts: Record<string, number> = {}
 ): SessionReport {
-  const passCount = Math.round(accuracy * 20);
+  const passCount = Math.round(accuracy * 10);
   return {
     sessionId,
     provider: 'anthropic',
     model: 'profile-model',
     passCount,
-    failCount: 20 - passCount,
+    failCount: 10 - passCount,
     accuracy,
     failureFlagCounts,
-    rounds: Array.from({ length: 20 }, (_value, index) => ({
+    rounds: Array.from({ length: 10 }, (_value, index) => ({
       round: index + 1,
       flags: failureFlagCounts.tools_missing ? ['tools_missing'] : [],
       ok: index < passCount,
@@ -137,7 +137,7 @@ function testWriteGateArtifactsProducesManualReviewTemplate(): void {
     assert.equal(persistedReview.reviewedCommitSha, sourceCommitSha);
     assert.deepEqual(persistedReview.reviewedRunSessionIds, ['sess-run-01', 'sess-run-02', 'sess-run-03']);
     assert.equal(persistedReview.reviewedRequiredRuns, 3);
-    assert.equal(persistedReview.reviewedRoundsPerRun, 20);
+    assert.equal(persistedReview.reviewedRoundsPerRun, 10);
     assert.equal(persistedReview.reviewedModel, 'multi-profile');
     assert.deepEqual(persistedReview.reviewedProfiles, ['kimi', 'deepseek', 'minimax']);
     assert.equal(persistedReview.conclusion, 'pending');
@@ -287,12 +287,105 @@ function testDeepSeekModelContractRejectsStaleOverride(): void {
   }
 }
 
+function testKimiModelContractRejectsStaleExplicitOverride(): void {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'release-toolcall-gate-bad-kimi-'));
+  try {
+    const args = createArgs(outputRoot);
+    fs.writeFileSync(args.configPath, 'api:\n  model: MiniMax-M2.7-highspeed\n', 'utf8');
+    writeJson(outputRoot, 'release-toolcall-profiles.dev.json', {
+      profiles: [
+        {
+          id: 'kimi-dev',
+          label: 'kimi',
+          name: 'Kimi',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          apiBase: 'https://api.minimaxi.com',
+          model: 'kimi-for-coding',
+        },
+        {
+          id: 'deepseek-dev',
+          label: 'deepseek',
+          name: 'DeepSeek',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          apiBase: 'https://api.minimaxi.com',
+          model: 'deepseek-v4-flash',
+        },
+        {
+          id: 'minimax-dev',
+          label: 'minimax',
+          name: 'MiniMax',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          apiBase: 'https://api.minimaxi.com',
+          model: 'MiniMax-M2.7-highspeed',
+        },
+      ],
+    });
+
+    assert.throws(
+      () => resolveRuntimeProfiles(args),
+      /kimi.*must use model Kimi-k2\.6/i
+    );
+  } finally {
+    fs.rmSync(outputRoot, { recursive: true, force: true });
+  }
+}
+
+function testMiniMaxModelContractRejectsStaleOverride(): void {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'release-toolcall-gate-bad-minimax-'));
+  try {
+    const args = createArgs(outputRoot);
+    fs.writeFileSync(args.configPath, 'api:\n  model: MiniMax-M2.7-highspeed\n', 'utf8');
+    writeJson(outputRoot, 'release-toolcall-profiles.dev.json', {
+      profiles: [
+        {
+          id: 'kimi-dev',
+          label: 'kimi',
+          name: 'Kimi',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          apiBase: 'https://api.minimaxi.com',
+        },
+        {
+          id: 'deepseek-dev',
+          label: 'deepseek',
+          name: 'DeepSeek',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          apiBase: 'https://api.minimaxi.com',
+          model: 'deepseek-v4-flash',
+        },
+        {
+          id: 'minimax-dev',
+          label: 'minimax',
+          name: 'MiniMax',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          apiBase: 'https://api.minimaxi.com',
+          model: 'MiniMax-M2.5',
+        },
+      ],
+    });
+
+    assert.throws(
+      () => resolveRuntimeProfiles(args),
+      /minimax.*must use model MiniMax-M2\.7-highspeed/i
+    );
+  } finally {
+    fs.rmSync(outputRoot, { recursive: true, force: true });
+  }
+}
+
 function runAll(): void {
   testWriteGateArtifactsProducesManualReviewTemplate();
   testDefaultRunTimeoutIsFifteenMinutes();
   testRunTimeoutCanBeSetExplicitly();
   testDevProfilesCanOmitKimiModelAndLocalProfilesOverride();
   testDeepSeekModelContractRejectsStaleOverride();
+  testKimiModelContractRejectsStaleExplicitOverride();
+  testMiniMaxModelContractRejectsStaleOverride();
   console.log('release-toolcall-context-gate tests passed');
 }
 

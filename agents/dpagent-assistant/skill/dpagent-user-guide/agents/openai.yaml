@@ -1,0 +1,3 @@
+display_name: DPAgent User Guide
+short_description: Explain DPAgent features, UI, mobile access, sharing, agents, and skills.
+default_prompt: Help the user understand and operate DPAgent using the packaged user guide.

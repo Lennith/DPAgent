@@ -1,12 +1,12 @@
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
-import { MiniMaxAgent } from '../../src/index.js';
+import { DPAgent } from '../../src/index.js';
 import { ToolRegistry } from '../../src/tools/index.js';
 import { readSkillVersion } from '../../src/skills/skill-markdown.js';
 import type { ContextRef, LLMResponse, Message } from '../../src/types.js';
 import type { LLMClient } from '../../src/llm/index.js';
+import { cleanupIntegrationHarness, createIntegrationHarness } from './helpers/integration-harness.js';
 
 class ScriptedLLMClient {
   private callbackIndex = 0;
@@ -43,6 +43,12 @@ class ScriptedLLMClient {
     return response;
   }
 
+  async generatePreparedWithCallbacks(
+    ...args: Parameters<ScriptedLLMClient['generateWithCallbacks']>
+  ): ReturnType<ScriptedLLMClient['generateWithCallbacks']> {
+    return this.generateWithCallbacks(...args);
+  }
+
   async generate(messages: Message[]): Promise<LLMResponse> {
     const prompt = String(messages[0]?.content ?? '');
     const turnIds = Array.from(prompt.matchAll(/"turnId":\s*"([^"]+)"/g)).map((match) => match[1]);
@@ -70,31 +76,11 @@ class ScriptedLLMClient {
   }
 }
 
-function createHarness(): {
-  tempDir: string;
-  workspaceDir: string;
-  otherWorkspaceDir: string;
-  runtimeDir: string;
-  contextDir: string;
-} {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p2-governance-'));
-  const workspaceDir = path.join(tempDir, 'workspace');
-  const otherWorkspaceDir = path.join(tempDir, 'other-workspace');
-  const runtimeDir = path.join(tempDir, 'runtime');
-  const contextDir = path.join(tempDir, 'contexts');
-  fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.mkdirSync(otherWorkspaceDir, { recursive: true });
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  fs.mkdirSync(contextDir, { recursive: true });
-  return { tempDir, workspaceDir, otherWorkspaceDir, runtimeDir, contextDir };
-}
-
-function cleanupHarness(tempDir: string): void {
-  fs.rmSync(tempDir, { recursive: true, force: true });
-}
-
 async function runCase(): Promise<void> {
-  const harness = createHarness();
+  const harness = createIntegrationHarness('p2-governance-', {
+    extraDirs: { otherWorkspaceDir: 'other-workspace' },
+  });
+  const otherWorkspaceDir = harness.extraDirs.otherWorkspaceDir;
   const context: ContextRef = {
     scope: 'session',
     namespace: 'p2-governance',
@@ -104,7 +90,7 @@ async function runCase(): Promise<void> {
     namespace: 'p2-team-preset',
   };
   try {
-    const agent = new MiniMaxAgent({
+    const agent = new DPAgent({
       allowMissingApiKeyAtBoot: true,
       configPath: path.join(process.cwd(), 'config.yaml'),
       workspaceDir: harness.workspaceDir,
@@ -161,7 +147,6 @@ async function runCase(): Promise<void> {
     agent.updateConfig({
       agent: {
         defaultToolset: 'full-access',
-        skillWriteMode: 'auto',
       },
     });
 
@@ -169,7 +154,7 @@ async function runCase(): Promise<void> {
       workspaceDir: harness.workspaceDir,
     });
     agent.updateContextNamespaceMeta(otherContext, {
-      workspaceDir: harness.otherWorkspaceDir,
+      workspaceDir: otherWorkspaceDir,
     });
 
     agent.setToolsetPreset({
@@ -178,7 +163,7 @@ async function runCase(): Promise<void> {
       sessionId: context.namespace,
     });
     assert.equal(agent.resolveToolsetName(otherContext), 'full-access');
-    assert.equal(agent.getToolsetPresetStore().getWorkspacePreset(harness.otherWorkspaceDir)?.toolsetName, 'full-access');
+    assert.equal(agent.getToolsetPresetStore().getWorkspacePreset(otherWorkspaceDir)?.toolsetName, 'full-access');
 
     agent.setToolsetPreset({
       scope: 'workspace',
@@ -227,11 +212,12 @@ async function runCase(): Promise<void> {
     assert.equal(afterDuplicate.length, 1);
     assert.equal(afterDuplicate[0].version, 1);
 
-    const pendingCreateDrafts = agent.getSkillDraftStore().listPending({
+    const appliedCreateRecords = agent.getSkillWriteStore().listWriteRecords({
+      status: 'applied',
       sessionId: context.namespace,
       workspaceDir: harness.workspaceDir,
     });
-    assert.equal(pendingCreateDrafts.length, 0);
+    assert.equal(appliedCreateRecords.some((item) => item.action === 'create'), true);
     const approvedCreate = agent
       .getSkillLoader()
       .getSkillCatalog({ workspaceDir: harness.workspaceDir })
@@ -269,11 +255,12 @@ async function runCase(): Promise<void> {
     });
     assert.equal(thirdOrganize.appliedCount, 1);
 
-    const pendingUpdateDrafts = agent.getSkillDraftStore().listPending({
+    const appliedUpdateRecords = agent.getSkillWriteStore().listWriteRecords({
+      status: 'applied',
       sessionId: context.namespace,
       workspaceDir: harness.workspaceDir,
     });
-    assert.equal(pendingUpdateDrafts.length, 0);
+    assert.equal(appliedUpdateRecords.some((item) => item.action === 'update'), true);
     const approvedUpdate = agent.getSkillLoader().getSkillByName(approvedCreate?.name ?? '', {
       workspaceDir: harness.workspaceDir,
     });
@@ -346,7 +333,7 @@ async function runCase(): Promise<void> {
 
     console.log('p2-governance-lifecycle integration test passed');
   } finally {
-    cleanupHarness(harness.tempDir);
+    cleanupIntegrationHarness(harness);
   }
 }
 

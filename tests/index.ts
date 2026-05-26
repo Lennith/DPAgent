@@ -1,5 +1,5 @@
 /**
- * MiniMax Agent Test Suite
+ * DPAgent Test Suite
  * 
  * 测试分类：
  * - integration/: 集成测试（需要 API Key，测试完整流程）

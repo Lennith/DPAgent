@@ -1,4 +1,4 @@
-import type { SessionSearchIndex } from '../memory/index.js';
+import type { SessionSearchIndex } from '../memory/SessionSearchIndex.js';
 import { Tool, errorResult, successResult } from './Tool.js';
 
 export interface SessionSearchToolOptions {

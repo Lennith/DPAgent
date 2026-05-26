@@ -2,14 +2,24 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { SkillLoader } from '../../src/skills/index.js';
+import { SkillLoader } from '../../src/skills/SkillLoader.js';
 
-function createHarness(): { tempDir: string; workspaceDir: string; skillsDir: string } {
+function createHarness(): {
+  tempDir: string;
+  workspaceDir: string;
+  skillsDir: string;
+  agentSkillDir: string;
+  otherAgentSkillDir: string;
+} {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-loader-progressive-'));
   const workspaceDir = path.join(tempDir, 'workspace');
   const skillsDir = path.join(tempDir, 'global-skills');
+  const agentSkillDir = path.join(tempDir, 'agents', 'browser', 'skill');
+  const otherAgentSkillDir = path.join(tempDir, 'agents', 'coding', 'skill');
   fs.mkdirSync(path.join(workspaceDir, 'skills', 'release-helper'), { recursive: true });
   fs.mkdirSync(path.join(skillsDir, 'power-shell'), { recursive: true });
+  fs.mkdirSync(path.join(agentSkillDir, 'browser-evidence'), { recursive: true });
+  fs.mkdirSync(path.join(otherAgentSkillDir, 'coding-only'), { recursive: true });
   fs.writeFileSync(
     path.join(workspaceDir, 'skills', 'release-helper', 'SKILL.md'),
     [
@@ -43,6 +53,37 @@ function createHarness(): { tempDir: string; workspaceDir: string; skillsDir: st
     ].join('\n'),
     'utf-8'
   );
+  fs.writeFileSync(
+    path.join(agentSkillDir, 'browser-evidence', 'SKILL.md'),
+    [
+      '---',
+      'name: "browser-evidence"',
+      'description: "Agent browser evidence workflow"',
+      'metadata:',
+      '  tags: ["browser", "agent"]',
+      '  platforms: ["windows"]',
+      '---',
+      '',
+      'Agent-scoped browser evidence body.',
+      '',
+    ].join('\n'),
+    'utf-8'
+  );
+  fs.writeFileSync(
+    path.join(otherAgentSkillDir, 'coding-only', 'SKILL.md'),
+    [
+      '---',
+      'name: "coding-only"',
+      'description: "Other agent skill"',
+      'metadata:',
+      '  platforms: ["windows"]',
+      '---',
+      '',
+      'Other agent body.',
+      '',
+    ].join('\n'),
+    'utf-8'
+  );
   fs.mkdirSync(path.join(workspaceDir, 'skills', 'deprecated-helper'), { recursive: true });
   fs.writeFileSync(
     path.join(workspaceDir, 'skills', 'deprecated-helper', 'SKILL.md'),
@@ -60,7 +101,7 @@ function createHarness(): { tempDir: string; workspaceDir: string; skillsDir: st
     ].join('\n'),
     'utf-8'
   );
-  return { tempDir, workspaceDir, skillsDir };
+  return { tempDir, workspaceDir, skillsDir, agentSkillDir, otherAgentSkillDir };
 }
 
 function cleanupHarness(tempDir: string): void {
@@ -75,6 +116,7 @@ function runAll(): void {
 
     const prompt = loader.generateSkillCatalogPrompt({
       workspaceDir: harness.workspaceDir,
+      agentSkillDir: harness.agentSkillDir,
       toolsetName: 'windows-dev',
       capabilities: {
         canListOrViewSkills: true,
@@ -83,7 +125,11 @@ function runAll(): void {
     });
     assert.match(prompt, /release-helper/);
     assert.match(prompt, /power-shell/);
+    assert.match(prompt, /browser-evidence/);
     assert.match(prompt, /Inspect candidate skills before inventing a workflow\./);
+    assert.match(prompt, /workspace skills are project-local/i);
+    assert.match(prompt, /agent skills are bundled with the selected agent profile/i);
+    assert.match(prompt, /global skills are shared/i);
     assert.match(prompt, /skill_manage/);
     assert.equal(prompt.includes('Detailed PowerShell body.'), false);
     assert.equal(prompt.includes('Body with detailed release steps'), false);
@@ -99,10 +145,14 @@ function runAll(): void {
       },
     });
     assert.match(readOnlyPrompt, /Approved skills are available as on-demand references\./);
+    assert.match(readOnlyPrompt, /workspace skills are project-local/i);
+    assert.match(readOnlyPrompt, /agent skills are bundled with the selected agent profile/i);
     assert.doesNotMatch(readOnlyPrompt, /\bskill_manage\b|create draft|\bapprove\b/i);
 
     const skill = loader.getSkillByName('release-helper', {
       workspaceDir: harness.workspaceDir,
+      agentSkillDir: harness.agentSkillDir,
+      includeWorkspaceSkills: true,
       toolsetName: 'windows-dev',
     });
     assert.ok(skill);
@@ -110,22 +160,48 @@ function runAll(): void {
 
     const filteredOut = loader.getSkillByName('release-helper', {
       workspaceDir: harness.workspaceDir,
+      agentSkillDir: harness.agentSkillDir,
+      includeWorkspaceSkills: true,
       toolsetName: 'windows-safe',
     });
     assert.equal(filteredOut, undefined);
 
     const hiddenDeprecated = loader.getSkillByName('deprecated-helper', {
       workspaceDir: harness.workspaceDir,
+      agentSkillDir: harness.agentSkillDir,
+      includeWorkspaceSkills: true,
       toolsetName: 'windows-dev',
     });
     assert.equal(hiddenDeprecated, undefined);
     const visibleDeprecated = loader.getSkillByName('deprecated-helper', {
       workspaceDir: harness.workspaceDir,
+      agentSkillDir: harness.agentSkillDir,
+      includeWorkspaceSkills: true,
       toolsetName: 'windows-dev',
       includeDeprecated: true,
     });
     assert.ok(visibleDeprecated);
     assert.equal(visibleDeprecated?.reviewStatus, 'deprecated');
+
+    const agentSkill = loader.getSkillByName('browser-evidence', {
+      workspaceDir: harness.workspaceDir,
+      agentSkillDir: harness.agentSkillDir,
+      toolsetName: 'windows-dev',
+    });
+    assert.ok(agentSkill);
+    assert.equal(agentSkill?.source, 'agent');
+    assert.match(agentSkill?.content ?? '', /Agent-scoped browser evidence body/);
+
+    const agentOnlyCatalog = loader.getSkillCatalog({
+      workspaceDir: harness.workspaceDir,
+      agentSkillDir: harness.agentSkillDir,
+      includeGlobalSkills: false,
+      toolsetName: 'windows-dev',
+    });
+    assert.equal(agentOnlyCatalog.some((entry) => entry.name === 'browser-evidence'), true);
+    assert.equal(agentOnlyCatalog.some((entry) => entry.name === 'power-shell'), false);
+    assert.equal(agentOnlyCatalog.some((entry) => entry.name === 'release-helper'), true);
+    assert.equal(agentOnlyCatalog.some((entry) => entry.name === 'coding-only'), false);
 
     const emptyLoader = new SkillLoader();
     const emptyReadOnlyPrompt = emptyLoader.generateSkillCatalogPrompt({

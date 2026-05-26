@@ -1,0 +1,63 @@
+# Hook Configuration for DPAgent
+#
+# Place this file at the root of your DPAgent workspace (next to config.yaml).
+# The DPAgent runtime loads hooks automatically on startup.
+#
+# Each hook entry subscribes to one or more hook events and points to a
+# CommonJS module that exports handler functions.
+#
+# ── Schema ────────────────────────────────────────────────────
+# hooks:
+#   - id: string          # Unique hook identifier
+#     events: string[]    # Hook events to subscribe to
+#     module: string      # Path to hook module (relative to workspace root)
+#     priority: number    # Execution priority (lower = runs first, default 100)
+#     enabled: boolean    # Whether this hook is active (default true)
+#
+# ── Available Hook Events ─────────────────────────────────────
+#   onTurnStart        — A new agent turn is starting
+#   onInputToLLM       — Input prepared, about to send to LLM (can block)
+#   onLLMResponse      — LLM response received, before processing
+#   onBeforeToolCall   — Before a tool is executed (can block → tool_error)
+#   onAfterToolCall    — After a tool completes, before result is recorded
+#   onTurnEnd          — Turn ended (success, error, or cancel)
+#
+# ── Hook Handler Interface ────────────────────────────────────
+# Each hook module must export an object with one or more handler methods:
+#
+#   exports.default = {
+#     async onTurnStart(ctx) { return { action: 'continue' }; },
+#     async onBeforeToolCall(ctx) {
+#       if (ctx.toolName === 'shell_execute') {
+#         return { action: 'block', error: 'Shell execution is blocked' };
+#       }
+#       return { action: 'continue' };
+#     },
+#   };
+#
+# ── Block Semantics ───────────────────────────────────────────
+#   onBeforeToolCall blocked → tool_error JSON injected into message stream
+#   onInputToLLM blocked     → assistant response with error message
+#   onTurnStart blocked      → turn aborted with message
+#
+# ── Error Isolation ───────────────────────────────────────────
+# User hook exceptions are caught and logged. They never break the system
+# pipeline. System hooks (registered via registerSystemHook) run after
+# user hooks and represent default processing.
+
+# Example configuration:
+#
+# hooks:
+#   - id: "my-logger"
+#     events: ["onInputToLLM", "onLLMResponse"]
+#     module: "./hooks/logger.cjs"
+#     priority: 200
+#     enabled: true
+#
+#   - id: "tool-guard"
+#     events: ["onBeforeToolCall"]
+#     module: "./hooks/tool-guard.cjs"
+#     priority: 100
+#     enabled: true
+
+hooks: []

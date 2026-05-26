@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
-import { WebServer } from '../../src/web/server/WebServer.js';
+import { createWebServerDouble } from './helpers/web-server-harness.js';
 
 interface EmittedMessage {
   ws: object;
@@ -16,7 +16,7 @@ interface DispatchHarness {
 }
 
 function createHarness(): DispatchHarness {
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   const emitted: EmittedMessage[] = [];
   const lifecycle: string[] = [];
 
@@ -60,22 +60,72 @@ async function testHandleWSMessageChatDelegatesToChatLifecycle(): Promise<void> 
   ]);
 }
 
-async function testHandleWSMessageChatResumeDelegatesToDedicatedHandler(): Promise<void> {
+async function testHandleWSMessageChatPreservesFileReferences(): Promise<void> {
   const harness = createHarness();
-  let capturedWs: unknown = null;
+  let captured: unknown[] | null = null;
 
-  harness.server.handleChatResumeMessage = (ws: unknown) => {
-    harness.lifecycle.push('handleChatResumeMessage');
-    capturedWs = ws;
+  harness.server.handleChatMessage = async (ws: unknown, request: unknown) => {
+    harness.lifecycle.push('handleChatMessage');
+    captured = [ws, request];
   };
 
   await harness.server.handleWSMessage(harness.openSocket, {
-    type: 'chat_resume',
-    data: null,
+    type: 'chat',
+    data: {
+      prompt: 'Read files',
+      sessionId: 'sess-1',
+      fileReferences: ['D:\\repo\\README.md'],
+    },
   });
 
-  assert.deepEqual(harness.lifecycle, ['handleChatResumeMessage']);
-  assert.equal(capturedWs, harness.openSocket);
+  assert.deepEqual(harness.lifecycle, ['handleChatMessage']);
+  assert.deepEqual(captured, [
+    harness.openSocket,
+    {
+      prompt: 'Read files',
+      sessionId: 'sess-1',
+      fileReferences: ['D:\\repo\\README.md'],
+    },
+  ]);
+}
+
+async function testHandleWSMessageChatPreservesExternalMcpServers(): Promise<void> {
+  const harness = createHarness();
+  let captured: unknown[] | null = null;
+
+  harness.server.handleChatMessage = async (ws: unknown, request: unknown) => {
+    harness.lifecycle.push('handleChatMessage');
+    captured = [ws, request];
+  };
+
+  const externalMcpServers = [
+    {
+      name: 'teamtool',
+      type: 'stdio',
+      command: 'node',
+      args: ['teamtool.js'],
+      env: { TOKEN: 'secret' },
+    },
+  ];
+
+  await harness.server.handleWSMessage(harness.openSocket, {
+    type: 'chat',
+    data: {
+      prompt: 'Run TeamTool task',
+      sessionId: 'sess-1',
+      externalMcpServers,
+    },
+  });
+
+  assert.deepEqual(harness.lifecycle, ['handleChatMessage']);
+  assert.deepEqual(captured, [
+    harness.openSocket,
+    {
+      prompt: 'Run TeamTool task',
+      sessionId: 'sess-1',
+      externalMcpServers,
+    },
+  ]);
 }
 
 async function testHandleWSMessageCancelDelegatesWithDefaultPayload(): Promise<void> {
@@ -93,42 +143,6 @@ async function testHandleWSMessageCancelDelegatesWithDefaultPayload(): Promise<v
   });
 
   assert.deepEqual(harness.lifecycle, ['handleCancelMessage']);
-  assert.deepEqual(captured, [harness.openSocket, {}]);
-}
-
-async function testHandleWSMessageResumeFailedTurnDelegatesWithDefaultPayload(): Promise<void> {
-  const harness = createHarness();
-  let captured: unknown[] | null = null;
-
-  harness.server.handleResumeFailedTurnMessage = async (ws: unknown, request: unknown) => {
-    harness.lifecycle.push('handleResumeFailedTurnMessage');
-    captured = [ws, request];
-  };
-
-  await harness.server.handleWSMessage(harness.openSocket, {
-    type: 'resume_failed_turn',
-    data: null,
-  });
-
-  assert.deepEqual(harness.lifecycle, ['handleResumeFailedTurnMessage']);
-  assert.deepEqual(captured, [harness.openSocket, {}]);
-}
-
-async function testHandleWSMessageDismissInterruptedArtifactDelegatesWithDefaultPayload(): Promise<void> {
-  const harness = createHarness();
-  let captured: unknown[] | null = null;
-
-  harness.server.handleDismissInterruptedArtifactMessage = (ws: unknown, request: unknown) => {
-    harness.lifecycle.push('handleDismissInterruptedArtifactMessage');
-    captured = [ws, request];
-  };
-
-  await harness.server.handleWSMessage(harness.openSocket, {
-    type: 'dismiss_interrupted_artifact',
-    data: undefined,
-  });
-
-  assert.deepEqual(harness.lifecycle, ['handleDismissInterruptedArtifactMessage']);
   assert.deepEqual(captured, [harness.openSocket, {}]);
 }
 
@@ -168,6 +182,91 @@ async function testHandleWSMessageStopAutoLoopDelegatesWithDefaultPayload(): Pro
   assert.deepEqual(captured, [harness.openSocket, {}]);
 }
 
+async function testHandleWSMessageRunningInputEnqueueDelegatesWithPayload(): Promise<void> {
+  const harness = createHarness();
+  let captured: unknown[] | null = null;
+
+  harness.server.handleRunningInputEnqueueMessage = (ws: unknown, request: unknown) => {
+    harness.lifecycle.push('handleRunningInputEnqueueMessage');
+    captured = [ws, request];
+  };
+
+  await harness.server.handleWSMessage(harness.openSocket, {
+    type: 'running_input_enqueue',
+    data: {
+      prompt: 'Please use this when safe',
+      fileReferences: ['D:\\repo\\README.md'],
+      context: { scope: 'session', namespace: 'sess-1' },
+    },
+  });
+
+  assert.deepEqual(harness.lifecycle, ['handleRunningInputEnqueueMessage']);
+  assert.deepEqual(captured, [
+    harness.openSocket,
+    {
+      prompt: 'Please use this when safe',
+      fileReferences: ['D:\\repo\\README.md'],
+      context: { scope: 'session', namespace: 'sess-1' },
+    },
+  ]);
+}
+
+async function testHandleWSMessageRunningInputInsertDelegatesWithPayload(): Promise<void> {
+  const harness = createHarness();
+  let captured: unknown[] | null = null;
+
+  harness.server.handleRunningInputInsertMessage = (ws: unknown, request: unknown) => {
+    harness.lifecycle.push('handleRunningInputInsertMessage');
+    captured = [ws, request];
+  };
+
+  await harness.server.handleWSMessage(harness.openSocket, {
+    type: 'running_input_insert',
+    data: {
+      itemId: 'rin-1',
+      runId: 'run-1',
+      context: { scope: 'session', namespace: 'sess-1' },
+    },
+  });
+
+  assert.deepEqual(harness.lifecycle, ['handleRunningInputInsertMessage']);
+  assert.deepEqual(captured, [
+    harness.openSocket,
+    {
+      itemId: 'rin-1',
+      runId: 'run-1',
+      context: { scope: 'session', namespace: 'sess-1' },
+    },
+  ]);
+}
+
+async function testHandleWSMessageRunningInputCancelDelegatesWithPayload(): Promise<void> {
+  const harness = createHarness();
+  let captured: unknown[] | null = null;
+
+  harness.server.handleRunningInputCancelMessage = (ws: unknown, request: unknown) => {
+    harness.lifecycle.push('handleRunningInputCancelMessage');
+    captured = [ws, request];
+  };
+
+  await harness.server.handleWSMessage(harness.openSocket, {
+    type: 'running_input_cancel',
+    data: {
+      itemId: 'rin-1',
+      context: { scope: 'session', namespace: 'sess-1' },
+    },
+  });
+
+  assert.deepEqual(harness.lifecycle, ['handleRunningInputCancelMessage']);
+  assert.deepEqual(captured, [
+    harness.openSocket,
+    {
+      itemId: 'rin-1',
+      context: { scope: 'session', namespace: 'sess-1' },
+    },
+  ]);
+}
+
 async function testHandleWSMessagePingDelegatesToDedicatedHandler(): Promise<void> {
   const harness = createHarness();
   const pingData = { timestamp: 12345 };
@@ -185,6 +284,56 @@ async function testHandleWSMessagePingDelegatesToDedicatedHandler(): Promise<voi
 
   assert.deepEqual(harness.lifecycle, ['handlePingMessage']);
   assert.deepEqual(captured, [harness.openSocket, pingData]);
+}
+
+async function testTextOnlySocketAllowsOnlyTextMessages(): Promise<void> {
+  const harness = createHarness();
+  harness.server.websocketScopes = new WeakMap([
+    [
+      harness.openSocket as any,
+      {
+        mode: 'shared_ls',
+        wssId: 'text-wss',
+        clientKind: 'web',
+        sessionId: 'sess-1',
+        tokenHash: 'hash-1',
+        shareToken: 'share-token-1',
+        shareVersion: 1,
+        transportMode: 'text',
+      },
+    ],
+  ]);
+  let captured: unknown[] | null = null;
+  harness.server.handleTextAskMessage = async (ws: unknown, request: unknown) => {
+    harness.lifecycle.push('handleTextAskMessage');
+    captured = [ws, request];
+  };
+
+  await harness.server.handleWSMessage(harness.openSocket, {
+    type: 'ask_text',
+    data: {
+      text: 'hello',
+      clientMessageId: 'client-1',
+    },
+  });
+  await harness.server.handleWSMessage(harness.openSocket, {
+    type: 'chat',
+    data: {
+      prompt: 'must be rejected',
+      sessionId: 'sess-1',
+    },
+  });
+
+  assert.deepEqual(harness.lifecycle, ['handleTextAskMessage', 'emit:error']);
+  assert.deepEqual(captured, [
+    harness.openSocket,
+    {
+      text: 'hello',
+      clientMessageId: 'client-1',
+    },
+  ]);
+  assert.equal(harness.emitted[0]?.type, 'error');
+  assert.equal((harness.emitted[0]?.data as any).code, 'TEXT_WS_UNSUPPORTED_MESSAGE');
 }
 
 async function testHandleWSMessagePingPreservesTopLevelTimestamp(): Promise<void> {
@@ -223,24 +372,6 @@ async function testHandleWSMessageUnknownTypeIsSafeNoop(): Promise<void> {
 
   assert.deepEqual(harness.lifecycle, []);
   assert.deepEqual(harness.emitted, []);
-}
-
-async function testHandleChatResumeMessageStillEmitsDisabledError(): Promise<void> {
-  const harness = createHarness();
-
-  harness.server.handleChatResumeMessage(harness.openSocket);
-
-  assert.deepEqual(harness.lifecycle, ['emit:error']);
-  assert.deepEqual(harness.emitted, [
-    {
-      ws: harness.openSocket,
-      type: 'error',
-      data: {
-        code: 'chat_resume_disabled',
-        error: 'chat_resume is disabled for now. Please stop and send a new message.',
-      },
-    },
-  ]);
 }
 
 async function testHandlePingMessageEmitsPongWithProvidedTimestamp(): Promise<void> {
@@ -317,16 +448,18 @@ async function testHandlePingMessageEmitsPongWithTopLevelTimestamp(): Promise<vo
 
 async function runAll(): Promise<void> {
   await testHandleWSMessageChatDelegatesToChatLifecycle();
-  await testHandleWSMessageChatResumeDelegatesToDedicatedHandler();
+  await testHandleWSMessageChatPreservesFileReferences();
+  await testHandleWSMessageChatPreservesExternalMcpServers();
   await testHandleWSMessageCancelDelegatesWithDefaultPayload();
-  await testHandleWSMessageResumeFailedTurnDelegatesWithDefaultPayload();
-  await testHandleWSMessageDismissInterruptedArtifactDelegatesWithDefaultPayload();
   await testHandleWSMessagePlanInputResponseDelegatesWithDefaultPayload();
   await testHandleWSMessageStopAutoLoopDelegatesWithDefaultPayload();
+  await testHandleWSMessageRunningInputEnqueueDelegatesWithPayload();
+  await testHandleWSMessageRunningInputInsertDelegatesWithPayload();
+  await testHandleWSMessageRunningInputCancelDelegatesWithPayload();
   await testHandleWSMessagePingDelegatesToDedicatedHandler();
+  await testTextOnlySocketAllowsOnlyTextMessages();
   await testHandleWSMessagePingPreservesTopLevelTimestamp();
   await testHandleWSMessageUnknownTypeIsSafeNoop();
-  await testHandleChatResumeMessageStillEmitsDisabledError();
   await testHandlePingMessageEmitsPongWithProvidedTimestamp();
   await testHandlePingMessageBackfillsMissingTimestamp();
   await testHandlePingMessageEmitsPongWithTopLevelTimestamp();

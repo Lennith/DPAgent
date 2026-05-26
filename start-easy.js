@@ -15,14 +15,18 @@ function ensureBootConfig() {
     throw new Error(`Missing config.yaml: ${CONFIG_PATH}`);
   }
   const parsed = yaml.load(fs.readFileSync(CONFIG_PATH, 'utf8')) || {};
-  if (!parsed.api || typeof parsed.api !== 'object') {
-    throw new Error('Invalid config.yaml: missing api section.');
+  const defaultProfileId = String(parsed.llmProfiles?.defaultProfileId || '').trim();
+  const profiles = Array.isArray(parsed.llmProfiles?.profiles) ? parsed.llmProfiles.profiles : [];
+  const defaultProfile = profiles.find((profile) => profile?.id === defaultProfileId) || profiles[0] || null;
+  if (!defaultProfile && (!parsed.api || typeof parsed.api !== 'object')) {
+    throw new Error('Invalid config.yaml: missing llmProfiles section.');
   }
   if (!parsed.agent || typeof parsed.agent !== 'object') {
     throw new Error('Invalid config.yaml: missing agent section.');
   }
-  if (!Number.isFinite(parsed.api.maxOutputTokens) || parsed.api.maxOutputTokens <= 0) {
-    throw new Error('Invalid config.yaml: api.maxOutputTokens must be a positive number.');
+  const maxOutputTokens = defaultProfile?.maxOutputTokens ?? parsed.api?.maxOutputTokens;
+  if (!Number.isFinite(maxOutputTokens) || maxOutputTokens <= 0) {
+    throw new Error('Invalid config.yaml: llmProfiles default profile maxOutputTokens must be a positive number.');
   }
 }
 
@@ -106,7 +110,7 @@ async function main() {
     stdio: 'inherit',
     env: {
       ...process.env,
-      MINIMAX_ALLOW_MISSING_API_KEY_AT_BOOT: '1',
+      DPAGENT_ALLOW_MISSING_API_KEY_AT_BOOT: '1',
     },
   });
 

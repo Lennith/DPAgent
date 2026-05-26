@@ -6,7 +6,7 @@ import type {
   ToolCall,
   ToolProtocolSanitizeResult,
 } from '../types.js';
-import { buildToolProtocolFrames } from './tool-protocol.js';
+import { analyzeAssistantToolBundle, prepareToolProtocol } from './tool-protocol-analyzer.js';
 
 const DEFAULT_CONTEXT_MAX_CHARS = Number.MAX_SAFE_INTEGER;
 const DEFAULT_KEEP_LATEST_COUNT = 24;
@@ -63,35 +63,12 @@ export function sanitizeMessagesForToolProtocol(messages: Message[]): ToolProtoc
         continue;
       }
 
-      const expectedIds = new Set(
-        toolCalls.map((toolCall) => toolCall.id?.trim()).filter((id): id is string => Boolean(id))
-      );
-      const followingTools: Message[] = [];
-      let j = i + 1;
-      while (j < messages.length && messages[j].role === 'tool') {
-        followingTools.push(messages[j]);
-        j += 1;
-      }
+      const bundle = analyzeAssistantToolBundle(messages, i);
 
-      const matchedIds = new Set<string>();
-      let validSequence = expectedIds.size === toolCalls.length && followingTools.length >= toolCalls.length;
-      const expectedToolResults = followingTools.slice(0, toolCalls.length);
-      for (const toolMessage of expectedToolResults) {
-        const id = toolMessage.toolCallId?.trim();
-        if (!id || !expectedIds.has(id) || matchedIds.has(id)) {
-          validSequence = false;
-          break;
-        }
-        matchedIds.add(id);
-      }
-      if (matchedIds.size !== expectedIds.size) {
-        validSequence = false;
-      }
-
-      if (validSequence) {
+      if (bundle.valid) {
         sanitized.push(message);
-        sanitized.push(...expectedToolResults);
-        i += expectedToolResults.length;
+        sanitized.push(...bundle.orderedToolResults);
+        i += bundle.resultCount;
         continue;
       }
 
@@ -101,13 +78,13 @@ export function sanitizeMessagesForToolProtocol(messages: Message[]): ToolProtoc
         ...message,
         toolCalls: undefined,
       });
-      sanitized.push(buildOrphanToolCallNote(toolCalls, followingTools.length));
-      for (const toolMessage of followingTools) {
+      sanitized.push(buildOrphanToolCallNote(toolCalls, bundle.followingTools.length));
+      for (const toolMessage of bundle.followingTools) {
         correctedCount += 1;
         orphanToolResultFixed += 1;
         sanitized.push(buildOrphanToolResultNote(toolMessage));
       }
-      i = j - 1;
+      i += bundle.followingTools.length;
       continue;
     }
 
@@ -333,7 +310,7 @@ export function prepareMessagesForModel(
   const trim = trimMessagesForContextWindow(preTrimSanitized.messages, options?.trimOptions);
   const postTrimSanitized = sanitizeMessagesForToolProtocol(trim.messages);
   // Protocol metrics reflect the post-sanitize replay shape consumed by providers.
-  const toolProtocol = buildToolProtocolFrames(postTrimSanitized.messages);
+  const toolProtocol = prepareToolProtocol(postTrimSanitized.messages);
   return {
     preTrimSanitized,
     trim,

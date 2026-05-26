@@ -3,19 +3,40 @@ import { useWebSocket } from './hooks/useWebSocket';
 import { Sidebar } from './components/sidebar/Sidebar';
 import { ChatContainer } from './components/chat/ChatContainer';
 import { PendingPlanInputBanner } from './components/chat/PendingPlanInputBanner.js';
-import { MemoryOrganizeControl } from './components/chat/MemoryOrganizeControl.js';
 import { ConfigModal } from './components/ConfigModal';
 import { RightToolbar } from './components/toolbar/RightToolbar.js';
-import { GovernanceAuditList } from './components/subagent/GovernanceAuditList.js';
+import { WorkspaceGovernanceSettings } from './components/settings/WorkspaceGovernanceSettings.js';
+import { LocalFilePickerModal } from './components/common/LocalFilePickerModal.js';
 import AutomationCenter from './components/automation/AutomationCenter.js';
 import { useThemeConfig } from './components/providers/ThemeProvider.js';
 import { COMPOSER_DRAFT_KEY } from './composer-input-state.js';
 import { resolveMcpIndicatorState } from './mcp-status.js';
 import { useI18n } from './i18n/index.js';
 import { FALLBACK_WORKSPACE_DIR, normalizeWorkspaceDir } from './workspace-preferences.js';
+import {
+  collectRecentWorkspaceDirsFromSessions,
+} from './workspace-modal-utils.js';
+import LoginPage from './components/LoginPage.js';
 import { useAppWorkspaceState } from './hooks/useAppWorkspaceState.js';
 import { useAppSessionController } from './hooks/useAppSessionController.js';
 import { useAppGovernanceState } from './hooks/useAppGovernanceState.js';
+import { useRemoteAuthBootstrap } from './hooks/useRemoteAuthBootstrap.js';
+import { appendShareToken, getShareTokenFromLocation } from './shared-access.js';
+import { copyShareUrlToClipboard } from './share-copy-feedback.js';
+import {
+  createSessionShare,
+  fetchSessionShareStatus,
+  revokeSessionShare,
+} from './session-rest-api.js';
+
+const NARROW_TOOLBAR_MEDIA = '(max-width: 1279px), (max-aspect-ratio: 11/10)';
+
+function isNarrowToolbarLayout(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return window.matchMedia(NARROW_TOOLBAR_MEDIA).matches;
+}
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -31,6 +52,22 @@ interface AppErrorBoundaryLabels {
 
 interface AppErrorBoundaryProps {
   labels: AppErrorBoundaryLabels;
+}
+
+function ToolbarExpandIcon() {
+  return (
+    <svg
+      className="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m15 6-6 6 6 6" />
+    </svg>
+  );
 }
 
 class AppErrorBoundary extends React.Component<React.PropsWithChildren<AppErrorBoundaryProps>, ErrorBoundaryState> {
@@ -92,18 +129,79 @@ class AppErrorBoundary extends React.Component<React.PropsWithChildren<AppErrorB
   }
 }
 
-const WS_URL = (() => {
+function buildWsUrl(shareToken: string | null = null): string {
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${wsProtocol}//${window.location.host}/ws`;
-})();
+  return appendShareToken(`${wsProtocol}//${window.location.host}/ws`, shareToken);
+}
 
 export default function App() {
   const { t } = useI18n();
-  const { isConnected, send, connect, subscribe, toasts, addToast, dismissToast } = useWebSocket(WS_URL);
+  const shareToken = getShareTokenFromLocation();
+  const auth = useRemoteAuthBootstrap();
+  if (shareToken) {
+    return (
+      <AppErrorBoundary
+        labels={{
+          title: t('app.initFailed.title'),
+          fallbackMessage: t('app.initFailed.fallbackMessage'),
+          reload: t('app.initFailed.reload'),
+          goHome: t('app.initFailed.goHome'),
+        }}
+      >
+        <AuthenticatedApp shareToken={shareToken} />
+      </AppErrorBoundary>
+    );
+  }
+
+  if (!auth.checked) {
+    return null;
+  }
+
+  if (auth.required && !auth.authenticated) {
+    return <LoginPage onLoginSuccess={auth.markAuthenticated} />;
+  }
+
+  return (
+    <AppErrorBoundary
+      labels={{
+        title: t('app.initFailed.title'),
+        fallbackMessage: t('app.initFailed.fallbackMessage'),
+        reload: t('app.initFailed.reload'),
+        goHome: t('app.initFailed.goHome'),
+      }}
+    >
+      <AuthenticatedApp shareToken={null} />
+    </AppErrorBoundary>
+  );
+}
+
+function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
+  const { t } = useI18n();
+  const isSharedMode = Boolean(shareToken);
+  const websocketLabels = useMemo(
+    () => ({
+      reconnecting: (attempt: number, max: number) =>
+        t('app.websocket.reconnecting', { attempt, max }),
+      connectionRestored: t('app.websocket.connectionRestored'),
+      connectionFailedMax: (max: number) => t('app.websocket.connectionFailedMax', { max }),
+    }),
+    [t]
+  );
+  const { isConnected, send, connect, subscribe, toasts, addToast, dismissToast } = useWebSocket(
+    buildWsUrl(shareToken),
+    { labels: websocketLabels }
+  );
   const theme = useThemeConfig();
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'chat' | 'automations'>('chat');
-  const [showSubAgentPanel, setShowSubAgentPanel] = useState(true);
+  const [showSubAgentPanel, setShowSubAgentPanel] = useState(() => {
+    return !isNarrowToolbarLayout();
+  });
+  const [workspaceBrowserOpen, setWorkspaceBrowserOpen] = useState(false);
+  const [shareStatusBySession, setShareStatusBySession] = useState<Record<string, { active: boolean; expiresAt?: string }>>({});
+  const [shareModalUrl, setShareModalUrl] = useState<string | null>(null);
+  const [shareInvalidated, setShareInvalidated] = useState(false);
+  const [shareBootstrapChecked, setShareBootstrapChecked] = useState(!shareToken);
   const hasConnectedOnceRef = useRef(false);
   const needsReconnectHydrationRef = useRef(false);
 
@@ -155,6 +253,10 @@ export default function App() {
       ),
     [activeView, currentSessionId, sessionController.pendingPlanInputSessions]
   );
+  const recentWorkspaceDirs = useMemo(
+    () => collectRecentWorkspaceDirsFromSessions(sessionController.sessions, 3),
+    [sessionController.sessions]
+  );
 
   const handleNewSession = useCallback(() => {
     setActiveView('chat');
@@ -178,15 +280,152 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const query = window.matchMedia('(max-width: 1279px), (max-aspect-ratio: 11/10)');
-    const collapseToolbarForNarrowLayout = (): void => {
-      if (query.matches) {
-        setShowSubAgentPanel(false);
+    if (!shareToken) {
+      return;
+    }
+    let canceled = false;
+    let expiryTimer: number | undefined;
+    void fetch(`/api/share/${encodeURIComponent(shareToken)}`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error('share_invalid');
+        }
+        return (await response.json()) as { sessionId?: string; expiresAt?: string };
+      })
+      .then((payload) => {
+        if (canceled) {
+          return;
+        }
+        const sessionId = String(payload.sessionId ?? '').trim();
+        if (!sessionId) {
+          throw new Error('share_invalid');
+        }
+        setCurrentSessionId(sessionId);
+        setShareBootstrapChecked(true);
+        void sessionController.fetchSessions();
+        void sessionController.loadSessionMessages(sessionId);
+        const expiresAtMs = Date.parse(String(payload.expiresAt ?? ''));
+        if (Number.isFinite(expiresAtMs)) {
+          expiryTimer = window.setTimeout(
+            () => setShareInvalidated(true),
+            Math.max(0, expiresAtMs - Date.now())
+          );
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setShareInvalidated(true);
+          setShareBootstrapChecked(true);
+        }
+      });
+    return () => {
+      canceled = true;
+      if (expiryTimer !== undefined) {
+        window.clearTimeout(expiryTimer);
       }
     };
-    collapseToolbarForNarrowLayout();
-    query.addEventListener('change', collapseToolbarForNarrowLayout);
-    return () => query.removeEventListener('change', collapseToolbarForNarrowLayout);
+  }, [sessionController.fetchSessions, sessionController.loadSessionMessages, shareToken]);
+
+  useEffect(() => {
+    if (isSharedMode || !currentSessionId) {
+      return;
+    }
+    let canceled = false;
+    void fetchSessionShareStatus(currentSessionId)
+      .then((status) => {
+        if (!canceled) {
+          setShareStatusBySession((prev) => ({
+            ...prev,
+            [currentSessionId]: status,
+          }));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      canceled = true;
+    };
+  }, [currentSessionId, isSharedMode]);
+
+  useEffect(() => {
+    if (!isSharedMode) {
+      return undefined;
+    }
+    return subscribe('share_invalidated', () => {
+      setShareInvalidated(true);
+      addToast({
+        type: 'error',
+        message: 'Shared session access has expired.',
+        autoDismiss: false,
+      });
+    });
+  }, [addToast, isSharedMode, subscribe]);
+
+  const handleToggleShare = useCallback(async () => {
+    if (!currentSessionId || isSharedMode) {
+      return;
+    }
+    const current = shareStatusBySession[currentSessionId];
+    try {
+      if (current?.active) {
+        await revokeSessionShare(currentSessionId);
+        setShareStatusBySession((prev) => ({
+          ...prev,
+          [currentSessionId]: { active: false },
+        }));
+        return;
+      }
+      const created = await createSessionShare(currentSessionId);
+      setShareStatusBySession((prev) => ({
+        ...prev,
+        [currentSessionId]: created.share,
+      }));
+      setShareModalUrl(created.url);
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        autoDismiss: true,
+      });
+    }
+  }, [addToast, currentSessionId, isSharedMode, shareStatusBySession]);
+
+  const handleResyncCurrentSession = useCallback(async () => {
+    if (!currentSessionId) {
+      return;
+    }
+    try {
+      await sessionController.fetchSessions();
+      await sessionController.loadSessionMessages(currentSessionId);
+      addToast({
+        type: 'success',
+        message: t('app.session.syncSucceeded'),
+        autoDismiss: true,
+      });
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: t('app.session.syncFailed', {
+          message: error instanceof Error ? error.message : String(error),
+        }),
+        autoDismiss: true,
+      });
+    }
+  }, [addToast, currentSessionId, sessionController, t]);
+
+  const handleChatPanelClick = useCallback(() => {
+    if (!isSharedMode && showSubAgentPanel && isNarrowToolbarLayout()) {
+      setShowSubAgentPanel(false);
+    }
+  }, [isSharedMode, showSubAgentPanel]);
+
+  useEffect(() => {
+    const query = window.matchMedia(NARROW_TOOLBAR_MEDIA);
+    const syncToolbarForLayout = (): void => {
+      setShowSubAgentPanel(!query.matches);
+    };
+    syncToolbarForLayout();
+    query.addEventListener('change', syncToolbarForLayout);
+    return () => query.removeEventListener('change', syncToolbarForLayout);
   }, []);
 
   useEffect(() => {
@@ -217,16 +456,33 @@ export default function App() {
     workspaceState.confirmWorkspaceSelection,
   ]);
 
+  const handleWorkspaceBrowse = useCallback(() => {
+    setWorkspaceBrowserOpen(true);
+  }, []);
+
+  if (isSharedMode && (!shareBootstrapChecked || shareInvalidated)) {
+    return (
+      <div className="flex h-screen items-center justify-center" style={{ background: theme.colors.bg.gradient }}>
+        <div
+          className="rounded-2xl border px-6 py-5 text-center"
+          style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.secondary }}
+        >
+          <h1 className="mb-2 text-lg font-semibold" style={{ color: theme.colors.text.primary }}>
+            {shareInvalidated ? '控制已失效' : 'Loading shared session'}
+          </h1>
+          <p className="text-sm" style={{ color: theme.colors.text.secondary }}>
+            {shareInvalidated ? 'This shared link has been revoked or expired.' : 'Connecting to the shared session.'}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const currentShareStatus = currentSessionId ? shareStatusBySession[currentSessionId] : undefined;
+
   return (
-    <AppErrorBoundary
-      labels={{
-        title: t('app.initFailed.title'),
-        fallbackMessage: t('app.initFailed.fallbackMessage'),
-        reload: t('app.initFailed.reload'),
-        goHome: t('app.initFailed.goHome'),
-      }}
-    >
-      <div className="app-shell flex h-screen" style={{ background: theme.colors.bg.gradient }}>
+    <div className="app-shell flex h-screen" style={{ background: theme.colors.bg.gradient }}>
+      {!isSharedMode && (
         <Sidebar
           sessions={sessionController.sessions}
           currentSessionId={currentSessionId}
@@ -247,14 +503,15 @@ export default function App() {
           hasApiKey={workspaceState.hasApiKey}
           onOpenSettings={() => workspaceState.setShowConfigModal(true)}
         />
+      )}
 
         <div className="app-main flex-1 flex flex-col min-w-0 relative">
-          <PendingPlanInputBanner
+          {!isSharedMode && <PendingPlanInputBanner
             items={hiddenPendingPlanInputSessions}
             onOpenSession={(sessionId) => {
               void sessionController.handleSelectSession(sessionId);
             }}
-          />
+          />}
           {activeView === 'automations' ? (
             <AutomationCenter
               workspaceDir={workspaceState.workspaceDir}
@@ -268,6 +525,7 @@ export default function App() {
               <div className="app-content-frame flex-1 min-h-0 flex overflow-hidden">
                 <div
                   className="chat-panel-shell min-w-0 min-h-0 flex flex-1 flex-col rounded-[1.65rem] border"
+                  onClick={handleChatPanelClick}
                   style={{
                     borderColor: theme.colors.border.DEFAULT,
                     backgroundColor: theme.colors.bg.secondary,
@@ -280,21 +538,34 @@ export default function App() {
                     pendingPlanInput={sessionController.currentRuntime.pendingPlanInput}
                     pendingPlanInputError={sessionController.currentRuntime.pendingPlanInputError}
                     onSubmitPlanInput={sessionController.handleSubmitPlanInput}
+                    runningInputQueue={sessionController.currentRuntime.runningInputQueue}
+                    onInsertRunningInput={sessionController.handleInsertRunningInput}
+                    onEditRunningInput={sessionController.handleEditRunningInput}
+                    onCancelRunningInput={sessionController.handleCancelRunningInput}
                     input={sessionController.activeComposerInput}
                     setInput={sessionController.setActiveComposerInput}
                     onSend={sessionController.handleSend}
+                    planningState={sessionController.currentPlanningState}
+                    planModeIntent={sessionController.currentPlanModeIntent}
+                    onPlanModeIntentChange={sessionController.setCurrentPlanModeIntent}
+                    onPlanningStateChange={sessionController.setCurrentPlanningState}
+                    onExitPlanDraft={sessionController.handleExitCurrentPlanDraft}
+                    onExitPlanExecution={sessionController.handleExitCurrentPlanExecution}
                     onCancel={sessionController.handleCancelCurrentRun}
-                    onResumeInterruptedRun={sessionController.handleResumeInterruptedRun}
-                    onDismissInterruptedArtifact={sessionController.handleDismissInterruptedArtifact}
                     isRunning={sessionController.currentRuntime.isRunning}
                     isCanceling={sessionController.currentCanceling}
-                    canCancel={Boolean(sessionController.currentRuntime.runId)}
+                    isHydrating={sessionController.currentRuntime.hydrating}
+                    canCancel={Boolean(sessionController.currentRuntime.runId) && sessionController.currentRuntime.interactionState.mode !== 'observe_only'}
                     isInteractionLocked={sessionController.currentInteractionLocked}
+                    interactionState={sessionController.currentRuntime.interactionState}
+                    runningInputAckId={sessionController.currentRunningInputAckId}
+                    runningInputEditRestore={sessionController.currentRunningInputEditRestore}
                     error={sessionController.currentRuntime.error}
                     interruptedArtifact={sessionController.currentRuntime.interruptedArtifact}
                     sessionId={currentSessionId}
                     llmProfiles={workspaceState.llmProfiles}
                     llmSelection={sessionController.currentLlmSelection}
+                    currentLlmRuntime={sessionController.currentRuntime.currentLlmRuntime}
                     onChangeLlmSelection={sessionController.setCurrentSessionLlmSelection}
                     contextUtilization={
                       currentSessionId
@@ -304,10 +575,18 @@ export default function App() {
                     compressionStatus={sessionController.currentRuntime.compressionStatus}
                     currentStep={sessionController.currentRuntime.currentStep}
                     maxSteps={sessionController.currentRuntime.maxSteps}
+                    shareActive={Boolean(currentShareStatus?.active)}
+                    shareDisabled={isSharedMode || !currentSessionId}
+                    onToggleShare={isSharedMode ? undefined : handleToggleShare}
+                    onResyncSession={currentSessionId ? handleResyncCurrentSession : undefined}
+                    websocketConnected={isConnected}
+                    sendWebSocket={send}
+                    subscribeWebSocket={subscribe}
+                    showAutoLoopControl={!isSharedMode}
                   />
                 </div>
 
-                {showSubAgentPanel && (
+                {!isSharedMode && showSubAgentPanel && (
                   <div
                     className="right-toolbar-shell min-w-0 flex flex-col overflow-hidden rounded-[1.65rem] border"
                     style={{
@@ -320,26 +599,39 @@ export default function App() {
                     <RightToolbar
                       sessionId={currentSessionId}
                       todoItems={governanceState.todoItems}
+                      onResumeTodo={
+                        sessionController.currentRuntime.interactionState?.mode === 'observe_only'
+                          ? undefined
+                          : governanceState.handleResumeTodo
+                      }
+                      onDismissTodo={
+                        sessionController.currentRuntime.interactionState?.mode === 'observe_only'
+                          ? undefined
+                          : governanceState.handleDismissTodo
+                      }
                       onHide={() => setShowSubAgentPanel(false)}
                     />
                   </div>
                 )}
               </div>
 
-              {!showSubAgentPanel && (
-                <div className="toolbar-reopen-button absolute top-3 right-3 z-20">
+              {!isSharedMode && !showSubAgentPanel && (
+                <div className="toolbar-reopen-button">
                   <button
                     type="button"
                     onClick={() => setShowSubAgentPanel(true)}
-                    className="text-xs px-3 py-1.5 rounded-lg border transition-colors"
+                    className="toolbar-reopen-tab"
                     style={{
                       borderColor: theme.colors.border.DEFAULT,
                       color: theme.colors.text.secondary,
                       backgroundColor: theme.colors.bg.secondary,
                       boxShadow: theme.shadows.md,
                     }}
+                    title={t('app.subagent.showPanel')}
+                    aria-label={t('app.subagent.showPanel')}
+                    data-testid="toolbar-expand-tab"
                   >
-                    {t('app.subagent.showPanel')}
+                    <ToolbarExpandIcon />
                   </button>
                 </div>
               )}
@@ -381,7 +673,7 @@ export default function App() {
           ))}
         </div>
 
-        <ConfigModal
+        {!isSharedMode && <ConfigModal
           isOpen={workspaceState.showConfigModal}
           onClose={() => workspaceState.setShowConfigModal(false)}
           llmProfiles={workspaceState.llmProfiles}
@@ -390,28 +682,17 @@ export default function App() {
             await sessionController.fetchSessions();
           }}
           governanceSlot={
-            <div className="space-y-4">
-              <MemoryOrganizeControl
-                sessionId={currentSessionId}
-                pendingCount={governanceState.memoryPendingCount}
-                isLoading={governanceState.memoryOrganizeLoading}
-                error={governanceState.memoryOrganizeError}
-                onOrganize={governanceState.handleOrganizeMemory}
-              />
-              <div
-                className="rounded-2xl border overflow-hidden"
-                style={{
-                  borderColor: theme.colors.border.DEFAULT,
-                  backgroundColor: theme.colors.bg.secondary,
-                }}
-              >
-                <GovernanceAuditList items={governanceState.auditItems} />
-              </div>
-            </div>
+            <WorkspaceGovernanceSettings
+              sessionId={currentSessionId}
+              memoryPendingCount={governanceState.memoryPendingCount}
+              memoryOrganizeLoading={governanceState.memoryOrganizeLoading}
+              memoryOrganizeError={governanceState.memoryOrganizeError}
+              onOrganizeMemory={governanceState.handleOrganizeMemory}
+            />
           }
-        />
+        />}
 
-        {workspaceState.showWorkspaceModal && (
+        {!isSharedMode && workspaceState.showWorkspaceModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div
               className="w-[420px] max-w-[92%] rounded-2xl border p-6 shadow-2xl"
@@ -427,22 +708,67 @@ export default function App() {
                 <label className="mb-2 block text-sm" style={{ color: theme.colors.text.secondary }}>
                   {t('app.workspace.directoryLabel')}
                 </label>
-                <input
-                  data-testid="workspace-dir-input"
-                  type="text"
-                  value={workspaceState.workspaceDir}
-                  onChange={(event) => workspaceState.setWorkspaceDir(event.target.value)}
-                  placeholder="./workspace"
-                  className="w-full rounded-xl border px-4 py-2 focus:outline-none"
-                  style={{
-                    backgroundColor: theme.colors.bg.tertiary,
-                    borderColor: theme.colors.border.DEFAULT,
-                    color: theme.colors.text.primary,
-                  }}
-                />
+                <div className="flex items-center gap-2">
+                  <input
+                    data-testid="workspace-dir-input"
+                    type="text"
+                    value={workspaceState.workspaceDir}
+                    onChange={(event) => workspaceState.setWorkspaceDir(event.target.value)}
+                    placeholder="./workspace"
+                    className="w-full rounded-xl border px-4 py-2 focus:outline-none"
+                    style={{
+                      backgroundColor: theme.colors.bg.tertiary,
+                      borderColor: theme.colors.border.DEFAULT,
+                      color: theme.colors.text.primary,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleWorkspaceBrowse}
+                    className="shrink-0 rounded-xl border px-3 py-2 text-sm transition-colors"
+                    style={{
+                      borderColor: theme.colors.border.DEFAULT,
+                      backgroundColor: theme.colors.bg.tertiary,
+                      color: theme.colors.text.secondary,
+                    }}
+                    data-testid="workspace-dir-browse"
+                  >
+                    {t('app.workspace.browseButton')}
+                  </button>
+                </div>
                 <p className="mt-2 text-xs" style={{ color: theme.colors.text.muted }}>
                   {t('app.workspace.directoryHint')}
                 </p>
+                <div className="mt-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide" style={{ color: theme.colors.text.muted }}>
+                    {t('app.workspace.recentTitle')}
+                  </p>
+                  {recentWorkspaceDirs.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {recentWorkspaceDirs.map((workspaceDir) => (
+                        <button
+                          key={workspaceDir}
+                          type="button"
+                          onClick={() => workspaceState.setWorkspaceDir(workspaceDir)}
+                          className="max-w-full truncate rounded-full border px-3 py-1 text-xs transition-colors"
+                          style={{
+                            borderColor: theme.colors.border.DEFAULT,
+                            backgroundColor: theme.colors.bg.tertiary,
+                            color: theme.colors.text.secondary,
+                          }}
+                          title={workspaceDir}
+                          data-testid="workspace-recent-item"
+                        >
+                          {workspaceDir}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs" style={{ color: theme.colors.text.muted }}>
+                      {t('app.workspace.recentEmpty')}
+                    </p>
+                  )}
+                </div>
                 <label
                   htmlFor="workspace-default-toggle"
                   className="mt-3 flex cursor-pointer items-center gap-2 text-sm"
@@ -488,7 +814,75 @@ export default function App() {
             </div>
           </div>
         )}
-      </div>
-    </AppErrorBoundary>
+
+        {!isSharedMode && <LocalFilePickerModal
+          isOpen={workspaceBrowserOpen}
+          mode="directory"
+          title={t('app.workspace.selectTitle')}
+          confirmLabel={t('app.workspace.useSelected')}
+          initialPath={workspaceState.workspaceDir}
+          onClose={() => setWorkspaceBrowserOpen(false)}
+          onConfirm={(paths) => {
+            const nextPath = paths[0];
+            if (nextPath) {
+              workspaceState.setWorkspaceDir(nextPath);
+              addToast({
+                type: 'success',
+                message: t('app.workspace.browseResolved'),
+                autoDismiss: true,
+              });
+            }
+            setWorkspaceBrowserOpen(false);
+          }}
+        />}
+
+        {shareModalUrl && (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50">
+            <div
+              className="w-[520px] max-w-[92%] rounded-2xl border p-5 shadow-2xl"
+              style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.secondary }}
+            >
+              <h3 className="mb-3 text-lg font-semibold" style={{ color: theme.colors.text.primary }}>
+                {t('app.share.modalTitle')}
+              </h3>
+              <input
+                readOnly
+                value={shareModalUrl}
+                className="mb-4 w-full rounded-xl border px-3 py-2 text-sm"
+                style={{
+                  borderColor: theme.colors.border.DEFAULT,
+                  backgroundColor: theme.colors.bg.tertiary,
+                  color: theme.colors.text.primary,
+                }}
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShareModalUrl(null)}
+                  className="rounded-xl border px-4 py-2 text-sm"
+                  style={{ borderColor: theme.colors.border.DEFAULT, color: theme.colors.text.secondary }}
+                >
+                  {t('common.close')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void copyShareUrlToClipboard({
+                      url: shareModalUrl,
+                      clipboard: navigator.clipboard,
+                      addToast,
+                      t,
+                    });
+                  }}
+                  className="rounded-xl px-4 py-2 text-sm font-semibold text-white"
+                  style={{ background: theme.colors.primary.gradient }}
+                >
+                  {t('app.share.copy')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+    </div>
   );
 }

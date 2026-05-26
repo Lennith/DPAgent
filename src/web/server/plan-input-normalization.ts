@@ -49,6 +49,7 @@ export function normalizePlanInputAnswers(
       typeof raw.selectedIndex === 'number'
         ? Math.floor(raw.selectedIndex)
         : Number.parseInt(String(raw.selectedIndex ?? '').trim(), 10);
+    const hasSelectedLabelField = Object.prototype.hasOwnProperty.call(raw, 'selectedLabel');
     const selectedLabelRaw = String(raw.selectedLabel ?? '').trim();
     const freeText = String(raw.freeText ?? '').trim();
 
@@ -57,7 +58,9 @@ export function normalizePlanInputAnswers(
     let hasSelectedOption = false;
 
     if (question.options.length > 0) {
-      if (selectedIndex < 0 && selectedLabel) {
+      if (hasSelectedLabelField && !selectedLabel && freeText) {
+        selectedIndex = -1;
+      } else if (selectedIndex < 0 && selectedLabel) {
         selectedIndex = question.options.findIndex((option) => option.label === selectedLabel);
       }
       if (selectedIndex >= 0 && selectedIndex < question.options.length) {

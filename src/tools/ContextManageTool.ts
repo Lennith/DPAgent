@@ -6,6 +6,7 @@ export interface ContextManageToolOptions {
   contextManager: ContextManager;
   resolveActiveContext: () => ContextRef | null;
   resolveActiveTurnId: () => string | null;
+  readOnly?: boolean;
 }
 
 function normalizeScope(value: unknown): ContextScope | null {
@@ -43,6 +44,7 @@ const READ_ONLY_CONTEXT_STATE_KEYS = new Set([
   'compressedHistoryContext',
   'autoLoopConfig',
   'agentInjectionState',
+  'planningState',
 ]);
 
 function isReservedContextStateKey(key: string): boolean {
@@ -60,12 +62,14 @@ export class ContextManageTool extends Tool {
   private readonly contextManager: ContextManager;
   private readonly resolveActiveContext: () => ContextRef | null;
   private readonly resolveActiveTurnId: () => string | null;
+  private readonly readOnly: boolean;
 
   constructor(options: ContextManageToolOptions) {
     super();
     this.contextManager = options.contextManager;
     this.resolveActiveContext = options.resolveActiveContext;
     this.resolveActiveTurnId = options.resolveActiveTurnId;
+    this.readOnly = options.readOnly === true;
   }
 
   get name(): string {
@@ -77,12 +81,13 @@ export class ContextManageTool extends Tool {
   }
 
   get parameters(): Record<string, unknown> {
+    const actionEnum = this.readOnly ? ['read', 'list', 'summarize'] : ['read', 'write', 'delete', 'list', 'summarize'];
     return {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['read', 'write', 'delete', 'list', 'summarize'],
+          enum: actionEnum,
           description: 'Action to perform. read/list/summarize inspect the current context state, while write/delete mutate structured context keys only.',
         },
         scope: {
@@ -196,6 +201,9 @@ export class ContextManageTool extends Tool {
         );
       }
       case 'write': {
+        if (this.readOnly) {
+          return errorResult('context_manage is read-only in the current planning phase');
+        }
         const targetResult = this.resolveContext(args);
         if (!targetResult.ok) {
           return errorResult(targetResult.error);
@@ -259,6 +267,9 @@ export class ContextManageTool extends Tool {
         );
       }
       case 'delete': {
+        if (this.readOnly) {
+          return errorResult('context_manage is read-only in the current planning phase');
+        }
         const targetResult = this.resolveContext(args);
         if (!targetResult.ok) {
           return errorResult(targetResult.error);

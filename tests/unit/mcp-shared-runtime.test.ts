@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MiniMaxAgent } from '../../src/index.js';
+import { DPAgent } from '../../src/index.js';
 import { MCPConnector, SharedMcpRuntimePool } from '../../src/mcp/index.js';
 import type { AgentConfig } from '../../src/types.js';
 
@@ -28,19 +28,31 @@ function cleanupHarness(tempDir: string): void {
 
 function createConfig(harness: ReturnType<typeof createHarness>): Partial<AgentConfig> {
   return {
-    api: {
-      apiKey: 'sk-cp-test-api-key-12345678901234567890',
-      apiBase: 'https://api.minimaxi.com',
-      model: 'MiniMax-M2.7',
-      provider: 'anthropic',
-      maxOutputTokens: 32768,
+    llmProfiles: {
+      defaultProfileId: 'default',
+      profiles: [
+        {
+          id: 'default',
+          name: 'Default',
+          apiKey: 'sk-cp-test-api-key-12345678901234567890',
+          apiBase: 'https://api.minimaxi.com',
+          defaultModel: 'MiniMax-M2.7',
+          provider: 'anthropic',
+          maxOutputTokens: 32768,
+          enabled: true,
+          capabilities: {
+            modelDiscovery: true,
+            reasoningEffort: false,
+            thinkingBudget: true,
+          },
+        },
+      ],
     },
     agent: {
       workspaceDir: harness.workspaceDir,
       runtimeDataDir: harness.runtimeDir,
       contextDir: harness.contextDir,
       defaultToolset: 'full-access',
-      skillWriteMode: 'auto',
       globalAgentsDir: path.join(harness.tempDir, 'agents'),
       maxSteps: 10,
       tokenLimit: 40000,
@@ -88,8 +100,8 @@ async function testAgentsReuseSingleSharedMcpConnection(): Promise<void> {
 
   try {
     const config = createConfig(harness);
-    const first = new MiniMaxAgent({ config });
-    const second = new MiniMaxAgent({ config });
+    const first = new DPAgent({ config });
+    const second = new DPAgent({ config });
 
     await first.initialize();
     await second.initialize();

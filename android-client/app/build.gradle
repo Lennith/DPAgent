@@ -1,0 +1,50 @@
+plugins {
+    id "com.android.application"
+}
+
+def signingPropertiesFile = rootProject.file("signing/dpagent-client.properties")
+def signingProperties = new Properties()
+def hasStableSigning = signingPropertiesFile.exists()
+if (hasStableSigning) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+
+android {
+    namespace "com.dpvr.dpagent.client"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.dpvr.dpagent.client"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        if (hasStableSigning) {
+            dpagentStable {
+                storeFile rootProject.file(signingProperties.getProperty("storeFile"))
+                storePassword signingProperties.getProperty("storePassword")
+                keyAlias signingProperties.getProperty("keyAlias")
+                keyPassword signingProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            if (hasStableSigning) {
+                signingConfig signingConfigs.dpagentStable
+            }
+        }
+
+        release {
+            if (!hasStableSigning) {
+                throw new GradleException("Release signing requires android-client/signing/dpagent-client.properties and a local keystore.")
+            }
+            signingConfig signingConfigs.dpagentStable
+            minifyEnabled false
+        }
+    }
+}

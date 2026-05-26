@@ -1,22 +1,11 @@
 import * as assert from 'node:assert/strict';
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { MiniMaxAgent } from '../../src/index.js';
+import { DPAgent } from '../../src/index.js';
 import type { ContextRef } from '../../src/types.js';
+import { cleanupIntegrationHarness, createIntegrationHarness } from './helpers/integration-harness.js';
 
-function createHarness(): { tempDir: string; workspaceDir: string; runtimeDir: string; contextDir: string; configPath: string } {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'p1-toolset-override-'));
-  const workspaceDir = path.join(tempDir, 'workspace');
-  const runtimeDir = path.join(tempDir, 'runtime');
-  const contextDir = path.join(tempDir, 'contexts');
-  const configPath = path.join(tempDir, 'config.yaml');
-  fs.mkdirSync(workspaceDir, { recursive: true });
-  fs.mkdirSync(runtimeDir, { recursive: true });
-  fs.mkdirSync(contextDir, { recursive: true });
-  fs.writeFileSync(
-    configPath,
-    [
+async function runCase(): Promise<void> {
+  const harness = createIntegrationHarness('p1-toolset-override-', {
+    configYaml: [
       'api:',
       '  apiKey: test-key',
       '  apiBase: https://api.minimaxi.com',
@@ -24,20 +13,10 @@ function createHarness(): { tempDir: string; workspaceDir: string; runtimeDir: s
       '  provider: anthropic',
       'agent:',
       '  defaultToolset: windows-dev',
-      '',
-    ].join('\n')
-  );
-  return { tempDir, workspaceDir, runtimeDir, contextDir, configPath };
-}
-
-function cleanupHarness(tempDir: string): void {
-  fs.rmSync(tempDir, { recursive: true, force: true });
-}
-
-async function runCase(): Promise<void> {
-  const harness = createHarness();
+    ],
+  });
   try {
-    const agent = new MiniMaxAgent({
+    const agent = new DPAgent({
       allowMissingApiKeyAtBoot: true,
       configPath: harness.configPath,
       workspaceDir: harness.workspaceDir,
@@ -59,7 +38,7 @@ async function runCase(): Promise<void> {
 
     console.log('p1-session-toolset-override integration test passed');
   } finally {
-    cleanupHarness(harness.tempDir);
+    cleanupIntegrationHarness(harness);
   }
 }
 

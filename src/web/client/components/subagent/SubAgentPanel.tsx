@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ThemeConfig } from '../../styles/theme/index.js';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 import { useI18n, type TranslationKey } from '../../i18n/index.js';
@@ -10,11 +10,14 @@ export interface SubAgentStatusItem {
   updatedAt: string;
   queuePosition?: number;
   lastError?: string;
+  lifecycleDiagnostic?: string;
   latestResult?: {
     summary: string;
     status: string;
   };
 }
+
+type SubAgentAction = 'cancel' | 'retry' | 'resume';
 
 interface SubAgentPanelProps {
   sessionId: string | null;
@@ -43,6 +46,28 @@ const STATUS_ORDER: Record<SubAgentStatusItem['status'], number> = {
   canceled: 2,
   succeeded: 3,
 };
+
+function isTerminalStatus(status: SubAgentStatusItem['status']): boolean {
+  return status === 'succeeded' || status === 'failed' || status === 'timeout' || status === 'canceled';
+}
+
+function terminalEntryKey(item: Pick<SubAgentStatusItem, 'subagentId' | 'runSeq'>): string {
+  return `${item.subagentId}:${item.runSeq}`;
+}
+
+function diagnosticText(
+  diagnostic: string | undefined,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string
+): string | null {
+  const normalized = String(diagnostic ?? '').trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.startsWith('heartbeat_stale:')) {
+    return t('subagent.diagnostic.heartbeatStale');
+  }
+  return t('subagent.diagnostic.generic', { diagnostic: normalized });
+}
 
 function statusVisual(
   status: SubAgentStatusItem['status'],
@@ -152,10 +177,11 @@ export function SubAgentPanel({
   const [items, setItems] = useState<SubAgentStatusItem[]>(() => initialItems ?? []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [actionLoading, setActionLoading] = useState<Record<string, 'cancel' | 'retry' | 'resume'>>({});
+  const [actionLoading, setActionLoading] = useState<Record<string, SubAgentAction>>({});
   const [draftSaved, setDraftSaved] = useState<Record<string, boolean>>({});
   const [expandedId, setExpandedId] = useState<string | null>(initialExpandedId);
   const [elapsedTimes, setElapsedTimes] = useState<Record<string, number>>({});
+  const [hiddenTerminalEntries, setHiddenTerminalEntries] = useState<Set<string>>(() => new Set());
   const startTimesRef = useRef<Record<string, number>>({});
 
   const controlledByInitialItems = initialItems !== undefined;
@@ -171,6 +197,10 @@ export function SubAgentPanel({
   useEffect(() => {
     setExpandedId(initialExpandedId);
   }, [initialExpandedId]);
+
+  useEffect(() => {
+    setHiddenTerminalEntries(new Set());
+  }, [sessionId]);
 
   useEffect(() => {
     if (!hasRunning) {
@@ -285,27 +315,54 @@ export function SubAgentPanel({
     return () => clearInterval(timer);
   }, [controlledByInitialItems, sessionId, hasRunning, loadItems]);
 
+  const visibleItems = useMemo(
+    () =>
+      items.filter((item) => {
+        if (!isTerminalStatus(item.status)) {
+          return true;
+        }
+        return !hiddenTerminalEntries.has(terminalEntryKey(item));
+      }),
+    [hiddenTerminalEntries, items]
+  );
+
   const metrics = useMemo(
     () => ({
-      running: items.filter((item) => item.status === 'running').length,
-      queued: items.filter((item) => item.status === 'queued').length,
-      needsAction: items.filter((item) => ['failed', 'timeout', 'canceled'].includes(item.status)).length,
-      done: items.filter((item) => item.status === 'succeeded').length,
+      running: visibleItems.filter((item) => item.status === 'running').length,
+      queued: visibleItems.filter((item) => item.status === 'queued').length,
+      needsAction: visibleItems.filter((item) => ['failed', 'timeout', 'canceled'].includes(item.status)).length,
+      done: visibleItems.filter((item) => item.status === 'succeeded').length,
     }),
-    [items]
+    [visibleItems]
+  );
+  const visibleTerminalCount = useMemo(
+    () => visibleItems.filter((item) => isTerminalStatus(item.status)).length,
+    [visibleItems]
   );
 
   const sortedItems = useMemo(
     () =>
-      [...items].sort((a, b) => {
+      [...visibleItems].sort((a, b) => {
         const byStatus = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
         if (byStatus !== 0) {
           return byStatus;
         }
         return b.runSeq - a.runSeq;
       }),
-    [items]
+    [visibleItems]
   );
+
+  const clearTerminalEntries = useCallback(() => {
+    setHiddenTerminalEntries((prev) => {
+      const next = new Set(prev);
+      for (const item of visibleItems) {
+        if (isTerminalStatus(item.status)) {
+          next.add(terminalEntryKey(item));
+        }
+      }
+      return next;
+    });
+  }, [visibleItems]);
 
   const renderMetric = (labelKey: TranslationKey, value: number) => (
     <div
@@ -345,6 +402,20 @@ export function SubAgentPanel({
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
+            {visibleTerminalCount > 0 && (
+              <button
+                type="button"
+                onClick={clearTerminalEntries}
+                className="rounded-xl border px-2.5 py-1.5 text-xs transition-colors"
+                style={{
+                  borderColor: theme.colors.border.DEFAULT,
+                  color: theme.colors.text.secondary,
+                  backgroundColor: theme.colors.bg.tertiary,
+                }}
+              >
+                {t('subagent.clearTerminal')}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void loadItems()}
@@ -361,14 +432,17 @@ export function SubAgentPanel({
               <button
                 type="button"
                 onClick={onHide}
-                className="rounded-xl border px-2.5 py-1.5 text-xs transition-colors"
+                className="panel-collapse-button right-toolbar-collapse-button"
                 style={{
                   borderColor: theme.colors.border.DEFAULT,
                   color: theme.colors.text.secondary,
                   backgroundColor: theme.colors.bg.tertiary,
                 }}
+                title={t('app.subagent.hidePanel')}
+                aria-label={t('app.subagent.hidePanel')}
+                data-testid="right-toolbar-collapse-button"
               >
-                {t('app.subagent.hidePanel')}
+                {t('common.collapse')}
               </button>
             )}
           </div>
@@ -444,7 +518,8 @@ export function SubAgentPanel({
             const isDraftSaved = draftSaved[item.subagentId];
             const isActionLoading = actionLoading[item.subagentId];
             const elapsedSecs = elapsedTimes[item.subagentId] || 0;
-            const summary = item.latestResult?.summary || item.lastError || t('subagent.waitingForResult');
+            const diagnostic = diagnosticText(item.lifecycleDiagnostic, t);
+            const summary = item.latestResult?.summary || diagnostic || item.lastError || t('subagent.waitingForResult');
             const expanded = expandedId === item.subagentId;
 
             return (
@@ -496,6 +571,7 @@ export function SubAgentPanel({
                   {typeof item.queuePosition === 'number' && (
                     <span>{t('subagent.queuePosition', { position: item.queuePosition })}</span>
                   )}
+                  {diagnostic && <span style={{ color: theme.colors.toolCall.text }}>{diagnostic}</span>}
                   {isDraftSaved && <span title={t('subagent.draftSavedTooltip')}>{t('subagent.draftSaved')}</span>}
                 </div>
 
@@ -521,7 +597,7 @@ export function SubAgentPanel({
                           opacity: isActionLoading === 'cancel' ? 0.7 : 1,
                         }}
                       >
-                        {isActionLoading === 'cancel' ? t('subagent.canceling') : t('subagent.cancel')}
+                        {isActionLoading === 'cancel' ? t('subagent.forceStopping') : t('subagent.forceStop')}
                       </button>
                     )}
                     {isRetryable && (
@@ -570,6 +646,7 @@ export function SubAgentPanel({
                   >
                     <div>{t('subagent.updatedAt', { time: formatTime(item.updatedAt) })}</div>
                     {item.latestResult?.status && <div>{t('subagent.resultStatus', { status: item.latestResult.status })}</div>}
+                    {diagnostic && <div style={{ color: theme.colors.toolCall.text }}>{diagnostic}</div>}
                     {item.lastError && <div style={{ color: theme.colors.toolResult.error.text }}>{item.lastError}</div>}
                     <div>{expanded ? t('subagent.details.hide') : t('subagent.details.show')}</div>
                   </div>

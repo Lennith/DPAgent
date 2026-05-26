@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { SkillLoader } from '../../src/skills/index.js';
+import { SkillLoader } from '../../src/skills/SkillLoader.js';
 
 function writeSkill(dir: string, name: string, description: string): void {
   fs.mkdirSync(dir, { recursive: true });
@@ -87,6 +87,8 @@ function runAll(): void {
 
     const resolved = loader.getSkillByName('release-helper', {
       workspaceDir: harness.workspaceDir,
+      includeWorkspaceSkills: true,
+      includePackSkills: true,
       toolsetName: 'windows-dev',
     });
     assert.ok(resolved);
@@ -96,6 +98,8 @@ function runAll(): void {
     fs.rmSync(path.join(harness.workspaceDir, 'skills'), { recursive: true, force: true });
     const resolvedWithoutWorkspace = loader.getSkillByName('release-helper', {
       workspaceDir: harness.workspaceDir,
+      includeWorkspaceSkills: true,
+      includePackSkills: true,
       toolsetName: 'windows-dev',
     });
     assert.ok(resolvedWithoutWorkspace);
@@ -120,6 +124,8 @@ function runAll(): void {
     ]);
     const resolvedTeamPack = loader.getSkillByName('release-helper', {
       workspaceDir: harness.workspaceDir,
+      includeWorkspaceSkills: true,
+      includePackSkills: true,
       toolsetName: 'windows-dev',
     });
     assert.ok(resolvedTeamPack);

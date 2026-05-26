@@ -1,7 +1,10 @@
 import * as assert from 'node:assert/strict';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import { autoLoopManager } from '../../src/auto-loop/index.js';
-import type { ContextRef } from '../../src/types.js';
+import { tokensToCharHint } from '../../src/shared/context-token-estimation.js';
+import { createDefaultContextBudgetConfig } from '../../src/runtime/context-window-budget.js';
+import type { ContextRef, ResolvedLlmRuntimeConfig } from '../../src/types.js';
+import { createWebServerDouble } from './helpers/web-server-harness.js';
+import { createWebServerTestConfig } from './web-server-test-config.js';
 
 interface EmittedMessage {
   ws: object;
@@ -9,17 +12,38 @@ interface EmittedMessage {
   data: unknown;
 }
 
-function createHarness(context: ContextRef = { scope: 'session', namespace: 'sess-1' }) {
+function stripCreatedAt(messages: EmittedMessage[]): EmittedMessage[] {
+  return messages.map((message) => {
+    if (!message.data || typeof message.data !== 'object' || Array.isArray(message.data)) {
+      return message;
+    }
+    const data = { ...(message.data as Record<string, unknown>) };
+    delete data.createdAt;
+    return {
+      ...message,
+      data,
+    };
+  });
+}
+
+function createHarness(
+  context: ContextRef = { scope: 'session', namespace: 'sess-1' },
+  configOverrides: Record<string, any> = {}
+) {
   const lifecycle: string[] = [];
   const emitted: EmittedMessage[] = [];
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
 
   server.agent = {
-    getConfig: () => ({
+    getConfig: () => createWebServerTestConfig({
       agent: {
         tokenLimit: 1000,
-        contextWindowChars: 50000,
       },
+      contextBudget: {
+        ...createDefaultContextBudgetConfig(),
+        defaultContextWindowTokens: 22500,
+      },
+      ...configOverrides,
     }),
   };
   server.emitToClient = (ws: object, message: Omit<EmittedMessage, 'ws'>) => {
@@ -103,6 +127,7 @@ function testCreateObservationCallbacksExposeOnlyObservationHooks(): void {
     assert.equal(typeof callbacks.onToolResult, 'function');
     assert.equal(typeof callbacks.onStep, 'function');
     assert.equal(typeof callbacks.onMessage, 'function');
+    assert.equal(typeof callbacks.onContextUsageEstimate, 'function');
     assert.equal(typeof callbacks.onContextPrecompress, 'function');
     assert.equal(typeof callbacks.onContextOverflow, 'function');
     assert.equal('onError' in callbacks, false);
@@ -150,7 +175,15 @@ function testCreateCallbackObservationEventsPreserveWireBehavior(): void {
     callback.onStep?.(2, 10);
     callback.onMessage?.('assistant', 'done');
 
-    assert.deepEqual(harness.emitted, [
+    for (const message of harness.emitted.filter((item) =>
+      ['thinking', 'tool_call', 'tool_result', 'message'].includes(item.type)
+    )) {
+      const createdAt = (message.data as { createdAt?: string }).createdAt;
+      assert.equal(typeof createdAt, 'string');
+      assert.ok(Number.isFinite(Date.parse(createdAt ?? '')));
+    }
+
+    assert.deepEqual(stripCreatedAt(harness.emitted), [
       {
         ws: harness.socket,
         type: 'thinking',
@@ -249,6 +282,7 @@ function testCreateCallbackContextSignalsPreserveThresholdBehavior(): void {
       ratio: 0.064,
       usedChars: 3200,
       limitChars: 50000,
+      limitTokens: 22500,
       checkpointId: null,
     });
     assert.deepEqual(harness.emitted[1]?.data, {
@@ -259,6 +293,7 @@ function testCreateCallbackContextSignalsPreserveThresholdBehavior(): void {
       ratio: 0.065,
       usedChars: 3250,
       limitChars: 50000,
+      limitTokens: 22500,
       checkpointId: 'profile-a',
       failureReason: 'compress_timeout',
     });
@@ -278,7 +313,114 @@ function testCreateCallbackContextSignalsPreserveThresholdBehavior(): void {
       error: 'overflow',
       stage: 'apply',
       checkpointId: 'snapshot-a',
+      limitTokens: 22500,
     });
+  } finally {
+    harness.restore();
+  }
+}
+
+function testCreateCallbackForwardsTokenUsageEstimateEveryTime(): void {
+  const harness = createHarness();
+  try {
+    const callback = harness.server.createCallback(harness.socket, harness.context, 'run-token');
+
+    callback.onContextUsageEstimate?.({
+      observedAt: '2026-04-06T00:00:10.000Z',
+      stage: 'provider_usage_anchor',
+      source: 'provider_usage',
+      confidence: 'exact',
+      usedTokens: 900,
+      limitTokens: 1000,
+      usedChars: 1234,
+      limitChars: 50000,
+      ratio: 0.9,
+      anchorPromptTokens: 900,
+      deltaEstimatedTokens: 0,
+    });
+
+    assert.deepEqual(harness.emitted.map((message) => message.type), ['context_utilization']);
+    assert.deepEqual(harness.emitted[0]?.data, {
+      runId: 'run-token',
+      context: harness.context,
+      observedAt: (harness.emitted[0]?.data as any).observedAt,
+      ratio: 0.9,
+      utilizationRatio: 0.9,
+      usedChars: 1234,
+      limitChars: 50000,
+      usedTokens: 900,
+      limitTokens: 1000,
+      source: 'provider_usage',
+      anchorPromptTokens: 900,
+      deltaEstimatedTokens: 0,
+      triggerRatio: 0.8,
+      isWarning: true,
+      message: undefined,
+    });
+  } finally {
+    harness.restore();
+  }
+}
+
+function testCreateCallbackContextSignalsUseActiveRuntimeBudget(): void {
+  const runtime: ResolvedLlmRuntimeConfig = {
+    profileId: 'runtime-profile',
+    provider: 'anthropic',
+    apiKey: 'sk-test',
+    apiBase: 'https://api.runtime.test',
+    model: 'runtime-model',
+    maxOutputTokens: 1024,
+    reasoningPreset: 'off',
+    capabilities: {
+      reasoningEffort: false,
+      thinkingBudget: false,
+    },
+  };
+  const harness = createHarness(
+    { scope: 'session', namespace: 'sess-runtime-budget' },
+    {
+      contextBudget: {
+        defaultContextWindowTokens: 50000,
+        compressionTriggerRatio: 0.9,
+        postCompressionTargetRatio: 0.35,
+        minTokensAddedAfterCompression: 16000,
+        compressionMaxChars: 6000,
+        precompressKeepLlmRounds: 5,
+        precompressChunkChars: 60000,
+        precompressRetry: 1,
+        reservedOutputTokens: 1024,
+        reservedReasoningTokens: 0,
+        reservedProtocolTokens: 0,
+        modelOverrides: {
+          'anthropic:runtime-model': {
+            contextWindowTokens: 7777,
+          },
+        },
+      },
+    }
+  );
+  try {
+    const callback = harness.server.createCallback(harness.socket, harness.context, 'run-runtime', runtime);
+
+    callback.onContextOverflow?.({
+      observedAt: '2026-04-06T00:00:04.000Z',
+      beforeChars: 1200,
+      beforeTokens: 7000,
+      stage: 'overflow_detected',
+      errorRaw: 'overflow',
+      contextOverflowSnapshotPath: 'snapshot-runtime',
+    } as any);
+
+    assert.deepEqual(harness.emitted.map((message) => message.type), [
+      'context_utilization',
+      'context_overflow',
+    ]);
+    assert.equal((harness.emitted[0]?.data as any).usedTokens, 7000);
+    assert.equal((harness.emitted[0]?.data as any).limitTokens, 7777);
+    assert.equal((harness.emitted[0]?.data as any).limitChars, tokensToCharHint(7777));
+    assert.equal((harness.emitted[0]?.data as any).ratio, 7000 / 7777);
+    assert.equal((harness.emitted[1]?.data as any).usedTokens, 7000);
+    assert.equal((harness.emitted[1]?.data as any).limitTokens, 7777);
   } finally {
     harness.restore();
   }
@@ -307,6 +449,7 @@ function testCreateCallbackForwardsForcedPrecompressEvents(): void {
       ratio: 0.024,
       usedChars: 1200,
       limitChars: 50000,
+      limitTokens: 22500,
       checkpointId: null,
     });
   } finally {
@@ -358,6 +501,8 @@ async function runAll(): Promise<void> {
   testCreateControlCallbacksExposeOnlyControlHooks();
   testCreateCallbackObservationEventsPreserveWireBehavior();
   testCreateCallbackContextSignalsPreserveThresholdBehavior();
+  testCreateCallbackForwardsTokenUsageEstimateEveryTime();
+  testCreateCallbackContextSignalsUseActiveRuntimeBudget();
   testCreateCallbackForwardsForcedPrecompressEvents();
   await testCreateCallbackControlHooksPreserveWiring();
   console.log('web-callback-assembly tests passed');

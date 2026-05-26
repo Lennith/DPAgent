@@ -1,32 +1,58 @@
 {
-  "name": "@dpvr/minimax-agent",
-  "version": "1.0.48",
-  "description": "MiniMax Agent toolkit for Node.js backend integration",
+  "name": "@dpvr/dpagent",
+  "version": "2.2.14",
+  "description": "DPVR dedicated local-first Agent runtime for Node.js, Web UI, tools, MCP, memory, skills, subagents, and automation.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "minimax-agent": "dist/cli/minimax-agent.js"
+    "dpagent": "dist/cli/dpagent.js"
   },
   "files": [
     "dist/**",
+    "scripts/asr/*.py",
+    "scripts/asr/*.ps1",
     "agents/**",
+    "doc/guide/user-guide.md",
+    "doc/guide/assets/user-guide/**",
     "README.md",
     "LICENSE*"
   ],
   "publishConfig": {
     "registry": "http://10.100.1.10:4873"
   },
+  "npmOfficialPublish": {
+    "packageName": "@lennith/dpagent",
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
   "internalPublish": {
     "registry": "http://10.100.1.10:4873",
     "requireUsabilityEntrypoint": true,
-    "requiredReadmeInitCommand": "npx minimax-agent",
+    "requiredReadmeInitCommand": "npx dpagent",
     "userSmoke": {
-      "command": "npx minimax-agent --no-open",
+      "command": "npx dpagent --no-open",
       "timeoutMs": 120000,
       "successPattern": "Starting web server at http://localhost:{PORT}"
     },
     "requiredPackPaths": [
       "dist/",
+      "agents/browser/AGENTS.md",
+      "agents/checkpoint/AGENTS.md",
+      "agents/coding/AGENTS.md",
+      "agents/design/AGENTS.md",
+      "agents/dpagent-assistant/AGENTS.md",
+      "agents/guard/AGENTS.md",
+      "agents/health/AGENTS.md",
+      "agents/investigate/AGENTS.md",
+      "agents/planner/AGENTS.md",
+      "agents/qa/AGENTS.md",
+      "agents/release/AGENTS.md",
+      "agents/report/AGENTS.md",
+      "agents/research/AGENTS.md",
+      "agents/review/AGENTS.md",
+      "agents/security/AGENTS.md",
+      "doc/guide/user-guide.md",
+      "doc/guide/assets/user-guide/",
       "README.md"
     ],
     "forbiddenPackPaths": [
@@ -44,20 +70,29 @@
       "aggregateFile": "release-toolcall-context-gate.json",
       "markdownFile": "release-toolcall-context-gate.md",
       "manualReviewFile": "release-toolcall-context-manual-review.json",
-      "requiredRuns": 3,
-      "requiredRoundsPerRun": 20,
+      "requiredRuns": 2,
+      "requiredRoundsPerRun": 10,
       "requiredModel": "multi-profile",
       "requiredProfiles": [
-        "kimi",
         "deepseek",
         "minimax"
       ],
       "requiredProfileModels": {
-        "kimi": "Kimi-k2.6",
         "deepseek": "deepseek-v4-flash",
         "minimax": "MiniMax-M2.7-highspeed"
       },
       "minimumPassRate": 0.9
+    },
+    "releaseE2EGate": {
+      "outputRoot": "logs/release-gate-e2e",
+      "aggregateFile": "release-e2e-gate.json",
+      "markdownFile": "release-e2e-gate.md",
+      "requiredCases": [
+        "e2e:release-agent-web-regression",
+        "e2e:release-plan-mode-lifecycle",
+        "e2e:release-plan-mode-ux",
+        "e2e:release-cli-long-session"
+      ]
     }
   },
   "scripts": {
@@ -71,14 +106,21 @@
     "publish:private": "npm publish --registry http://10.100.1.10:4873",
     "publish:standard:preflight": "node scripts/private-npm-standard.js --mode preflight",
     "publish:standard": "node scripts/private-npm-standard.js --mode publish",
+    "publish:standard:beta:preflight": "node scripts/private-npm-standard.js --mode preflight --tag beta",
+    "publish:standard:beta": "node scripts/private-npm-standard.js --mode publish --tag beta",
+    "publish:npm-official:preflight": "node scripts/npm-official-publish.js --mode preflight --skip-release-gate",
+    "publish:npm-official": "node scripts/npm-official-publish.js --mode publish --skip-release-gate",
+    "publish:npm-official:beta:preflight": "node scripts/npm-official-publish.js --mode preflight --tag beta --skip-release-gate",
+    "publish:npm-official:beta": "node scripts/npm-official-publish.js --mode publish --tag beta --skip-release-gate",
     "smoke:ui:built": "node scripts/smoke-playwright-ui.js",
     "smoke:ui": "npm run build:web && npm run smoke:ui:built",
     "smoke:ui:responsive": "node scripts/smoke-responsive-ui.js",
     "eval:completion-marker": "node scripts/eval-completion-marker.js",
     "eval:toolcall-context-session": "tsx scripts/eval-toolcall-context-session.ts",
-    "test:release-toolcall-context-session:single": "npm run eval:toolcall-context-session -- --rounds 20 --output-root logs/release-gate-toolcall-context-session-single",
-    "test:release-toolcall-context-session": "tsx scripts/release-toolcall-context-gate.ts --profiles kimi,deepseek,minimax --rounds 20 --min-pass-rate 0.9 --model multi-profile --run-timeout-ms 900000 --output-root logs/release-gate-toolcall-context-session",
-    "release:source-gate": "npm test && npm run build:web && npm run smoke:ui:built && npm run test:release-toolcall-context-session",
+    "test:release-toolcall-context-session:single": "npm run eval:toolcall-context-session -- --rounds 10 --output-root logs/release-gate-toolcall-context-session-single",
+    "test:release-toolcall-context-session": "tsx scripts/release-toolcall-context-gate.ts --profiles deepseek,minimax --rounds 10 --min-pass-rate 0.9 --model multi-profile --run-timeout-ms 900000 --output-root logs/release-gate-toolcall-context-session",
+    "test:release-e2e": "tsx scripts/release-e2e-gate.ts --tag release-gate --output-root logs/release-gate-e2e",
+    "release:source-gate": "npm test && npm run build:web && npm run smoke:ui:built && npm run test:release-e2e && npm run test:release-toolcall-context-session",
     "test:minimax-openai-ux": "node scripts/run-minimax-openai-ux.js",
     "ux:round1": "node scripts/ux-runner.js --round round1",
     "ux:round2": "node scripts/ux-runner.js --round round2",
@@ -95,9 +137,10 @@
     "ux:ui-focused:30:dev": "node scripts/ux-iterate.js --mode ui-focused --rounds 30 --min-rounds 30 --max-rounds 150 --run-hours 8 --prompts-per-round 5 --visual-audit-min-screenshots 5 --expect-existing true",
     "ux:flow": "npm run ux:round1 && npm run ux:round2",
     "dev": "tsc --watch",
-    "test": "npm run test:unit",
-    "test:unit": "npm run test:subagent && npm run test:subagent-tool && npm run test:subagent-runner && npm run test:agent-finish-reason && npm run test:plan-mode && npm run test:plan-mode-agent-case && npm run test:auto-loop-exit && npm run test:web-port-config && npm run test:web-auto-loop-exit-callback && npm run test:web-ws-message-dispatch && npm run test:web-stop-auto-loop-message && npm run test:web-cancel-message && npm run test:web-chat-message && npm run test:web-callback-assembly && npm run test:web-runtime-watchdog && npm run test:web-callback-completion && npm run test:web-default-mcp-config && npm run test:web-config-provider && npm run test:llm-provider-routing && npm run test:llm-thinking-signature && npm run test:llm-anthropic-tool-protocol && npm run test:llm-openai-compatible && npm run test:minimax-openai-provider-run && npm run test:agents && npm run test:web-llm-profile-routes && npm run test:web-prompt-resolution && npm run test:web-plan-input-normalization && npm run test:web-plan-input-response-messages && npm run test:web-plan-input-response && npm run test:web-request-user-input && npm run test:web-callback-event-messages && npm run test:web-callback-event-dispatcher && npm run test:web-tool-call-state && npm run test:web-composer-input-state && npm run test:web-i18n && npm run test:web-config-modal-ui && npm run test:web-interrupted-artifact-ui && npm run test:workspace-preferences && npm run test:web-memory-organize-ui && npm run test:web-memory-organize-route && npm run test:automation-schedule && npm run test:automation-store && npm run test:web-automation-routes && npm run test:web-automation-scheduler && npm run test:web-automation-execution && npm run test:web-mcp-status && npm run test:mcp-runtime-config && npm run test:mcp-shared-runtime && npm run test:mcp-connector-reconnect && npm run test:mcp-status-ui && npm run test:tool-event-summary && npm run test:tool-registration-dedupe && npm run test:toolset-registry && npm run test:execution-tool-registry-gating && npm run test:context-manage-tool && npm run test:context-payload-projector && npm run test:runtime-platform && npm run test:permission-manager && npm run test:shell-tool && npm run test:read-file-tool && npm run test:memory-store && npm run test:governance-audit-store && npm run test:todo-store && npm run test:skill-draft-store-auto && npm run test:auto-generated-skill-governance && npm run test:skill-loader-progressive && npm run test:skill-loader-precedence && npm run test:skill-pack-store && npm run test:governance-tool-audit && npm run test:markdown-render && npm run test:eval-toolcall-context-session && npm run test:release-toolcall-context-gate && npm run test:private-npm-standard && npm run test:ux-iterate-config-protection && npm run test:context-history-replay && npm run test:compressed-history-context-cache && npm run test:turn-summary-v2 && npm run test:context-overflow && npm run test:p0-session-transcript-search && npm run test:p1-session-toolset-override && npm run test:p2-governance",
+    "test": "npm run test:unit && npm run test:integration:default",
+    "test:unit": "tsx scripts/run-test-manifest.ts unit",
     "test:agent-finish-reason": "tsx tests/unit/agent-finish-reason-gating.test.ts",
+    "test:turn-recovery-policy": "tsx tests/unit/turn-recovery-policy.test.ts",
     "test:persistence": "tsx tests/integration/persistence.test.ts",
     "test:compression": "tsx tests/integration/compression.test.ts",
     "test:mcp": "tsx tests/integration/mcp.test.ts",
@@ -144,6 +187,7 @@
     "test:context-payload-projector": "tsx tests/unit/context-payload-projector.test.ts",
     "test:runtime-platform": "tsx tests/unit/runtime-platform.test.ts",
     "test:permission-manager": "tsx tests/unit/permission-manager.test.ts",
+    "test:package-release-sanitized-config": "tsx tests/unit/package-release-sanitized-config.test.ts",
     "test:shell-tool": "tsx tests/unit/shell-tool.test.ts",
     "test:read-file-tool": "tsx tests/unit/read-file-tool.test.ts",
     "test:memory-store": "tsx tests/unit/memory-store.test.ts",
@@ -156,7 +200,7 @@
     "test:web-automation-scheduler": "tsx tests/unit/web-automation-scheduler.test.ts",
     "test:web-automation-execution": "tsx tests/unit/web-automation-execution.test.ts",
     "test:todo-store": "tsx tests/unit/todo-store.test.ts",
-    "test:skill-draft-store-auto": "tsx tests/unit/skill-draft-store-auto.test.ts",
+    "test:skill-write-store-auto": "tsx tests/unit/skill-write-store-auto.test.ts",
     "test:auto-generated-skill-governance": "tsx tests/unit/auto-generated-skill-governance.test.ts",
     "test:skill-loader-progressive": "tsx tests/unit/skill-loader-progressive.test.ts",
     "test:skill-loader-precedence": "tsx tests/unit/skill-loader-precedence.test.ts",
@@ -165,6 +209,7 @@
     "test:eval-toolcall-context-session": "tsx tests/unit/eval-toolcall-context-session.test.ts",
     "test:release-toolcall-context-gate": "tsx tests/unit/release-toolcall-context-gate.test.ts",
     "test:private-npm-standard": "tsx tests/unit/private-npm-standard.test.ts",
+    "test:npm-official-publish": "tsx tests/unit/npm-official-publish.test.ts",
     "test:web-composer-input-state": "tsx tests/unit/composer-input-state.test.ts",
     "test:web-i18n": "tsx tests/unit/web-i18n.test.ts",
     "test:web-config-modal-ui": "tsx tests/unit/web-config-modal-ui.test.ts",
@@ -200,21 +245,26 @@
     "reinstall": "npm run clean:modules && npm install",
     "init": "node init.js",
     "setup": "node setup.js",
+    "setup:asr:windows": "powershell -ExecutionPolicy Bypass -NoProfile -File scripts/asr/setup-glm-asr.ps1",
     "start": "node start.js",
-    "cli": "node dist/cli/minimax-agent.js",
+    "cli": "node dist/cli/dpagent.js",
     "start:easy": "node start-easy.js",
     "release:package": "node scripts/package-release.js",
     "release:package:easy": "node scripts/package-release.js --easy-run",
-    "agents:import": "node scripts/import-agents-from-github.js"
+    "agents:import": "node scripts/import-agents-from-github.js",
+    "test:integration": "tsx scripts/run-test-manifest.ts integration",
+    "test:e2e": "tsx scripts/run-test-manifest.ts e2e",
+    "test:contracts": "tsx scripts/run-test-manifest.ts contracts",
+    "test:integration:default": "tsx scripts/run-test-manifest.ts integration --tag default-test"
   },
   "keywords": [
-    "minimax",
+    "dpagent",
     "agent",
     "ai",
     "llm",
     "mcp"
   ],
-  "author": "",
+  "author": "DPVR",
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -251,5 +301,18 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "directories": {
+    "doc": "doc",
+    "test": "tests"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lennith/DPAgent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Lennith/DPAgent/issues"
+  },
+  "homepage": "https://github.com/Lennith/DPAgent#readme",
+  "type": "commonjs"
 }

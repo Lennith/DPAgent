@@ -1,157 +1,40 @@
-import * as path from 'node:path';
 import type { LLMRuntime } from '../llm/index.js';
-import type { GovernanceAuditStore } from '../governance/index.js';
+import type { GovernanceAuditStore } from '../governance/AuditStore.js';
 import type { ContextEvent, ContextRef, MemoryPromotionState } from '../types.js';
 import type { ContextManager } from '../context/index.js';
 import {
-  containsAnyPhrase,
-  extractChecklistItems,
-  extractCommandCandidates,
-  looksLikeFailure,
   normalizeWorkflowText,
-  tokenizeWorkflowText,
 } from '../utils/workflow-signal.js';
 import type { MemoryEntry, MemoryScope } from './MemoryStore.js';
 import { MemoryStore } from './MemoryStore.js';
+import {
+  DEFAULT_BATCH_TURNS,
+  DEFAULT_IDLE_FLUSH_MS,
+  MEMORY_CLASSIFIER_MAX_CONTENT_CHARS,
+  MEMORY_CLASSIFIER_MAX_TURNS,
+  type MemoryCandidate,
+  type MemoryMutationInput,
+  type MemoryMutationResult,
+  type MemoryOrganizeReason,
+  type MemoryOrganizeResult,
+  type MemoryPromotionCoordinatorOptions,
+  type SessionTurnAccumulator,
+  type SessionTurnRecord,
+} from './memory-promotion-contracts.js';
+import {
+  extractJsonObject,
+  normalizeConflictHints,
+  normalizeState,
+  normalizeWorkspacePathKey,
+  nowIso,
+  truncate,
+} from './memory-promotion-utils.js';
 
-const DEFAULT_BATCH_TURNS = 3;
-const DEFAULT_IDLE_FLUSH_MS = 120_000;
-const MEMORY_CLASSIFIER_MAX_TURNS = 8;
-const MEMORY_CLASSIFIER_MAX_CONTENT_CHARS = 360;
-
-type MemoryMutationAction = 'add' | 'replace' | 'remove';
-type MemoryOrganizeReason = 'batch_threshold' | 'idle_flush' | 'manual';
-
-export interface MemoryMutationInput {
-  action: MemoryMutationAction;
-  id?: string;
-  scope?: MemoryScope;
-  title?: string;
-  content?: string;
-  workspaceDir?: string;
-  sessionId?: string;
-  reason?: string;
-  expiresAt?: string;
-}
-
-export interface MemoryMutationResult {
-  action: MemoryMutationAction;
-  entry?: MemoryEntry | null;
-  removed?: boolean;
-}
-
-export interface MemoryOrganizeResult {
-  sessionId: string;
-  workspaceDir?: string;
-  processedTurns: number;
-  appliedCount: number;
-  skippedCount: number;
-  pendingTurnCount: number;
-  processedContextVersion: number;
-  reason: MemoryOrganizeReason;
-  status: 'ok' | 'noop';
-}
-
-interface MemoryPromotionCoordinatorOptions {
-  contextManager: ContextManager;
-  memoryStore: MemoryStore;
-  governanceAuditStore: GovernanceAuditStore;
-  getLlmClient: () => LLMRuntime | null;
-  batchTurns?: number;
-  idleFlushMs?: number;
-}
-
-interface SessionTurnRecord {
-  turnId: string;
-  ordinal: number;
-  prompt: string;
-  finalOutput: string;
-  committedAt: string;
-  workspaceDir?: string;
-}
-
-interface SessionTurnAccumulator {
-  prompt?: string;
-  finalOutput?: string;
-  workspaceDir?: string;
-}
-
-interface MemoryCandidate {
-  turnId: string;
-  decision: 'discard' | 'session_only' | 'memory_candidate';
-  scope?: MemoryScope;
-  title?: string;
-  content?: string;
-  reason?: string;
-  stability?: 'stable' | 'tentative' | 'temporary';
-  conflictHints?: string[];
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-function truncate(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, maxChars - 16))}...(truncated)`;
-}
-
-function normalizeState(state: MemoryPromotionState | undefined): MemoryPromotionState {
-  return {
-    lastProcessedContextVersion: Math.max(0, Math.floor(state?.lastProcessedContextVersion ?? 0)),
-    lastQueuedContextVersion: Math.max(0, Math.floor(state?.lastQueuedContextVersion ?? 0)),
-    pendingTurnCount: Math.max(0, Math.floor(state?.pendingTurnCount ?? 0)),
-    lastActivityAt: state?.lastActivityAt ?? nowIso(),
-    lastProcessedAt: state?.lastProcessedAt,
-    status: state?.status ?? 'idle',
-    lastError: state?.lastError,
-  };
-}
-
-function normalizeWorkspacePathKey(workspaceDir: string | undefined): string {
-  if (!workspaceDir) {
-    return '';
-  }
-  const resolved = path.resolve(workspaceDir).replace(/\//g, path.sep);
-  if (process.platform !== 'win32') {
-    return resolved;
-  }
-  return resolved.toLowerCase();
-}
-
-function extractJsonObject(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-  const withoutFence = trimmed
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-  const start = withoutFence.indexOf('{');
-  const end = withoutFence.lastIndexOf('}');
-  if (start < 0 || end < start) {
-    return null;
-  }
-  return withoutFence.slice(start, end + 1);
-}
-
-function normalizeConflictHints(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return Array.from(
-    new Set(
-      value
-        .map((item) => String(item ?? '').trim())
-        .filter((item) => item.length > 0)
-        .slice(0, 6)
-    )
-  );
-}
+export type {
+  MemoryMutationInput,
+  MemoryMutationResult,
+  MemoryOrganizeResult,
+} from './memory-promotion-contracts.js';
 
 export class MemoryPromotionCoordinator {
   private readonly contextManager: ContextManager;
@@ -517,6 +400,9 @@ export class MemoryPromotionCoordinator {
     if (!title || !content) {
       return false;
     }
+    if (content.includes('...(truncated)')) {
+      return false;
+    }
     const storageKey = this.resolveStorageQueueKeyForScope(scope, workspaceDir);
     return this.enqueueStorageTask(storageKey, async () => {
       const conflict = this.findConflictingEntry(candidate, workspaceDir);
@@ -587,7 +473,7 @@ export class MemoryPromotionCoordinator {
   }): Promise<MemoryCandidate[]> {
     const llm = this.getLlmClient();
     if (!llm) {
-      return input.turns.map((turn) => this.heuristicCandidate(turn, input.workspaceDir));
+      throw new Error('Memory promotion skipped: classifier LLM is unavailable');
     }
 
     const activeMemory = this.memoryStore.listEntries({
@@ -622,6 +508,7 @@ export class MemoryPromotionCoordinator {
       'Allowed stability values: stable, tentative, temporary.',
       'If a candidate contradicts existing active memory, put the exact conflicting title or id in conflictHints.',
       'Keep title concise. Keep content standalone and under 220 chars.',
+      'Never copy truncation markers such as ...(truncated); summarize the source or use session_only/discard.',
     ].join('\n');
     const response = await llm.generate(
       [
@@ -639,11 +526,14 @@ export class MemoryPromotionCoordinator {
     );
     const parsed = extractJsonObject(response.content);
     if (!parsed) {
-      return input.turns.map((turn) => this.heuristicCandidate(turn, input.workspaceDir));
+      throw new Error('Memory promotion skipped: classifier response did not contain JSON');
     }
     try {
       const json = JSON.parse(parsed) as { items?: Array<Record<string, unknown>> };
-      const items = Array.isArray(json.items) ? json.items : [];
+      if (!Array.isArray(json.items)) {
+        throw new Error('missing items array');
+      }
+      const items = json.items;
       return items.map((item) => ({
         turnId: String(item.turnId ?? '').trim(),
         decision:
@@ -657,74 +547,8 @@ export class MemoryPromotionCoordinator {
         conflictHints: normalizeConflictHints(item.conflictHints),
       }));
     } catch {
-      return input.turns.map((turn) => this.heuristicCandidate(turn, input.workspaceDir));
+      throw new Error('Memory promotion skipped: classifier JSON was invalid');
     }
-  }
-
-  private heuristicCandidate(turn: SessionTurnRecord, workspaceDir?: string): MemoryCandidate {
-    const combined = `${turn.prompt}\n${turn.finalOutput}`.trim();
-    if (!combined || looksLikeFailure(combined)) {
-      return { turnId: turn.turnId, decision: 'discard', stability: 'tentative' };
-    }
-    if (containsAnyPhrase(combined, ['temporary', 'for now', 'today', 'this week', 'this sprint'])) {
-      return { turnId: turn.turnId, decision: 'session_only', stability: 'temporary' };
-    }
-    const commands = extractCommandCandidates(combined);
-    const checklist = extractChecklistItems(combined);
-    const userSignals = containsAnyPhrase(combined, [
-      'remember',
-      'prefer',
-      'default',
-      'always',
-      'format responses',
-      'response style',
-    ]);
-    const workspaceSignals =
-      containsAnyPhrase(combined, [
-        'workspace',
-        'repo',
-        'project',
-        'directory',
-        'path',
-        'workflow',
-        'publish',
-        'release',
-        'deploy',
-        'build',
-        'command',
-        'project convention',
-      ]) ||
-      commands.length > 0 ||
-      checklist.length > 0;
-    if (!userSignals && !workspaceSignals) {
-      return { turnId: turn.turnId, decision: 'discard', stability: 'tentative' };
-    }
-    const scope: MemoryScope = userSignals && !workspaceSignals ? 'user' : workspaceDir ? 'workspace' : 'user';
-    const title =
-      scope === 'user'
-        ? 'User preference'
-        : commands.length > 0
-          ? `Workflow: ${truncate(commands[0], 72)}`
-          : checklist.length > 0
-            ? `Workflow: ${truncate(checklist[0], 72)}`
-            : `Workspace rule: ${truncate(tokenizeWorkflowText(turn.prompt).slice(0, 6).join(' '), 72)}`;
-    const summarySource =
-      commands.length > 0
-        ? `Commands: ${commands.join('; ')}`
-        : checklist.length > 0
-          ? `Checklist: ${checklist.join('; ')}`
-          : turn.finalOutput || turn.prompt;
-    return {
-      turnId: turn.turnId,
-      decision: 'memory_candidate',
-      scope,
-      title,
-      content: truncate(summarySource.replace(/\s+/g, ' ').trim(), 220),
-      reason:
-        scope === 'user' ? 'heuristic_user_preference_promotion' : 'heuristic_workspace_workflow_promotion',
-      stability: 'stable',
-      conflictHints: [],
-    };
   }
 
   private collectCommittedTurns(ref: ContextRef): SessionTurnRecord[] {

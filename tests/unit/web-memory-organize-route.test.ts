@@ -1,65 +1,28 @@
 import * as assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
-import { WebServer } from '../../src/web/server/WebServer.js';
-
-type RouteHandler = (req: any, res: any) => Promise<void> | void;
-
-function createFakeApp(): {
-  getHandlers: Map<string, RouteHandler>;
-  postHandlers: Map<string, RouteHandler>;
-  use: (...args: unknown[]) => void;
-  get: (route: string, handler: RouteHandler) => void;
-  post: (route: string, handler: RouteHandler) => void;
-  put: (route: string, handler: RouteHandler) => void;
-  patch: (route: string, handler: RouteHandler) => void;
-  delete: (route: string, handler: RouteHandler) => void;
-} {
-  const getHandlers = new Map<string, RouteHandler>();
-  const postHandlers = new Map<string, RouteHandler>();
-  return {
-    getHandlers,
-    postHandlers,
-    use: () => undefined,
-    get: (route, handler) => {
-      getHandlers.set(route, handler);
-    },
-    post: (route, handler) => {
-      postHandlers.set(route, handler);
-    },
-    put: () => undefined,
-    patch: () => undefined,
-    delete: () => undefined,
-  };
-}
-
-function createResponseRecorder(): {
-  statusCode: number;
-  payload: unknown;
-  status: (code: number) => any;
-  json: (payload: unknown) => any;
-} {
-  return {
-    statusCode: 200,
-    payload: undefined,
-    status(code: number) {
-      this.statusCode = code;
-      return this;
-    },
-    json(payload: unknown) {
-      this.payload = payload;
-      return this;
-    },
-  };
-}
+import {
+  createWebServerDouble,
+  getPendingPlanInputs,
+  replacePendingPlanInputs,
+} from './helpers/web-server-harness.js';
+import { createResponseRecorder, createRouteAppHarness } from './helpers/web-route-harness.js';
 
 function createHarness(): {
   server: any;
-  app: ReturnType<typeof createFakeApp>;
+  routes: ReturnType<typeof createRouteAppHarness>;
   workspaceDir: string;
   organizeCalls: Array<{ sessionId: string; workspaceDir?: string }>;
   sessionMeta: Record<string, unknown>;
 } {
-  const app = createFakeApp();
+  const routes = createRouteAppHarness();
+  const app = {
+    use: routes.app.use,
+    get: routes.app.get,
+    post: routes.app.post,
+    put: () => undefined,
+    patch: () => undefined,
+    delete: () => undefined,
+  };
   const organizeCalls: Array<{ sessionId: string; workspaceDir?: string }> = [];
   const workspaceDir = 'D:\\repo\\workspace';
   const memoryPromotionState = {
@@ -100,7 +63,7 @@ function createHarness(): {
       isWarning: false,
     },
   };
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
   server.app = app;
   server.activeRunStatesByContext = new Map([
     [
@@ -111,8 +74,14 @@ function createHarness(): {
         draftId: 'draft-active',
         context: { scope: 'session', namespace: 'sess-runtime' },
         startedAt: '2026-04-12T00:10:00.000Z',
+        owner: 'web',
+        origin: 'web',
+        interactionState: {
+          mode: 'normal',
+          owner: 'web',
+        },
         llmRuntime: {
-          profileId: 'legacy-default',
+          profileId: 'default',
           provider: 'anthropic',
           model: 'MiniMax-M2.5',
           reasoningPreset: 'off',
@@ -120,13 +89,15 @@ function createHarness(): {
       },
     ],
   ]);
-  server.pendingPlanInputByRunId = new Map<string, unknown>();
+  replacePendingPlanInputs(server, new Map<string, any>());
   server.agent = {
     getContextNamespaceMeta: (ref: { scope: string; namespace: string }) =>
       ref.namespace === 'sess-1'
         ? sessionMeta
         : undefined,
     getContextMessages: (_ref: { scope: string; namespace: string }, options?: { preserveAgentProfileRefs?: boolean }) =>
+      options?.preserveAgentProfileRefs ? replayMessages : sessionMessages,
+    getContextWebMessages: (_ref: { scope: string; namespace: string }, options?: { preserveAgentProfileRefs?: boolean }) =>
       options?.preserveAgentProfileRefs ? replayMessages : sessionMessages,
     getMemoryPromotionState: (sessionId: string) => (sessionId === 'sess-1' ? memoryPromotionState : null),
     resolveToolsetName: () => 'full-access',
@@ -160,8 +131,6 @@ function createHarness(): {
             runFamilyId: 'family-active',
             terminalCode: 'error',
             replayCutoffKind: 'checkpoint',
-            resumable: true,
-            resumeToken: 'secret-resume-token',
             lastSafeStep: 55,
             maxSteps: 100,
             errorSummary: 'read ECONNRESET',
@@ -187,12 +156,12 @@ function createHarness(): {
     register: () => undefined,
   };
   server.setupRoutes();
-  return { server, app, workspaceDir, organizeCalls, sessionMeta };
+  return { server, routes, workspaceDir, organizeCalls, sessionMeta };
 }
 
 async function testPendingRouteReturnsPromotionState(): Promise<void> {
   const harness = createHarness();
-  const handler = harness.app.getHandlers.get('/api/memory/pending');
+  const handler = harness.routes.getRoutes.get('/api/memory/pending');
   assert.ok(handler);
   const res = createResponseRecorder();
   await handler?.({ query: { sessionId: 'sess-1' } }, res);
@@ -211,7 +180,7 @@ async function testPendingRouteReturnsPromotionState(): Promise<void> {
 
 async function testOrganizeRouteInvokesAgentCoordinator(): Promise<void> {
   const harness = createHarness();
-  const handler = harness.app.postHandlers.get('/api/memory/organize');
+  const handler = harness.routes.postRoutes.get('/api/memory/organize');
   assert.ok(handler);
   const res = createResponseRecorder();
   await handler?.({ body: { sessionId: 'sess-1' }, query: {} }, res);
@@ -234,7 +203,7 @@ async function testOrganizeRouteInvokesAgentCoordinator(): Promise<void> {
 
 async function testOrganizeRouteRejectsMissingOrUnknownSession(): Promise<void> {
   const harness = createHarness();
-  const handler = harness.app.postHandlers.get('/api/memory/organize');
+  const handler = harness.routes.postRoutes.get('/api/memory/organize');
   assert.ok(handler);
 
   const missingRes = createResponseRecorder();
@@ -250,7 +219,7 @@ async function testOrganizeRouteRejectsMissingOrUnknownSession(): Promise<void> 
 
 async function testSessionRouteHonorsPreserveAgentProfileRefsQuery(): Promise<void> {
   const harness = createHarness();
-  const handler = harness.app.getHandlers.get('/api/sessions/:id');
+  const handler = harness.routes.getRoutes.get('/api/sessions/:id');
   assert.ok(handler);
 
   const defaultRes = createResponseRecorder();
@@ -265,17 +234,22 @@ async function testSessionRouteHonorsPreserveAgentProfileRefsQuery(): Promise<vo
     updatedAt: undefined,
     automationRun: null,
     completionMarkerStats: null,
+    origin: 'web',
     llmSelection: {
-      profileId: 'legacy-default',
+      profileId: 'default',
       model: 'MiniMax-M2.5',
-      reasoningPreset: 'off',
+      reasoningPreset: 'high',
       providerOptions: undefined,
       updatedAt: '1970-01-01T00:00:00.000Z',
     },
     activeRun: null,
-    pendingResume: false,
+    interactionState: {
+      mode: 'normal',
+    },
     interruptedArtifact: null,
     pendingPlanInput: null,
+    planningState: null,
+    runtimeErrors: [],
     contextUtilization: {
       observedAt: '2026-04-12T00:06:00.000Z',
       ratio: 0.42,
@@ -304,7 +278,7 @@ async function testSessionRouteHonorsPreserveAgentProfileRefsQuery(): Promise<vo
 
 async function testSessionRouteOnlyReturnsLivePendingPlanInput(): Promise<void> {
   const harness = createHarness();
-  const handler = harness.app.getHandlers.get('/api/sessions/:id');
+  const handler = harness.routes.getRoutes.get('/api/sessions/:id');
   assert.ok(handler);
 
   const noLivePendingRes = createResponseRecorder();
@@ -312,7 +286,7 @@ async function testSessionRouteOnlyReturnsLivePendingPlanInput(): Promise<void> 
   assert.equal(noLivePendingRes.statusCode, 200);
   assert.equal((noLivePendingRes.payload as { pendingPlanInput: unknown }).pendingPlanInput, null);
 
-  harness.server.pendingPlanInputByRunId.set('run-pending', {
+  getPendingPlanInputs(harness.server).set('run-pending', {
     runId: 'run-pending',
     context: { scope: 'session', namespace: 'sess-1' },
     ws: { readyState: WebSocket.OPEN },
@@ -326,7 +300,7 @@ async function testSessionRouteOnlyReturnsLivePendingPlanInput(): Promise<void> 
     harness.sessionMeta.pendingPlanInput
   );
 
-  harness.server.pendingPlanInputByRunId.set('run-pending', {
+  getPendingPlanInputs(harness.server).set('run-pending', {
     runId: 'run-pending',
     context: { scope: 'session', namespace: 'sess-1' },
     ws: { readyState: WebSocket.CLOSED },
@@ -343,7 +317,7 @@ async function testSessionRouteOnlyReturnsLivePendingPlanInput(): Promise<void> 
 
 async function testSessionRouteFallsBackToRuntimeStateAndSanitizesArtifact(): Promise<void> {
   const harness = createHarness();
-  const handler = harness.app.getHandlers.get('/api/sessions/:id');
+  const handler = harness.routes.getRoutes.get('/api/sessions/:id');
   assert.ok(handler);
 
   const res = createResponseRecorder();
@@ -358,10 +332,11 @@ async function testSessionRouteFallsBackToRuntimeStateAndSanitizesArtifact(): Pr
     updatedAt: '2026-04-12T00:11:00.000Z',
     automationRun: null,
     completionMarkerStats: null,
+    origin: 'web',
     llmSelection: {
-      profileId: 'legacy-default',
+      profileId: 'default',
       model: 'MiniMax-M2.5',
-      reasoningPreset: 'off',
+      reasoningPreset: 'high',
       providerOptions: undefined,
       updatedAt: '1970-01-01T00:00:00.000Z',
     },
@@ -371,14 +346,24 @@ async function testSessionRouteFallsBackToRuntimeStateAndSanitizesArtifact(): Pr
       draftId: 'draft-active',
       context: { scope: 'session', namespace: 'sess-runtime' },
       startedAt: '2026-04-12T00:10:00.000Z',
+      owner: 'web',
+      origin: 'web',
+      interactionState: {
+        mode: 'normal',
+        owner: 'web',
+      },
       llmRuntime: {
-        profileId: 'legacy-default',
+        profileId: 'default',
         provider: 'anthropic',
         model: 'MiniMax-M2.5',
         reasoningPreset: 'off',
       },
+      runningInputQueue: [],
     },
-    pendingResume: false,
+    interactionState: {
+      mode: 'normal',
+      owner: 'web',
+    },
     interruptedArtifact: {
       artifactId: 'artifact-runtime',
       context: { scope: 'session', namespace: 'sess-runtime' },
@@ -388,7 +373,6 @@ async function testSessionRouteFallsBackToRuntimeStateAndSanitizesArtifact(): Pr
       runFamilyId: 'family-active',
       terminalCode: 'error',
       replayCutoffKind: 'checkpoint',
-      resumable: true,
       lastSafeStep: 55,
       maxSteps: 100,
       errorSummary: 'read ECONNRESET',
@@ -407,6 +391,8 @@ async function testSessionRouteFallsBackToRuntimeStateAndSanitizesArtifact(): Pr
       ],
     },
     pendingPlanInput: null,
+    planningState: null,
+    runtimeErrors: [],
     contextUtilization: null,
     memoryPromotionState: null,
     messages: [{ role: 'user', content: 'plain display prompt' }],

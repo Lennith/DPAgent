@@ -6,87 +6,26 @@ import { AutomationExecutionService } from '../../src/automation/AutomationExecu
 import { AutomationRoutes } from '../../src/automation/AutomationRoutes.js';
 import { AutomationStore } from '../../src/automation/AutomationStore.js';
 import { normalizeAutomationSchedule } from '../../src/automation/schedule.js';
-import { WebServer } from '../../src/web/server/WebServer.js';
-
-type RouteHandler = (req: any, res: any) => Promise<void> | void;
-
-function createFakeApp(): {
-  getHandlers: Map<string, RouteHandler>;
-  postHandlers: Map<string, RouteHandler>;
-  putHandlers: Map<string, RouteHandler>;
-  patchHandlers: Map<string, RouteHandler>;
-  deleteHandlers: Map<string, RouteHandler>;
-  use: (...args: unknown[]) => void;
-  get: (route: string, handler: RouteHandler) => void;
-  post: (route: string, handler: RouteHandler) => void;
-  put: (route: string, handler: RouteHandler) => void;
-  patch: (route: string, handler: RouteHandler) => void;
-  delete: (route: string, handler: RouteHandler) => void;
-} {
-  const getHandlers = new Map<string, RouteHandler>();
-  const postHandlers = new Map<string, RouteHandler>();
-  const putHandlers = new Map<string, RouteHandler>();
-  const patchHandlers = new Map<string, RouteHandler>();
-  const deleteHandlers = new Map<string, RouteHandler>();
-  return {
-    getHandlers,
-    postHandlers,
-    putHandlers,
-    patchHandlers,
-    deleteHandlers,
-    use: () => undefined,
-    get: (route, handler) => {
-      getHandlers.set(route, handler);
-    },
-    post: (route, handler) => {
-      postHandlers.set(route, handler);
-    },
-    put: (route, handler) => {
-      putHandlers.set(route, handler);
-    },
-    patch: (route, handler) => {
-      patchHandlers.set(route, handler);
-    },
-    delete: (route, handler) => {
-      deleteHandlers.set(route, handler);
-    },
-  };
-}
-
-function createResponseRecorder(): {
-  statusCode: number;
-  payload: unknown;
-  status: (code: number) => any;
-  json: (payload: unknown) => any;
-} {
-  return {
-    statusCode: 200,
-    payload: undefined,
-    status(code: number) {
-      this.statusCode = code;
-      return this;
-    },
-    json(payload: unknown) {
-      this.payload = payload;
-      return this;
-    },
-  };
-}
+import { createWebServerDouble } from './helpers/web-server-harness.js';
+import { createResponseRecorder, createRouteAppHarness } from './helpers/web-route-harness.js';
 
 function createHarness(): {
-  app: ReturnType<typeof createFakeApp>;
+  routes: ReturnType<typeof createRouteAppHarness>;
   storeDir: string;
   store: AutomationStore;
   mutateMemoryCalls: Array<Record<string, unknown>>;
 } {
-  const app = createFakeApp();
+  const routes = createRouteAppHarness();
   const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-automation-routes-'));
   const store = new AutomationStore(storeDir);
   const mutateMemoryCalls: Array<Record<string, unknown>> = [];
-  const server = Object.create(WebServer.prototype) as any;
-  server.app = app;
+  const server = createWebServerDouble();
+  server.app = routes.app;
   server.wss = { clients: new Set() };
   server.bootMissingApiKey = false;
+  server.activeRunContexts = new Map();
+  server.activeRunStatesByContext = new Map();
+  server.cancelingRunIds = new Set();
   server.automationStore = store;
   server.automationExecutionService = new AutomationExecutionService({
     store,
@@ -156,6 +95,7 @@ function createHarness(): {
             apiKey: 'sk-test-01234567890123456789',
             apiBase: 'https://api.minimax.test',
             defaultModel: 'MiniMax-M2.7',
+            availableModels: ['MiniMax-M2.7', 'MiniMax-M2.7-highspeed'],
             maxOutputTokens: 32768,
             enabled: true,
           },
@@ -211,13 +151,13 @@ function createHarness(): {
     resolveToolsetName: () => 'full-access',
   };
   server.setupRoutes();
-  return { app, storeDir, store, mutateMemoryCalls };
+  return { routes, storeDir, store, mutateMemoryCalls };
 }
 
 async function testSessionsRouteFiltersAutomationByDefault(): Promise<void> {
   const harness = createHarness();
   try {
-    const handler = harness.app.getHandlers.get('/api/sessions');
+    const handler = harness.routes.getRoutes.get('/api/sessions');
     assert.ok(handler);
 
     const defaultRes = createResponseRecorder();
@@ -237,14 +177,14 @@ async function testSessionsRouteFiltersAutomationByDefault(): Promise<void> {
 async function testAutomationCrudAndManualMemoryWrite(): Promise<void> {
   const harness = createHarness();
   try {
-    const createHandler = harness.app.postHandlers.get('/api/automations');
-    const listHandler = harness.app.getHandlers.get('/api/automations');
-    const updateHandler = harness.app.putHandlers.get('/api/automations/:id');
-    const toggleHandler = harness.app.postHandlers.get('/api/automations/:id/toggle');
-    const deleteHandler = harness.app.deleteHandlers.get('/api/automations/:id');
-    const runsHandler = harness.app.getHandlers.get('/api/automations/:id/runs');
-    const runHandler = harness.app.postHandlers.get('/api/automations/:id/run');
-    const memoryHandler = harness.app.postHandlers.get('/api/automations/:id/memory/from-session');
+    const createHandler = harness.routes.postRoutes.get('/api/automations');
+    const listHandler = harness.routes.getRoutes.get('/api/automations');
+    const updateHandler = harness.routes.putRoutes.get('/api/automations/:id');
+    const toggleHandler = harness.routes.postRoutes.get('/api/automations/:id/toggle');
+    const deleteHandler = harness.routes.deleteRoutes.get('/api/automations/:id');
+    const runsHandler = harness.routes.getRoutes.get('/api/automations/:id/runs');
+    const runHandler = harness.routes.postRoutes.get('/api/automations/:id/run');
+    const memoryHandler = harness.routes.postRoutes.get('/api/automations/:id/memory/from-session');
     assert.ok(createHandler);
     assert.ok(listHandler);
     assert.ok(updateHandler);
@@ -262,6 +202,7 @@ async function testAutomationCrudAndManualMemoryWrite(): Promise<void> {
           prompt: 'Summarize yesterday changes',
           workspaceDir: 'D:\\repo',
           skills: ['checks'],
+          agentName: 'browser',
           llmSelection: {
             profileId: 'deepseek',
             model: 'deepseek-v4',
@@ -322,12 +263,35 @@ async function testAutomationCrudAndManualMemoryWrite(): Promise<void> {
     );
     assert.equal(updateRes.statusCode, 200);
     const updated = (updateRes.payload as {
-      item: { enabled: boolean; name: string; llmSelection?: { profileId: string; model: string } };
+      item: {
+        enabled: boolean;
+        name: string;
+        skills: string[];
+        agentName?: string;
+        llmSelection?: { profileId: string; model: string };
+      };
     }).item;
     assert.equal(updated.enabled, false);
     assert.equal(updated.name, 'Daily Report Renamed');
+    assert.equal(updated.agentName, 'browser');
+    assert.deepEqual(updated.skills, ['checks']);
     assert.equal(updated.llmSelection?.profileId, 'minimax');
     assert.equal(updated.llmSelection?.model, 'MiniMax-M2.7-highspeed');
+
+    const clearAgentRes = createResponseRecorder();
+    await updateHandler?.(
+      {
+        params: { id: createdItem.id },
+        body: {
+          agentName: null,
+        },
+      },
+      clearAgentRes
+    );
+    assert.equal(clearAgentRes.statusCode, 200);
+    const clearedAgent = (clearAgentRes.payload as { item: { agentName?: string; skills: string[] } }).item;
+    assert.equal(clearedAgent.agentName, undefined);
+    assert.deepEqual(clearedAgent.skills, ['checks']);
 
     const manualRunRes = createResponseRecorder();
     await runHandler?.({ params: { id: createdItem.id } }, manualRunRes);
@@ -377,7 +341,84 @@ async function testAutomationCrudAndManualMemoryWrite(): Promise<void> {
   }
 }
 
-async function testSystemAutomationReadOnlyAndReportRoutes(): Promise<void> {
+async function testAutomationIntervalScheduleCrud(): Promise<void> {
+  const harness = createHarness();
+  try {
+    const createHandler = harness.routes.postRoutes.get('/api/automations');
+    const updateHandler = harness.routes.putRoutes.get('/api/automations/:id');
+    const toggleHandler = harness.routes.postRoutes.get('/api/automations/:id/toggle');
+    assert.ok(createHandler);
+    assert.ok(updateHandler);
+    assert.ok(toggleHandler);
+
+    const createRes = createResponseRecorder();
+    await createHandler?.(
+      {
+        body: {
+          name: 'Interval Check',
+          prompt: 'Check status',
+          workspaceDir: 'D:\\repo',
+          schedule: { frequency: 'interval', intervalSeconds: 45 },
+          timezone: 'UTC',
+          enabled: true,
+        },
+      },
+      createRes
+    );
+    assert.equal(createRes.statusCode, 200);
+    const created = (createRes.payload as {
+      item: { id: string; schedule: { frequency: string; intervalSeconds: number }; nextRunAt?: string };
+    }).item;
+    assert.equal(created.schedule.frequency, 'interval');
+    assert.equal(created.schedule.intervalSeconds, 45);
+    assert.ok(created.nextRunAt);
+
+    const updateRes = createResponseRecorder();
+    await updateHandler?.(
+      {
+        params: { id: created.id },
+        body: {
+          schedule: { frequency: 'daily', hour: 10, minute: 5 },
+          timezone: 'UTC',
+        },
+      },
+      updateRes
+    );
+    assert.equal(updateRes.statusCode, 200);
+    const updated = (updateRes.payload as {
+      item: { schedule: { frequency: string; intervalSeconds?: number; hour?: number; minute?: number } };
+    }).item;
+    assert.deepEqual(updated.schedule, { frequency: 'daily', minute: 5, hour: 10 });
+
+    const updateBackRes = createResponseRecorder();
+    await updateHandler?.(
+      {
+        params: { id: created.id },
+        body: {
+          schedule: { frequency: 'interval', intervalSeconds: 120 },
+          timezone: 'UTC',
+        },
+      },
+      updateBackRes
+    );
+    assert.equal(updateBackRes.statusCode, 200);
+    const intervalAgain = (updateBackRes.payload as {
+      item: { schedule: { frequency: string; intervalSeconds?: number } };
+    }).item;
+    assert.deepEqual(intervalAgain.schedule, { frequency: 'interval', intervalSeconds: 120 });
+
+    const toggleRes = createResponseRecorder();
+    await toggleHandler?.({ params: { id: created.id }, body: { enabled: true } }, toggleRes);
+    assert.equal(toggleRes.statusCode, 200);
+    const toggled = (toggleRes.payload as { item: { enabled: boolean; nextRunAt?: string } }).item;
+    assert.equal(toggled.enabled, true);
+    assert.ok(toggled.nextRunAt);
+  } finally {
+    fs.rmSync(harness.storeDir, { recursive: true, force: true });
+  }
+}
+
+async function testDeprecatedSystemAutomationIsHiddenAndNotRunnable(): Promise<void> {
   const harness = createHarness();
   try {
     const systemJob = harness.store.upsertSystemJob({
@@ -394,18 +435,16 @@ async function testSystemAutomationReadOnlyAndReportRoutes(): Promise<void> {
       timezone: 'UTC',
     });
 
-    const listHandler = harness.app.getHandlers.get('/api/automations');
-    const updateHandler = harness.app.putHandlers.get('/api/automations/:id');
-    const toggleHandler = harness.app.postHandlers.get('/api/automations/:id/toggle');
-    const deleteHandler = harness.app.deleteHandlers.get('/api/automations/:id');
-    const runHandler = harness.app.postHandlers.get('/api/automations/:id/run');
-    const reportHandler = harness.app.getHandlers.get('/api/automations/:id/runs/:runId/report');
+    const listHandler = harness.routes.getRoutes.get('/api/automations');
+    const updateHandler = harness.routes.putRoutes.get('/api/automations/:id');
+    const toggleHandler = harness.routes.postRoutes.get('/api/automations/:id/toggle');
+    const deleteHandler = harness.routes.deleteRoutes.get('/api/automations/:id');
+    const runHandler = harness.routes.postRoutes.get('/api/automations/:id/run');
     assert.ok(listHandler);
     assert.ok(updateHandler);
     assert.ok(toggleHandler);
     assert.ok(deleteHandler);
     assert.ok(runHandler);
-    assert.ok(reportHandler);
 
     const listRes = createResponseRecorder();
     await listHandler?.({}, listRes);
@@ -413,11 +452,7 @@ async function testSystemAutomationReadOnlyAndReportRoutes(): Promise<void> {
     const items = (listRes.payload as {
       items: Array<{ id: string; readOnly?: boolean; jobSource?: string; systemTask?: string }>;
     }).items;
-    assert.equal(items.length, 1);
-    assert.equal(items[0]?.id, systemJob.id);
-    assert.equal(items[0]?.readOnly, true);
-    assert.equal(items[0]?.jobSource, 'system');
-    assert.equal(items[0]?.systemTask, 'auto_generated_skill_governance');
+    assert.equal(items.length, 0);
 
     const updateRes = createResponseRecorder();
     await updateHandler?.(
@@ -439,19 +474,7 @@ async function testSystemAutomationReadOnlyAndReportRoutes(): Promise<void> {
 
     const manualRunRes = createResponseRecorder();
     await runHandler?.({ params: { id: systemJob.id } }, manualRunRes);
-    assert.equal(manualRunRes.statusCode, 200);
-    const manualRun = (manualRunRes.payload as {
-      run: { id: string; triggerSource: string; status: string; reportPath?: string };
-    }).run;
-    assert.equal(manualRun.triggerSource, 'manual');
-    assert.equal(manualRun.status, 'succeeded');
-    assert.ok(manualRun.reportPath);
-
-    const reportRes = createResponseRecorder();
-    await reportHandler?.({ params: { id: systemJob.id, runId: manualRun.id } }, reportRes);
-    assert.equal(reportRes.statusCode, 200);
-    const report = (reportRes.payload as { report: { summary: { autoArchived: number } } }).report;
-    assert.equal(report.summary.autoArchived, 1);
+    assert.equal(manualRunRes.statusCode, 404);
   } finally {
     fs.rmSync(harness.storeDir, { recursive: true, force: true });
   }
@@ -460,7 +483,8 @@ async function testSystemAutomationReadOnlyAndReportRoutes(): Promise<void> {
 async function runAll(): Promise<void> {
   await testSessionsRouteFiltersAutomationByDefault();
   await testAutomationCrudAndManualMemoryWrite();
-  await testSystemAutomationReadOnlyAndReportRoutes();
+  await testAutomationIntervalScheduleCrud();
+  await testDeprecatedSystemAutomationIsHiddenAndNotRunnable();
   console.log('web-automation-routes tests passed');
 }
 

@@ -1,6 +1,5 @@
 import * as assert from 'node:assert/strict';
 import {
-  buildMcpIndicatorLabel,
   normalizeMcpStatus,
   resolveMcpIndicatorState,
 } from '../../src/web/client/mcp-status.js';
@@ -69,42 +68,10 @@ function testResolveMcpIndicatorStateMapping(): void {
   );
 }
 
-function testBuildMcpIndicatorLabel(): void {
-  assert.equal(buildMcpIndicatorLabel(null), 'MCP idle');
-  assert.equal(
-    buildMcpIndicatorLabel(
-      normalizeMcpStatus({
-        enabled: true,
-        summary: { state: 'connected', connectedCount: 1, totalEnabled: 1 },
-      })
-    ),
-    'MCP connected (1/1)'
-  );
-  assert.equal(
-    buildMcpIndicatorLabel(
-      normalizeMcpStatus({
-        enabled: true,
-        summary: { state: 'degraded', connectedCount: 0, totalEnabled: 1 },
-      })
-    ),
-    'MCP degraded'
-  );
-  assert.equal(
-    buildMcpIndicatorLabel(
-      normalizeMcpStatus({
-        enabled: false,
-        summary: { state: 'disabled', connectedCount: 0, totalEnabled: 0 },
-      })
-    ),
-    'MCP disabled'
-  );
-}
-
 function runAll(): void {
   testNormalizeMcpStatusWithValidPayload();
   testNormalizeMcpStatusFallsBackForInvalidInput();
   testResolveMcpIndicatorStateMapping();
-  testBuildMcpIndicatorLabel();
   console.log('mcp-status-ui tests passed');
 }
 

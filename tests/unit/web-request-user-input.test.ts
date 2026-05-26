@@ -1,7 +1,12 @@
 import * as assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
-import { WebServer } from '../../src/web/server/WebServer.js';
 import type { ContextRef, PlanInputAnswer, PlanInputRequest } from '../../src/types.js';
+import { createWebServerTestConfig } from './web-server-test-config.js';
+import {
+  createWebServerDouble,
+  getPendingPlanInputs,
+  replacePendingPlanInputs,
+} from './helpers/web-server-harness.js';
 
 interface PendingPlanInputRecord {
   runId: string;
@@ -79,14 +84,14 @@ function createHarness(withExistingPending = false): RequestUserInputHarness {
     namespace: 'sess-1',
   };
   const request = createRequest();
-  const server = Object.create(WebServer.prototype) as any;
+  const server = createWebServerDouble();
 
   server.wss = { clients: [] };
   server.cancelingRunIds = new Set<string>();
-  server.pendingPlanInputByRunId = new RecordingPendingPlanInputMap(
+  replacePendingPlanInputs(server, new RecordingPendingPlanInputMap(
     lifecycle,
     withExistingPending ? [['run-1', { existing: true }]] : undefined
-  );
+  ) as any);
   server.emitToClient = (ws: object, message: Omit<EmittedMessage, 'ws'>) => {
     lifecycle.push(`emit:${message.type}`);
     emittedMessages.push({ ws, ...message });
@@ -127,7 +132,7 @@ function createHarness(withExistingPending = false): RequestUserInputHarness {
   };
 }
 
-async function testClosedSocketStillStoresPendingForReconnect(): Promise<void> {
+async function testClosedSocketStoresDetachedPendingForReconnectGrace(): Promise<void> {
   const harness = createHarness();
 
   const pendingPromise = harness.server.requestUserInputFromSocket(
@@ -140,11 +145,14 @@ async function testClosedSocketStillStoresPendingForReconnect(): Promise<void> {
 
   assert.deepEqual(harness.lifecycle, ['meta:update', 'emit:plan_input_requested', 'set:run-1']);
   assert.deepEqual(harness.emittedRequests, [harness.request]);
-  assert.equal(harness.server.pendingPlanInputByRunId.size, 1);
+  assert.equal(getPendingPlanInputs(harness.server).size, 1);
 
   const answers: PlanInputAnswer[] = [{ id: 'mode', selectedLabel: 'Fast', selectedIndex: 0 }];
-  const pending = harness.server.pendingPlanInputByRunId.get('run-1') as PendingPlanInputRecord;
+  const pending = getPendingPlanInputs(harness.server).get('run-1') as PendingPlanInputRecord;
   assert.equal(pending.ws, harness.closedSocket);
+  assert.equal(typeof pending.detachedAt, 'number');
+  assert.ok(pending.detachTimer);
+  clearTimeout(pending.detachTimer);
   pending.resolve(answers);
   assert.deepEqual(await pendingPromise, answers);
 }
@@ -166,7 +174,7 @@ async function testDuplicatePendingRejectsWithoutEmitOrSet(): Promise<void> {
   assert.deepEqual(harness.lifecycle, []);
   assert.deepEqual(harness.emittedRequests, []);
   assert.deepEqual(harness.metaUpdates, []);
-  assert.equal(harness.server.pendingPlanInputByRunId.size, 1);
+  assert.equal(getPendingPlanInputs(harness.server).size, 1);
 }
 
 async function testSuccessfulRequestEmitsAndStoresPendingRecord(): Promise<void> {
@@ -209,7 +217,7 @@ async function testSuccessfulRequestEmitsAndStoresPendingRecord(): Promise<void>
     /^\d{4}-\d{2}-\d{2}T/
   );
 
-  const pending = harness.server.pendingPlanInputByRunId.get('run-1') as PendingPlanInputRecord;
+  const pending = getPendingPlanInputs(harness.server).get('run-1') as PendingPlanInputRecord;
   assert.equal(pending.runId, 'run-1');
   assert.equal(pending.context, harness.context);
   assert.equal(pending.ws, harness.openSocket);
@@ -230,7 +238,7 @@ async function testPendingRejectWiresReturnedPromise(): Promise<void> {
     harness.emitRequested
   );
 
-  const pending = harness.server.pendingPlanInputByRunId.get('run-1') as PendingPlanInputRecord;
+  const pending = getPendingPlanInputs(harness.server).get('run-1') as PendingPlanInputRecord;
   pending.reject(new Error('run_canceled'));
 
   await assert.rejects(pendingPromise, { message: 'run_canceled' });
@@ -249,14 +257,14 @@ async function testDetachedPendingRequestCancelsAfterGraceCleanup(): Promise<voi
   );
 
   harness.server.detachPendingPlanInputSocket(harness.openSocket);
-  const pending = harness.server.pendingPlanInputByRunId.get('run-1') as PendingPlanInputRecord;
+  const pending = getPendingPlanInputs(harness.server).get('run-1') as PendingPlanInputRecord;
   assert.equal(typeof pending.detachedAt, 'number');
   assert.ok(pending.detachTimer);
 
   harness.server.cancelDetachedPendingPlanInput('run-1', harness.context);
 
   await assert.rejects(pendingPromise, { message: 'websocket_closed' });
-  assert.equal(harness.server.pendingPlanInputByRunId.has('run-1'), false);
+  assert.equal(getPendingPlanInputs(harness.server).has('run-1'), false);
   assert.equal(harness.server.cancelingRunIds.has('run-1'), true);
   assert.deepEqual(harness.lifecycle, [
     'meta:update',
@@ -280,7 +288,7 @@ async function testCreateCallbackOnRequestUserInputPreservesWireBehavior(): Prom
   ];
 
   harness.server.agent = {
-    getConfig: () => ({
+    getConfig: () => createWebServerTestConfig({
       agent: {
         tokenLimit: 1000,
       },
@@ -304,14 +312,14 @@ async function testCreateCallbackOnRequestUserInputPreservesWireBehavior(): Prom
     },
   ]);
 
-  const pending = harness.server.pendingPlanInputByRunId.get('run-1') as PendingPlanInputRecord;
+  const pending = getPendingPlanInputs(harness.server).get('run-1') as PendingPlanInputRecord;
   pending.resolve(answers);
 
   assert.deepEqual(await pendingPromise, answers);
 }
 
 async function runAll(): Promise<void> {
-  await testClosedSocketStillStoresPendingForReconnect();
+  await testClosedSocketStoresDetachedPendingForReconnectGrace();
   await testDuplicatePendingRejectsWithoutEmitOrSet();
   await testSuccessfulRequestEmitsAndStoresPendingRecord();
   await testPendingRejectWiresReturnedPromise();

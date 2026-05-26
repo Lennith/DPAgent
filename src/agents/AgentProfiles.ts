@@ -1,8 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
+import type {
+  AgentProfileConfig,
+  AgentProfileConfigView,
+  AgentRuntimeOverrides,
+  ReasoningPreset,
+} from '../types.js';
 
-export type AgentProfileSource = 'global' | 'workspace';
+export type AgentProfileSource = 'bundled' | 'global' | 'workspace';
 
 export interface AgentProfile {
   name: string;
@@ -10,8 +16,11 @@ export interface AgentProfile {
   description: string;
   mtime: string;
   path: string;
+  configPath?: string;
   content: string;
   source: AgentProfileSource;
+  config?: AgentProfileConfig;
+  configWarnings?: string[];
 }
 
 export interface AgentProfileCatalog {
@@ -42,10 +51,14 @@ export interface AgentProfilePromptParseResult {
 }
 
 export interface ResolveAgentPoolOptions {
+  bundledAgentsDir?: string;
   globalAgentsDir?: string;
   workspaceDir?: string;
+  includeBundled?: boolean;
   includeWorkspace?: boolean;
 }
+
+export const DEFAULT_BUNDLED_AGENTS_DIR = path.resolve(__dirname, '..', '..', 'agents');
 
 function toIsoSafe(value: Date): string {
   const time = value.getTime();
@@ -114,6 +127,177 @@ function descriptionFromFrontmatter(data: Record<string, unknown>): string {
   return '';
 }
 
+const REASONING_PRESETS = new Set<ReasoningPreset>(['off', 'low', 'medium', 'high', 'xhigh', 'max']);
+
+export function normalizeAgentProfileConfig(raw: unknown): {
+  config: AgentProfileConfig;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const config: AgentProfileConfig = {};
+  const data = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
+  if (raw !== undefined && Object.keys(data).length === 0 && raw !== null) {
+    warnings.push('agent.yaml must contain an object');
+  }
+  if (data.version !== undefined && data.version !== 1) {
+    warnings.push('version must be 1');
+  } else if (data.version === 1) {
+    config.version = 1;
+  }
+  for (const key of ['description', 'llmProfileId', 'llmModel', 'promptAppend'] as const) {
+    if (data[key] === undefined) {
+      continue;
+    }
+    if (typeof data[key] !== 'string') {
+      warnings.push(`${key} must be a string`);
+      continue;
+    }
+    const value = data[key].trim();
+    if (value) {
+      config[key] = value;
+    }
+  }
+  if (data.toolsetName !== undefined) {
+    if (typeof data.toolsetName !== 'string') {
+      warnings.push('toolsetName must be a string');
+    } else {
+      const value = data.toolsetName.trim();
+      if (value) {
+        config.toolsetName = value;
+      }
+    }
+  }
+  if (data.allowedTools !== undefined) {
+    if (!Array.isArray(data.allowedTools) || data.allowedTools.some((item) => typeof item !== 'string')) {
+      warnings.push('allowedTools must be an array of strings');
+    } else {
+      const allowedTools = Array.from(
+        new Set(data.allowedTools.map((item) => item.trim()).filter((item) => item.length > 0))
+      );
+      if (allowedTools.length > 0) {
+        config.allowedTools = allowedTools;
+      }
+    }
+  }
+  for (const key of ['maxSteps', 'timeoutMs'] as const) {
+    if (data[key] === undefined) {
+      continue;
+    }
+    const value = data[key];
+    if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+      warnings.push(`${key} must be a positive integer`);
+      continue;
+    }
+    config[key] = value;
+  }
+  if (data.reasoningPreset !== undefined) {
+    const value = String(data.reasoningPreset ?? '').trim() as ReasoningPreset;
+    if (REASONING_PRESETS.has(value)) {
+      config.reasoningPreset = value;
+    } else {
+      warnings.push('reasoningPreset must be one of off, low, medium, high, xhigh, max');
+    }
+  }
+  if (data.loadGlobalSkills !== undefined) {
+    if (typeof data.loadGlobalSkills === 'boolean') {
+      config.loadGlobalSkills = data.loadGlobalSkills;
+    } else {
+      warnings.push('loadGlobalSkills must be a boolean');
+    }
+  }
+  if (data.exposeAsSubagent !== undefined) {
+    if (typeof data.exposeAsSubagent === 'boolean') {
+      config.exposeAsSubagent = data.exposeAsSubagent;
+    } else {
+      warnings.push('exposeAsSubagent must be a boolean');
+    }
+  }
+  return { config, warnings };
+}
+
+export function readAgentProfileConfig(agentDir: string): {
+  config?: AgentProfileConfig;
+  warnings: string[];
+  path: string;
+} {
+  const configPath = path.join(agentDir, 'agent.yaml');
+  if (!fs.existsSync(configPath)) {
+    return { warnings: [], path: configPath };
+  }
+  try {
+    const parsed = yaml.load(fs.readFileSync(configPath, 'utf-8'));
+    const normalized = normalizeAgentProfileConfig(parsed);
+    return {
+      config: normalized.config,
+      warnings: normalized.warnings,
+      path: configPath,
+    };
+  } catch (error) {
+    return {
+      warnings: [`agent.yaml parse failed: ${error instanceof Error ? error.message : String(error)}`],
+      path: configPath,
+    };
+  }
+}
+
+export function toAgentProfileConfigView(
+  config: AgentProfileConfig | undefined,
+  warnings: string[] | undefined,
+  configPath?: string
+): AgentProfileConfigView {
+  return {
+    ...(config ?? {}),
+    warnings: warnings ?? [],
+    ...(configPath ? { path: configPath } : {}),
+  };
+}
+
+export function toAgentRuntimeOverrides(profile: AgentProfile | undefined): AgentRuntimeOverrides | undefined {
+  if (!profile) {
+    return undefined;
+  }
+  const config = profile.config ?? {};
+  const overrides: AgentRuntimeOverrides = {
+    agentProfile: {
+      source: profile.source,
+      name: profile.name,
+      path: profile.path,
+    },
+  };
+  if (config.llmProfileId) {
+    overrides.llmProfileId = config.llmProfileId;
+  }
+  if (config.llmModel) {
+    overrides.llmModel = config.llmModel;
+  }
+  if (config.reasoningPreset) {
+    overrides.reasoningPreset = config.reasoningPreset;
+  }
+  if (config.toolsetName) {
+    overrides.toolsetName = config.toolsetName;
+  }
+  if (config.allowedTools) {
+    overrides.allowedTools = config.allowedTools;
+  }
+  if (config.maxSteps) {
+    overrides.maxSteps = config.maxSteps;
+  }
+  if (config.timeoutMs) {
+    overrides.timeoutMs = config.timeoutMs;
+  }
+  if (config.loadGlobalSkills === false) {
+    overrides.loadGlobalSkills = false;
+  }
+  return overrides;
+}
+
+export function writeAgentProfileConfig(configPath: string, config: AgentProfileConfig): void {
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, yaml.dump(config, { lineWidth: 100 }), 'utf-8');
+}
+
 function firstEffectiveLine(content: string): string {
   const lines = content.replace(/^\uFEFF/, '').split(/\r?\n/);
   for (const line of lines) {
@@ -147,8 +331,8 @@ function ensureDescription(name: string, description: string): string {
   return `Agent profile: ${name}`;
 }
 
-export function scanGlobalAgentProfiles(globalAgentsDir: string): AgentProfileCatalog {
-  const resolvedDir = path.resolve(globalAgentsDir);
+function scanAgentProfiles(agentsDir: string, source: Exclude<AgentProfileSource, 'workspace'>): AgentProfileCatalog {
+  const resolvedDir = path.resolve(agentsDir);
   if (!resolvedDir || !fs.existsSync(resolvedDir)) {
     return {
       profiles: [],
@@ -180,15 +364,22 @@ export function scanGlobalAgentProfiles(globalAgentsDir: string): AgentProfileCa
     }
     const stat = fs.statSync(profilePath);
     const parsed = extractFrontmatter(content);
+    const configResult = readAgentProfileConfig(path.join(resolvedDir, entry.name));
     const derivedDescription = descriptionFromFrontmatter(parsed.data);
     const profile: AgentProfile = {
       name: entry.name.trim(),
       normalizedName,
-      description: ensureDescription(entry.name.trim(), derivedDescription || firstEffectiveLine(parsed.body)),
+      description: ensureDescription(
+        entry.name.trim(),
+        configResult.config?.description || derivedDescription || firstEffectiveLine(parsed.body)
+      ),
       mtime: toIsoSafe(stat.mtime),
       path: profilePath,
+      configPath: configResult.path,
       content,
-      source: 'global',
+      source,
+      config: configResult.config,
+      configWarnings: configResult.warnings,
     };
     const existing = byNormalizedName.get(normalizedName);
     if (existing) {
@@ -205,6 +396,14 @@ export function scanGlobalAgentProfiles(globalAgentsDir: string): AgentProfileCa
     profiles: Array.from(byNormalizedName.values()).sort((a, b) => a.name.localeCompare(b.name)),
     duplicateOverrides,
   };
+}
+
+export function scanBundledAgentProfiles(bundledAgentsDir: string = DEFAULT_BUNDLED_AGENTS_DIR): AgentProfileCatalog {
+  return scanAgentProfiles(bundledAgentsDir, 'bundled');
+}
+
+export function scanGlobalAgentProfiles(globalAgentsDir: string): AgentProfileCatalog {
+  return scanAgentProfiles(globalAgentsDir, 'global');
 }
 
 export function parseLeadingAgentMention(prompt: string): MentionParseResult {
@@ -246,11 +445,78 @@ export function loadWorkspaceAgentProfile(workspaceDir: string): AgentProfile | 
 }
 
 export function buildAgentProfileBlock(
-  profile: Pick<AgentProfile, 'source' | 'name' | 'path' | 'content'>
+  profile: Pick<AgentProfile, 'source' | 'name' | 'path' | 'content' | 'config'>
 ): string {
   const profileHeader = `[AGENT_PROFILE_BEGIN source=${profile.source} name=${profile.name} path=${profile.path}]`;
   const profileFooter = '[AGENT_PROFILE_END]';
-  return `${profileHeader}\n${profile.content}\n${profileFooter}`;
+  const promptAppend = String(profile.config?.promptAppend ?? '').trim();
+  const content = promptAppend ? `${profile.content.trimEnd()}\n\n${promptAppend}` : profile.content;
+  return `${profileHeader}\n${content}\n${profileFooter}`;
+}
+
+const SYSTEM_SEGMENT_LINE_CAP = 150;
+
+function applyPromptAppend(
+  profile: Pick<AgentProfile, 'content' | 'config'>
+): string {
+  const promptAppend = String(profile.config?.promptAppend ?? '').trim();
+  return promptAppend ? `${profile.content.trimEnd()}\n\n${promptAppend}` : profile.content;
+}
+
+function truncateLines(
+  content: string,
+  options: {
+    maxLines?: number;
+    notice: string;
+  }
+): string {
+  const maxLines = Math.max(1, Math.floor(options.maxLines ?? SYSTEM_SEGMENT_LINE_CAP));
+  const lines = String(content ?? '').replace(/^\uFEFF/, '').split(/\r?\n/);
+  if (lines.length <= maxLines) {
+    return lines.join('\n').trimEnd();
+  }
+  return [
+    ...lines.slice(0, maxLines),
+    '',
+    options.notice,
+  ].join('\n').trimEnd();
+}
+
+export function buildAgentProfileSystemSegment(
+  profile: Pick<AgentProfile, 'source' | 'name' | 'path' | 'content' | 'config'>,
+  options?: { maxLines?: number }
+): string {
+  const content = truncateLines(applyPromptAppend(profile), {
+    maxLines: options?.maxLines,
+    notice: `Agent profile truncated after ${Math.max(1, Math.floor(options?.maxLines ?? SYSTEM_SEGMENT_LINE_CAP))} lines. Full profile path: ${profile.path}`,
+  });
+  return [
+    '## Active Agent Role',
+    'Use this agent profile as role, persona, and task guidance for this turn.',
+    'Core runtime, tool permission, and workspace instructions remain binding if they conflict with this role.',
+    `[AGENT_PROFILE_BEGIN source=${profile.source} name=${profile.name} path=${profile.path}]`,
+    content,
+    '[AGENT_PROFILE_END]',
+  ].join('\n');
+}
+
+export function buildWorkspaceInstructionsSystemSegment(
+  profile: Pick<AgentProfile, 'path' | 'content' | 'config'>,
+  options?: { maxLines?: number }
+): string {
+  const content = truncateLines(applyPromptAppend(profile), {
+    maxLines: options?.maxLines,
+    notice: `Workspace instructions truncated after ${Math.max(1, Math.floor(options?.maxLines ?? SYSTEM_SEGMENT_LINE_CAP))} lines. Full instructions path: ${profile.path}`,
+  });
+  return [
+    '## Workspace Instructions',
+    'These instructions apply to repository behavior, file edits, tests, commits, and project conventions.',
+    'They do not define the assistant persona when an Active Agent Role is present.',
+    'If they conflict with Core Runtime Rules, Core Runtime Rules win.',
+    `[WORKSPACE_INSTRUCTIONS_BEGIN path=${profile.path}]`,
+    content,
+    '[WORKSPACE_INSTRUCTIONS_END]',
+  ].join('\n');
 }
 
 export function buildPromptWithAgentProfile(prompt: string, profile: AgentProfile): string {
@@ -263,20 +529,34 @@ export function buildAgentProfileReferenceTag(
   return `[AGENT_PROFILE_REF source=${profile.source} name=${profile.name} path=${profile.path}]`;
 }
 
+const AGENT_PROFILE_REFERENCE_NOTICE = [
+  '[AGENT_PROFILE_REF_NOTE]',
+  'The path in AGENT_PROFILE_REF identifies the agent profile definition file only; it is not the current workspace. Use the Current Workspace system prompt for file operations and relative paths.',
+  '[/AGENT_PROFILE_REF_NOTE]',
+].join('\n');
+
+function buildAgentProfileReferenceBlock(
+  profile: Pick<AgentProfileReference, 'source' | 'name' | 'path'>
+): string {
+  return `${buildAgentProfileReferenceTag(profile)}\n${AGENT_PROFILE_REFERENCE_NOTICE}`;
+}
+
 export function buildPromptWithAgentProfileReference(
   prompt: string,
   profile: Pick<AgentProfileReference, 'source' | 'name' | 'path'>
 ): string {
-  return `${buildAgentProfileReferenceTag(profile)}\n\n${prompt}`;
+  return `${buildAgentProfileReferenceBlock(profile)}\n\n${prompt}`;
 }
 
 export function buildAgentProfileBootstrapBlock(
-  profile: Pick<AgentProfile, 'source' | 'name' | 'path' | 'content'>
+  profile: Pick<AgentProfile, 'source' | 'name' | 'path' | 'content' | 'config'>
 ): string {
+  const promptAppend = String(profile.config?.promptAppend ?? '').trim();
+  const content = promptAppend ? `${profile.content.trimEnd()}\n\n${promptAppend}` : profile.content;
   return [
-    buildAgentProfileReferenceTag(profile),
+    buildAgentProfileReferenceBlock(profile),
     '[AGENT_PROFILE_BODY_BEGIN]',
-    profile.content,
+    content,
     '[AGENT_PROFILE_BODY_END]',
   ].join('\n');
 }
@@ -294,7 +574,7 @@ function parseAgentProfileTag(
 ): AgentProfileReference | undefined {
   const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(
-    `^\\[${escapedMarker}\\s+source=(global|workspace)\\s+name=([^\\s\\]]+)\\s+path=([^\\]]+)\\]`
+    `^\\[${escapedMarker}\\s+source=(bundled|global|workspace)\\s+name=([^\\s\\]]+)\\s+path=([^\\]]+)\\]`
   );
   const match = raw.match(pattern);
   if (!match) {
@@ -303,7 +583,7 @@ function parseAgentProfileTag(
   const source = String(match[1] ?? '').trim();
   const name = String(match[2] ?? '').trim();
   const pathValue = String(match[3] ?? '').trim();
-  if ((source !== 'global' && source !== 'workspace') || !name || !pathValue) {
+  if ((source !== 'bundled' && source !== 'global' && source !== 'workspace') || !name || !pathValue) {
     return undefined;
   }
   return {
@@ -311,6 +591,19 @@ function parseAgentProfileTag(
     name,
     path: pathValue,
   };
+}
+
+function stripAgentProfileReferenceNotice(raw: string): string {
+  const trimmed = raw.replace(/^\s+/, '');
+  if (!trimmed.startsWith('[AGENT_PROFILE_REF_NOTE]')) {
+    return trimmed;
+  }
+  const endMarker = '[/AGENT_PROFILE_REF_NOTE]';
+  const endIdx = trimmed.indexOf(endMarker);
+  if (endIdx < 0) {
+    return trimmed;
+  }
+  return trimmed.slice(endIdx + endMarker.length).replace(/^\s+/, '');
 }
 
 export function parseAgentProfilePrompt(prompt: string): AgentProfilePromptParseResult {
@@ -363,7 +656,7 @@ export function parseAgentProfilePrompt(prompt: string): AgentProfilePromptParse
     };
   }
 
-  const after = raw.slice(closingBracketIdx + 1).replace(/^\s+/, '');
+  const after = stripAgentProfileReferenceNotice(raw.slice(closingBracketIdx + 1));
   return {
     reference,
     strippedPrompt: after,
@@ -373,13 +666,24 @@ export function parseAgentProfilePrompt(prompt: string): AgentProfilePromptParse
 }
 
 export function resolveAgentPool(options: ResolveAgentPoolOptions): AgentProfile[] {
+  const includeBundled = options.includeBundled !== false;
   const includeWorkspace = options.includeWorkspace !== false;
+  const bundledDir = String(options.bundledAgentsDir ?? DEFAULT_BUNDLED_AGENTS_DIR).trim();
   const globalDir = String(options.globalAgentsDir ?? '').trim();
   const workspaceDir = String(options.workspaceDir ?? '').trim();
 
-  const globalProfiles = globalDir.length > 0 ? scanGlobalAgentProfiles(globalDir).profiles : [];
   const byNormalizedName = new Map<string, AgentProfile>();
+  const bundledProfiles = includeBundled && bundledDir.length > 0 ? scanBundledAgentProfiles(bundledDir).profiles : [];
+  for (const profile of bundledProfiles) {
+    byNormalizedName.set(profile.normalizedName, profile);
+  }
+
+  const resolvedBundledDir = bundledDir.length > 0 ? path.resolve(bundledDir) : '';
+  const resolvedGlobalDir = globalDir.length > 0 ? path.resolve(globalDir) : '';
+  const shouldScanGlobal = resolvedGlobalDir.length > 0 && resolvedGlobalDir !== resolvedBundledDir;
+  const globalProfiles = shouldScanGlobal ? scanGlobalAgentProfiles(globalDir).profiles : [];
   for (const profile of globalProfiles) {
+    // User-managed external agents intentionally override same-name bundled agents.
     byNormalizedName.set(profile.normalizedName, profile);
   }
 
@@ -392,6 +696,10 @@ export function resolveAgentPool(options: ResolveAgentPoolOptions): AgentProfile
   }
 
   return Array.from(byNormalizedName.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function isAgentProfileVisibleToSubagentManager(profile: AgentProfile): boolean {
+  return profile.source !== 'global' || profile.config?.exposeAsSubagent === true;
 }
 
 export function findAgentProfileByName(profiles: AgentProfile[], name: string): AgentProfile | undefined {

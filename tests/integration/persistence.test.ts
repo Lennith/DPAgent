@@ -1,9 +1,9 @@
-import { createAgent, minimaxRun, getSession, listSessions } from '../src/index.js';
+import { createAgent, getSession, listSessions } from '../src/index.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentCallback } from '../src/types.js';
 
-const API_KEY = 'sk-cp-6VmqjCaCEtLrtmM1B2qAlObOAa_3XVf6fzqgwpk_oleR87SzhFT6ViXmPcGJyWI2nzGbQNFRkxsI-itPbLoSGU5dSwQJHI0CO1SdNqylAz2KZZbcHz82CSE';
+const API_KEY = process.env.MINIMAX_INTEGRATION_API_KEY ?? 'YOUR_MINIMAX_API_KEY';
 
 async function testPersistence() {
   console.log('=== Session Persistence Test ===\n');
@@ -89,7 +89,7 @@ async function testPersistence() {
     console.log('Match:', result1.sessionId === customSessionId ? '✅' : '❌');
 
     // Check if session directory was created
-    const sessionDir = path.join('./workspace', 'minimax-session', customSessionId);
+    const sessionDir = path.join('./workspace', 'dpagent-session', customSessionId);
     console.log('Session directory exists:', fs.existsSync(sessionDir) ? '✅' : '❌');
 
     // Check if history file was created

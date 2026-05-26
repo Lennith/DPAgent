@@ -19,6 +19,20 @@ function createConfigManager(overrides?: {
       provider: 'anthropic',
       maxOutputTokens: 32768,
     },
+    llmProfiles: {
+      defaultProfileId: 'default',
+      profiles: [
+        {
+          id: 'default',
+          name: 'Default',
+          provider: 'anthropic',
+          apiKey: API_KEY,
+          apiBase: API_BASE,
+          defaultModel: 'MiniMax-M2.7-highspeed',
+          maxOutputTokens: 32768,
+        },
+      ],
+    },
     mcp: {
       enabled: overrides?.mcp?.enabled ?? false,
       servers: overrides?.mcp?.servers ?? [],
