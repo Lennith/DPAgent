@@ -5,7 +5,6 @@ const path = require('path');
 const os = require('os');
 
 const {
-  getInternalPublishConfig,
   isPrereleaseVersion,
   npmPackJson,
   removePathWithRetry,
@@ -21,6 +20,61 @@ const {
 
 const ROOT = process.cwd();
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
+const DEFAULT_USER_SMOKE = {
+  command: 'npx dpagent --no-open',
+  timeoutMs: 120000,
+  successPattern: 'Starting web server at http://localhost:{PORT}',
+};
+const DEFAULT_REQUIRED_PACK_PATHS = [
+  'dist/',
+  'agents/',
+  'doc/guide/user-guide.md',
+  'README.md',
+  'LICENSE',
+  'CONFIG.md',
+  'SECURITY.md',
+  'CONTRIBUTING.md',
+  'SUPPORT.md',
+  'CHANGELOG.md',
+  'config.example.yaml',
+];
+const DEFAULT_FORBIDDEN_PACK_PATHS = [
+  'runtime/',
+  'sessions/',
+  'contexts/',
+  'logs/',
+  'workspace/',
+  'config.yaml',
+  'release-toolcall-profiles.dev.json',
+  'release-toolcall-profiles.local.json',
+  '.env',
+];
+const DEFAULT_RELEASE_E2E_GATE = {
+  outputRoot: 'logs/release-gate-e2e',
+  aggregateFile: 'release-e2e-gate.json',
+  markdownFile: 'release-e2e-gate.md',
+  requiredCases: [
+    'e2e:release-agent-web-regression',
+    'e2e:release-plan-mode-lifecycle',
+    'e2e:release-plan-mode-ux',
+    'e2e:release-cli-long-session',
+  ],
+};
+const DEFAULT_RELEASE_TOOLCALL_GATE = {
+  outputRoot: 'logs/release-gate-toolcall-context-session',
+  aggregateFile: 'release-toolcall-context-gate.json',
+  markdownFile: 'release-toolcall-context-gate.md',
+  manualReviewFile: 'release-toolcall-context-manual-review.json',
+  requiredRuns: 2,
+  requiredRoundsPerRun: 10,
+  requiredModel: 'multi-profile',
+  requiredProfiles: ['deepseek', 'minimax'],
+  requiredProfileModels: {
+    deepseek: 'deepseek-v4-flash',
+    minimax: 'MiniMax-M2.7-highspeed',
+  },
+  minimumPassRate: 0.9,
+};
 
 function fail(message) {
   console.error(`[npm-official-publish] ERROR: ${message}`);
@@ -76,7 +130,24 @@ function getScopeRegistryArg(packageName, registry) {
   return scope ? `${scope}:registry=${registry}` : '';
 }
 
-function getNpmOfficialPublishConfig(pkg, internalCfg = getInternalPublishConfig(pkg)) {
+function getDefaultOfficialPublishAuditConfig() {
+  return {
+    userSmoke: { ...DEFAULT_USER_SMOKE },
+    requiredPackPaths: [...DEFAULT_REQUIRED_PACK_PATHS],
+    forbiddenPackPaths: [...DEFAULT_FORBIDDEN_PACK_PATHS],
+    releaseE2EGate: {
+      ...DEFAULT_RELEASE_E2E_GATE,
+      requiredCases: [...DEFAULT_RELEASE_E2E_GATE.requiredCases],
+    },
+    releaseToolcallGate: {
+      ...DEFAULT_RELEASE_TOOLCALL_GATE,
+      requiredProfiles: [...DEFAULT_RELEASE_TOOLCALL_GATE.requiredProfiles],
+      requiredProfileModels: { ...DEFAULT_RELEASE_TOOLCALL_GATE.requiredProfileModels },
+    },
+  };
+}
+
+function getNpmOfficialPublishConfig(pkg, auditCfg = getDefaultOfficialPublishAuditConfig()) {
   const cfg = pkg.npmOfficialPublish;
   if (!cfg || typeof cfg !== 'object') {
     throw new Error('Missing npmOfficialPublish config in package.json.');
@@ -94,11 +165,11 @@ function getNpmOfficialPublishConfig(pkg, internalCfg = getInternalPublishConfig
     packageName,
     registry,
     access,
-    userSmoke: internalCfg.userSmoke,
-    requiredPackPaths: internalCfg.requiredPackPaths,
-    forbiddenPackPaths: internalCfg.forbiddenPackPaths,
-    releaseE2EGate: internalCfg.releaseE2EGate,
-    releaseToolcallGate: internalCfg.releaseToolcallGate,
+    userSmoke: auditCfg.userSmoke,
+    requiredPackPaths: auditCfg.requiredPackPaths,
+    forbiddenPackPaths: auditCfg.forbiddenPackPaths,
+    releaseE2EGate: auditCfg.releaseE2EGate,
+    releaseToolcallGate: auditCfg.releaseToolcallGate,
   };
 }
 
@@ -261,13 +332,12 @@ async function main() {
   const { mode, tag, skipReleaseGate } = parseArgs();
   const plan = createPlan(mode, tag, { skipReleaseGate });
   const pkg = loadPackageJson(ROOT);
-  const internalCfg = getInternalPublishConfig(pkg);
-  const cfg = getNpmOfficialPublishConfig(pkg, internalCfg);
+  const cfg = getNpmOfficialPublishConfig(pkg);
 
   info(`mode=${mode}${tag ? ` tag=${tag}` : ''} package=${cfg.packageName}`);
   validatePublishTagForVersion(pkg, tag);
   if (plan.registrySmoke && !cfg.userSmoke) {
-    throw new Error('npmOfficialPublish requires internalPublish.userSmoke for registry smoke.');
+    throw new Error('npmOfficialPublish requires userSmoke for registry smoke.');
   }
 
   validateCleanGitWorktree(ROOT);
@@ -275,7 +345,7 @@ async function main() {
     validateReleaseE2EGateEvidence(ROOT, cfg.releaseE2EGate);
     validateReleaseToolcallGateEvidence(ROOT, cfg.releaseToolcallGate);
   } else {
-    info('release evidence check skipped; official npm publish is reusing the maintained internal publish gate.');
+    info('release evidence check skipped for official npm publish.');
   }
   npmWhoamiOfficial(cfg);
   assertPackageVersionIsUnpublished(pkg, cfg, tag);
@@ -309,6 +379,7 @@ async function main() {
 module.exports = {
   buildOfficialPublishArgs,
   createPlan,
+  getDefaultOfficialPublishAuditConfig,
   getNpmOfficialPublishConfig,
   normalizeOfficialPackageName,
   sanitizePackageJsonForOfficial,

@@ -10,7 +10,6 @@ import {
 } from '../runtime/context-window-budget.js';
 import {
   DEFAULT_PROGRESS_ONLY_RECOVERY_MAX_ATTEMPTS as TURN_PROGRESS_ONLY_RECOVERY_MAX_ATTEMPTS,
-  DEFAULT_TRANSPORT_RETRY_MAX_ATTEMPTS as TURN_TRANSPORT_RETRY_MAX_ATTEMPTS,
 } from './TurnRecoveryPolicy.js';
 import {
   buildPromptWithAgentProfileReference,
@@ -84,7 +83,6 @@ export class Agent {
   private static readonly DEFAULT_OVERFLOW_MAX_ERRORS_BEFORE_TRIM = 2;
   private static readonly DEFAULT_OVERFLOW_AGGRESSIVE_KEEP_LLM_ROUNDS = 3;
   private static readonly DEFAULT_PROGRESS_ONLY_RECOVERY_MAX_ATTEMPTS = TURN_PROGRESS_ONLY_RECOVERY_MAX_ATTEMPTS;
-  private static readonly DEFAULT_TRANSPORT_RETRY_MAX_ATTEMPTS = TURN_TRANSPORT_RETRY_MAX_ATTEMPTS;
   private llm: LLMRuntime;
   private tools: ToolRegistry;
   private systemPrompt: string;

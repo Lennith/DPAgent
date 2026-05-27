@@ -1,17 +1,15 @@
 # Release Gate Overview
 
 ## Purpose
-The release gate verifies a source commit before internal npm publish. It is not
-an exploratory UX loop and must not include product-iteration prompts.
+The release gate verifies a source commit before a GitHub Release or npm publication. It is not an exploratory UX loop and must not include product-iteration prompts.
 
 ## Maintained Commands
 ```bash
 npm run release:source-gate
-npm run publish:standard
+npm run publish:npm-official:preflight
 ```
 
-`release:source-gate` verifies source state. `publish:standard` publishes only
-after valid evidence exists.
+`release:source-gate` verifies source state. `publish:npm-official:preflight` verifies public package readiness without publishing.
 
 ## Source Gate Contents
 `npm run release:source-gate` runs:
@@ -29,52 +27,38 @@ logs/release-gate-e2e/
 logs/release-gate-toolcall-context-session/
 ```
 
-The evidence source commit must match the commit being released unless the
-manual review explicitly approves a release-process-only reuse exception.
+The evidence source commit must match the commit being released unless the manual review explicitly approves a release-process-only reuse exception.
 
-## Publish Gate Contents
-`npm run publish:standard` validates:
+## Publish Preflight Contents
+`npm run publish:npm-official:preflight` validates:
 
 - clean worktree
-- release evidence
 - npm auth
-- usability entrypoint
-- README first-run command
+- version availability
 - fresh `build:web`
+- sanitized package metadata
 - one real `npm pack --json`
-- local tarball install smoke before publish
-- forbidden package paths
-- npm publish to the internal registry
-- post-publish registry install smoke
+- package contents and forbidden runtime paths
+- local tarball install smoke
 
-It must not rerun source-state tests, browser smoke, long-context gates, or
-exploratory UX workflows.
+It must not rerun source-state tests, browser smoke, long-context gates, or exploratory UX workflows.
 
 ## Non-gates
-The `ux:iterate*`, `ux:long-context*`, and `ux:ui-focused*` commands are
-exploratory product loops. Their evidence can inform fixes, but it is not
-release sign-off.
+The `ux:iterate*`, `ux:long-context*`, and `ux:ui-focused*` commands are exploratory product loops. Their evidence can inform fixes, but it is not release sign-off.
 
 ## Failure Policy
-Any failed maintained gate blocks release. Fix the root cause and rerun the
-affected gate. If source code, UI, package contents, LLM protocol, automation,
-runtime behavior, or test expectations change after a passing source gate, rerun
-`npm run release:source-gate`.
+Any failed maintained gate blocks release. Fix the root cause and rerun the affected gate. If source code, UI, package contents, LLM protocol, automation, runtime behavior, or test expectations change after a passing source gate, rerun `npm run release:source-gate`.
 
-The source gate includes low-cost source-contract unit tests for hook loading,
-ASR/share controls, automation claim behavior, subagent cancellation/timeout
-contracts, and npm package allowlists. These tests keep release documentation
-and package scripts aligned with the maintained gates.
+The source gate includes low-cost source-contract unit tests for hook loading, ASR/share controls, automation claim behavior, subagent cancellation/timeout contracts, and npm package allowlists. These tests keep release documentation and package scripts aligned with the maintained gates.
 
 ## Handoff Evidence
 A release handoff records:
 
 - commit SHA
-- package version
-- Gerrit change
+- package version and GitHub tag
+- CI workflow URL
 - source-gate command and result
 - E2E evidence files
-- toolcall gate evidence and manual review
-- publish command and result
-- registry smoke result
+- toolcall gate evidence and manual review when used
+- publish or preflight command and result
 - confirmation that local config and profiles were not committed

@@ -2,9 +2,9 @@ llmProfiles:
   defaultProfileId: default
   profiles:
     - id: default
-      name: Minimax
+      name: Default Profile
       provider: anthropic
-      apiKey: YOUR_MINIMAX_API_KEY
+      apiKey: ""
       apiBase: https://api.minimaxi.com
       defaultModel: MiniMax-M2.7-highspeed
       maxOutputTokens: 32768
@@ -13,47 +13,43 @@ llmProfiles:
         modelDiscovery: true
         reasoningEffort: false
         thinkingBudget: true
-      createdAt: '2026-04-26T17:06:41.824Z'
-      updatedAt: '2026-04-29T07:52:55.406Z'
+
 agent:
   maxSteps: 100
   tokenLimit: 210000
-  workspaceDir: D:\Agent\MinimaxAgentNodeJs\workspace
+  workspaceDir: ./workspace
+  contextDir: ./contexts
+  runtimeDataDir: ./runtime
+  globalAgentsDir: ./agents
+  defaultToolset: windows-safe
   completionMarkerEnforcementEnabled: false
-  defaultToolset: windows-dev
   subAgentMaxParallelPerParent: 4
   subAgentGlobalMaxParallel: 10
   contextReplayMinRounds: 6
   contextReplayMaxRounds: 12
   contextReplayBudgetRatio: 0.55
   contextOverflowMaxErrorsBeforeTrim: 2
-  contextDir: ./contexts
-  runtimeDataDir: ./runtime
-  globalAgentsDir: ./agents
-  skillsDir: C:\Users\pc\.codex\skills
+
 tools:
   enableFileTools: true
-  enableWeb: true
-  enableShell: true
+  enableWeb: false
+  enableShell: false
   shellType: powershell
   shellTimeout: 30000
+
 mcp:
-  enabled: true
-  servers:
-    - name: MiniMax-Coding-Plan
-      type: stdio
-      command: uvx
-      args:
-        - minimax-coding-plan-mcp
-        - '-y'
+  enabled: false
+  servers: []
   connectTimeout: 10
   executeTimeout: 60
+
 retry:
   enabled: true
   maxRetries: 3
   initialDelay: 1
   maxDelay: 60
   exponentialBase: 2
+
 contextBudget:
   defaultContextWindowTokens: 230000
   compressionTriggerRatio: 0.9
@@ -67,29 +63,17 @@ contextBudget:
   reservedReasoningTokens: 0
   reservedProtocolTokens: 4096
   modelOverrides: {}
+
 remoteAccessAuth:
   enabled: false
   sessionTtlMs: 604800000
   trustProxy: false
+
 agentProviders:
   - id: local-default
     type: local
     enabled: true
     timeoutMs: 300000
+
 asr:
-  enabled: true
-  provider: local-process
-  command: .\.venv-asr\Scripts\python.exe
-  args:
-    - scripts/asr/glm-asr-transformers-worker.py
-    - --model
-    - "{modelId}"
-  modelId: zai-org/GLM-ASR-Nano-2512
-  timeoutMs: 120000
-  startupTimeoutMs: 180000
-  restartBackoffMs: 3000
-  maxConcurrent: 1
-  maxQueueSize: 4
-  maxAudioBytes: 26214400
-  maxOutputBytes: 1048576
-  resultFormat: json
+  enabled: false

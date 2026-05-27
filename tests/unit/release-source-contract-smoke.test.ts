@@ -7,9 +7,10 @@ import { TEST_MANIFEST } from '../test-manifest.js';
 interface PackageJson {
   files?: string[];
   scripts?: Record<string, string>;
-  internalPublish?: {
-    requiredPackPaths?: string[];
-    forbiddenPackPaths?: string[];
+  internalPublish?: unknown;
+  publishConfig?: {
+    registry?: string;
+    access?: string;
   };
 }
 
@@ -44,29 +45,35 @@ function readNpmPackDryRunPaths(): string[] {
     .sort((a, b) => a.localeCompare(b));
 }
 
-function testNpmFilesWhitelistIncludesBundledAgents(): void {
+function testNpmFilesWhitelistIncludesPublicSupportFiles(): void {
   const pkg = readPackageJson();
   const files = pkg.files ?? [];
-  const requiredPackPaths = pkg.internalPublish?.requiredPackPaths ?? [];
-  const bundledAgentProfiles = listBundledAgentProfilePaths();
 
   assert.ok(files.includes('dist/**'));
   assert.ok(files.includes('scripts/asr/*.py'));
   assert.ok(files.includes('scripts/asr/*.ps1'));
   assert.ok(files.includes('agents/**'));
   assert.ok(files.includes('doc/guide/user-guide.md'));
-  for (const profilePath of bundledAgentProfiles) {
-    assert.ok(requiredPackPaths.includes(profilePath), `${profilePath} must be required in publish pack audit`);
-  }
-  assert.ok(pkg.internalPublish?.forbiddenPackPaths?.includes('runtime/'));
+  assert.ok(files.includes('config.example.yaml'));
+  assert.ok(files.includes('CONFIG.md'));
+  assert.ok(files.includes('SECURITY.md'));
+  assert.ok(files.includes('CONTRIBUTING.md'));
+  assert.ok(files.includes('SUPPORT.md'));
+  assert.equal(pkg.internalPublish, undefined);
+  assert.equal(pkg.publishConfig?.registry, 'https://registry.npmjs.org');
+  assert.equal(pkg.publishConfig?.access, 'public');
 }
 
-function testNpmPackDryRunContainsBundledAgents(): void {
+function testNpmPackDryRunContainsBundledAgentsAndPublicDocs(): void {
   const packedPaths = readNpmPackDryRunPaths();
   const packedPathSet = new Set(packedPaths);
   for (const profilePath of listBundledAgentProfilePaths()) {
     assert.ok(packedPathSet.has(profilePath), `${profilePath} must be included in npm pack`);
   }
+  assert.ok(packedPathSet.has('config.example.yaml'));
+  assert.ok(packedPathSet.has('SECURITY.md'));
+  assert.ok(packedPathSet.has('SUPPORT.md'));
+  assert.equal(packedPathSet.has('config.yaml'), false);
 }
 
 function testReleaseAndPublishScriptsCoverMaintainedGates(): void {
@@ -77,7 +84,7 @@ function testReleaseAndPublishScriptsCoverMaintainedGates(): void {
   assert.match(scripts['release:source-gate'] ?? '', /smoke:ui:built/);
   assert.match(scripts['release:source-gate'] ?? '', /test:release-e2e/);
   assert.match(scripts['release:source-gate'] ?? '', /test:release-toolcall-context-session/);
-  assert.match(scripts['publish:standard'] ?? '', /private-npm-standard\.js --mode publish/);
+  assert.match(scripts['publish:npm-official:preflight'] ?? '', /npm-official-publish\.js --mode preflight/);
   assert.match(scripts['setup:asr:windows'] ?? '', /setup-glm-asr\.ps1/);
 }
 
@@ -103,8 +110,8 @@ function testSourceContractSmokeCoverageIsInManifest(): void {
 }
 
 function runAll(): void {
-  testNpmFilesWhitelistIncludesBundledAgents();
-  testNpmPackDryRunContainsBundledAgents();
+  testNpmFilesWhitelistIncludesPublicSupportFiles();
+  testNpmPackDryRunContainsBundledAgentsAndPublicDocs();
   testReleaseAndPublishScriptsCoverMaintainedGates();
   testSourceContractSmokeCoverageIsInManifest();
   console.log('release source contract smoke tests passed');

@@ -22,7 +22,7 @@ dist/
 ```
 
 `config.yaml` may be modified locally during development. It must be clean or
-absent from the publish worktree before `publish:standard`.
+absent from the publish worktree before release or npm publish.
 
 ## Profile Rule
 Release toolcall profiles are local or environment-specific. They may contain
@@ -43,10 +43,10 @@ Before publish:
 
 ```bash
 npm run release:source-gate
-npm run publish:standard
+npm run publish:npm-official:preflight
 ```
 
-`publish:standard` enforces a clean worktree. If local config changes are
+`publish:npm-official:preflight` enforces a clean worktree. If local config changes are
 needed for testing, use a separate clean publish worktree for the publish step.
 
 ## Handoff Wording

@@ -32,7 +32,7 @@ Remove the old package and install the new package explicitly:
 
 ```bash
 npm remove @dpvr/minimax-agent
-npm install @dpvr/dpagent --registry http://10.100.1.10:4873
+npm install @dpvr/dpagent --registry https://registry.npmjs.org
 npx dpagent
 ```
 
@@ -40,7 +40,7 @@ For global installs:
 
 ```bash
 npm uninstall -g @dpvr/minimax-agent
-npm install -g @dpvr/dpagent --registry http://10.100.1.10:4873
+npm install -g @dpvr/dpagent --registry https://registry.npmjs.org
 dpagent
 ```
 
@@ -172,7 +172,7 @@ For package consumers, verify the installed package resolves the new version:
 
 ```bash
 npm ls @dpvr/dpagent
-npm view @dpvr/dpagent@2.0.0 version --registry http://10.100.1.10:4873
+npm view @dpvr/dpagent@2.0.0 version --registry https://registry.npmjs.org
 ```
 
 If `npx minimax-agent` still appears in logs, scripts, or documentation after

@@ -311,7 +311,7 @@ function testShareUrlUsesConfiguredPublicBaseUrlFirst(): void {
     requestHost: '127.0.0.1:53721',
     protocol: 'http',
     url: '/dpagent-share/token-1',
-    localIpv4Addresses: ['192.168.7.33'],
+    localIpv4Addresses: ['192.168.1.33'],
   });
 
   assert.equal(result.url, 'https://dpagent.example.test/base/dpagent-share/token-1');
@@ -323,22 +323,22 @@ function testShareUrlReplacesLoopbackWithLanAddress(): void {
     requestHost: 'localhost:53721',
     protocol: 'http',
     url: '/dpagent-share/token-1',
-    localIpv4Addresses: ['192.168.7.33'],
+    localIpv4Addresses: ['192.168.1.33'],
   });
 
-  assert.equal(result.url, 'http://192.168.7.33:53721/dpagent-share/token-1');
+  assert.equal(result.url, 'http://192.168.1.33:53721/dpagent-share/token-1');
   assert.equal(result.diagnostics.reason, 'lan_fallback');
 }
 
 function testShareUrlKeepsTrustedLanHost(): void {
   const result = resolveShareUrlForRequest({
-    requestHost: '192.168.7.33:53721',
+    requestHost: '192.168.1.33:53721',
     protocol: 'http',
     url: '/dpagent-share/token-1',
-    localIpv4Addresses: ['192.168.7.33'],
+    localIpv4Addresses: ['192.168.1.33'],
   });
 
-  assert.equal(result.url, 'http://192.168.7.33:53721/dpagent-share/token-1');
+  assert.equal(result.url, 'http://192.168.1.33:53721/dpagent-share/token-1');
   assert.equal(result.diagnostics.reason, 'trusted_host');
 }
 
@@ -347,10 +347,10 @@ function testShareUrlRejectsProxyHostAndFallsBackToLan(): void {
     requestHost: '8.8.8.8:53721',
     protocol: 'http',
     url: 'http://8.8.8.8:53721/dpagent-share/token-1',
-    localIpv4Addresses: ['192.168.7.33'],
+    localIpv4Addresses: ['192.168.1.33'],
   });
 
-  assert.equal(result.url, 'http://192.168.7.33:53721/dpagent-share/token-1');
+  assert.equal(result.url, 'http://192.168.1.33:53721/dpagent-share/token-1');
   assert.equal(result.diagnostics.reason, 'lan_fallback');
 }
 

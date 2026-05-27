@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a reproducible DPAgent problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a DPAgent issue. Include enough local context for maintainers to reproduce it without secrets.
+  - type: input
+    id: version
+    attributes:
+      label: DPAgent version
+      description: Package version, commit SHA, or branch.
+      placeholder: "2.2.14 or commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "node -v"
+    validations:
+      required: true
+  - type: input
+    id: toolset
+    attributes:
+      label: Toolset
+      placeholder: "windows-safe, windows-dev, research, full-access"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Commands, UI steps, and relevant config shape. Do not include API keys or tokens.
+      placeholder: |
+        1. Copy config.example.yaml to config.yaml
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include logs or screenshots if useful. Redact secrets.
+    validations:
+      required: true
+  - type: checkboxes
+    id: sensitive
+    attributes:
+      label: Safety checklist
+      options:
+        - label: I removed API keys, tokens, cookies, passwords, and local secrets.
+          required: true
+        - label: I mentioned whether shell, MCP, remote access, or full-access was enabled.
+          required: false
+

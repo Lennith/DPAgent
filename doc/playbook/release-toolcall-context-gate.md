@@ -28,7 +28,7 @@ Model expectations:
 
 Kimi is not part of the maintained release gate while no active release key is
 available. Reintroduce it by adding the profile back to the package script and
-`internalPublish.releaseToolcallGate` profile requirements.
+the official release evidence expectations.
 
 ## Local Profile Files
 Release profile files are local or environment-specific. Do not commit

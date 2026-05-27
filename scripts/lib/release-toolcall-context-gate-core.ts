@@ -421,7 +421,7 @@ export function buildMarkdown(
   lines.push('');
   lines.push('## Manual Review');
   lines.push(
-    `- Fill ${RELEASE_TOOLCALL_MANUAL_REVIEW_FILE} before \`npm run publish:standard\`.`
+    `- Fill ${RELEASE_TOOLCALL_MANUAL_REVIEW_FILE} before \`npm run publish:npm-official:preflight\`.`
   );
   lines.push('- Review must approve the exact runs listed above.');
   return lines.join('\n');

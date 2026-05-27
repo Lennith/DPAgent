@@ -35,5 +35,5 @@ node scripts/run.js status --status-file <status-file-from-start-command> --outp
 - The skill supports npm-installed DPAgent. Source checkouts are refused unless `--allow-source true` is explicitly supplied.
 - The worker process is detached before `/api/system/shutdown`; this is intentional so the updater survives server shutdown.
 - Non-dry-run writes require `--confirm yes`.
-- Use `--registry` to override npm registry; default is DPAgent's internal npm registry.
+- Use `--registry` to override npm registry; default is the official npm registry (`https://registry.npmjs.org`) unless `DPAGENT_NPM_REGISTRY` is set by the operator.
 - Output defaults to JSON and errors use `{ success:false, error:{ code,message,details } }`.

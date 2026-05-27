@@ -67,6 +67,46 @@ function cleanup(tempDir: string): void {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
+function createRegistryTestConfig(tempDir: string): string {
+  const configPath = path.join(tempDir, 'config.yaml');
+  fs.writeFileSync(
+    configPath,
+    [
+      'llmProfiles:',
+      '  defaultProfileId: default',
+      '  profiles:',
+      '    - id: default',
+      '      name: Test Profile',
+      '      provider: anthropic',
+      '      apiKey: ""',
+      '      apiBase: https://api.minimaxi.com',
+      '      defaultModel: MiniMax-M2.7-highspeed',
+      '      maxOutputTokens: 32768',
+      '      enabled: true',
+      'agent:',
+      '  workspaceDir: ./workspace',
+      '  contextDir: ./contexts',
+      '  runtimeDataDir: ./runtime',
+      '  globalAgentsDir: ./agents',
+      '  defaultToolset: windows-safe',
+      'tools:',
+      '  enableFileTools: true',
+      '  enableWeb: true',
+      '  enableShell: true',
+      '  shellType: powershell',
+      '  shellTimeout: 30000',
+      'mcp:',
+      '  enabled: false',
+      '  servers: []',
+      '  connectTimeout: 10',
+      '  executeTimeout: 60',
+      '',
+    ].join('\n'),
+    'utf-8'
+  );
+  return configPath;
+}
+
 function buildHarnessTurnSystemPrompt(
   agent: DPAgent,
   input: {
@@ -113,7 +153,7 @@ async function runCase(): Promise<void> {
 
     const agent = new DPAgent({
       allowMissingApiKeyAtBoot: true,
-      configPath: path.join(process.cwd(), 'config.yaml'),
+      configPath: createRegistryTestConfig(harness.tempDir),
       workspaceDir: harness.workspaceDir,
       runtimeDataDir: harness.runtimeDir,
       contextDir: harness.contextDir,
@@ -164,8 +204,21 @@ async function runCase(): Promise<void> {
     assert.match(String(turnPromptWithMarker), new RegExp(DONE_MARKER));
     assert.match(String(turnPromptWithMarker), new RegExp(REPORT_END_MARKER));
 
-    assert.equal(agent.resolveToolsetName(context), 'full-access');
-    assert.equal(agent.getToolsetPresetStore().getWorkspacePreset(harness.workspaceDir)?.toolsetName, 'full-access');
+    assert.equal(agent.resolveToolsetName(context), 'windows-safe');
+    assert.equal(agent.getToolsetPresetStore().getWorkspacePreset(harness.workspaceDir)?.toolsetName, 'windows-safe');
+
+    agent.updateConfig({
+      agent: {
+        ...agent.getConfig().agent,
+        defaultToolset: 'full-access',
+      },
+      tools: {
+        ...agent.getConfig().tools,
+        enableWeb: true,
+        enableShell: true,
+      },
+    });
+    agent.updateContextNamespaceMeta(context, { toolsetName: 'full-access' });
 
     const registry = buildDPAgentExecutionToolRegistry(registryFactory, {
       context,

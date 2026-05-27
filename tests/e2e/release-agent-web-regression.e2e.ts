@@ -618,29 +618,29 @@ function runShareAndDroppedFileE2E(): void {
       url: '/dpagent-share/token-123',
       requestHost: '198.18.0.10:53721',
       protocol: 'http',
-      localIpv4Addresses: ['192.168.7.33'],
+      localIpv4Addresses: ['192.168.1.33'],
       localPort: 53721,
     });
     assert.equal(clashHost.diagnostics.reason, 'lan_fallback');
-    assert.equal(clashHost.diagnostics.chosenHost, '192.168.7.33:53721');
-    assert.equal(clashHost.url, 'http://192.168.7.33:53721/dpagent-share/token-123');
+    assert.equal(clashHost.diagnostics.chosenHost, '192.168.1.33:53721');
+    assert.equal(clashHost.url, 'http://192.168.1.33:53721/dpagent-share/token-123');
 
     const trustedLanHost = resolveShareUrlForRequest({
       url: '/dpagent-share/token-123',
-      requestHost: '192.168.7.33:53721',
+      requestHost: '192.168.1.33:53721',
       protocol: 'http',
-      localIpv4Addresses: ['192.168.7.33'],
+      localIpv4Addresses: ['192.168.1.33'],
       localPort: 53721,
     });
     assert.equal(trustedLanHost.diagnostics.reason, 'trusted_host');
-    assert.equal(trustedLanHost.url, 'http://192.168.7.33:53721/dpagent-share/token-123');
+    assert.equal(trustedLanHost.url, 'http://192.168.1.33:53721/dpagent-share/token-123');
 
     const configuredBaseUrl = resolveShareUrlForRequest({
       url: '/dpagent-share/token-123',
       requestHost: '198.18.0.10:53721',
       protocol: 'http',
       configuredPublicBaseUrl: 'https://dpagent.example.test/base/',
-      localIpv4Addresses: ['192.168.7.33'],
+      localIpv4Addresses: ['192.168.1.33'],
       localPort: 53721,
     });
     assert.equal(configuredBaseUrl.diagnostics.reason, 'config');

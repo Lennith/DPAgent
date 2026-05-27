@@ -34,7 +34,7 @@ connection metadata and must not rely on request-body spoofing.
 - Put cross-service construction in `src/dpagent-runtime.ts`; keep `src/index.ts` as a thin package facade.
 - Put CLI argument parsing and process startup in `src/cli/`.
 - Do not add provider, tool, or context policy directly to CLI entrypoints.
-- Keep package startup aligned with [internal npm publish](../../playbook/internal-npm-publish.md).
+- Keep package startup aligned with [NPM official publish](../../playbook/npm-official-publish.md).
 
 ## Closest Tests
 - `tests/e2e/release-cli-long-session.e2e.ts`

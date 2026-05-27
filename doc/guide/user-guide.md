@@ -25,7 +25,7 @@ DPAgent 不适合当成完全开放的公网远程执行服务。它可以读写
 如果你已经通过 npm 安装：
 
 ```powershell
-npm i -g @dpvr/dpagent --registry http://10.100.1.10:4873
+npm i -g @dpvr/dpagent --registry https://registry.npmjs.org
 npx dpagent
 ```
 
@@ -58,7 +58,7 @@ http://localhost:53721
 如果要让手机访问，需要使用电脑的局域网地址，例如：
 
 ```text
-http://192.168.7.33:53721
+http://<your-computer-lan-ip>:53721
 ```
 
 ### 第一次必须配置什么
@@ -276,11 +276,11 @@ Plan Mode 的典型流程：
 
 1. 确认手机和电脑在同一个 Wi-Fi。
 2. 在电脑上启动 DPAgent。
-3. 找到电脑局域网 IP，例如 `192.168.7.33`。
+3. 找到电脑局域网 IP，例如 `<your-computer-lan-ip>`。
 4. 手机浏览器打开：
 
 ```text
-http://192.168.7.33:53721
+http://<your-computer-lan-ip>:53721
 ```
 
 如果配置了远程访问密码，手机会先进入登录页。
@@ -301,7 +301,7 @@ Android 客户端是一个 DPAgent WebView 外壳。它适合经常用手机访�
 使用步骤：
 
 1. 打开 Android 客户端。
-2. 添加电脑地址，例如 `192.168.7.33:53721`。
+2. 添加电脑地址，例如 `<your-computer-lan-ip>:53721`。
 3. 点击“打开”进入 DPAgent Web 页面。
 4. 如果收到分享链接，可以复制后在客户端添加，或从系统分享菜单打开。
 

@@ -74,10 +74,15 @@ import {
   WebSocketAccessController,
   type WebSocketAccessScope,
 } from './websocket-access-controller.js';
-import { prepareWebServerChatExecution } from './web-server-chat-preparation.js';
+import {
+  prepareWebServerChatExecution,
+  type WebServerChatPreparationHost,
+} from './web-server-chat-preparation.js';
 import {
   createWebServerControlCallbacks,
   createWebServerObservationCallbacks,
+  type WebServerControlCallbackHost,
+  type WebServerObservationCallbackHost,
 } from './web-server-callback-factory.js';
 import {
   handleWebServerCancelMessage,
@@ -108,10 +113,13 @@ import {
   getApprovedExecutionPlanMarkdown as getApprovedExecutionPlanMarkdownImpl,
   getSessionTodoProtocolState as getSessionTodoProtocolStateImpl,
   markTodoPlanConfirmationPending as markTodoPlanConfirmationPendingImpl,
+  type WebServerPlanTodoHost,
 } from './web-server-plan-todo-coordinator.js';
-import { ensureWebServerSessionRuntime } from './web-server-session-runtime-factory.js';
 import {
-  DEFAULT_WEB_MCP_SERVER,
+  ensureWebServerSessionRuntime,
+  type WebServerSessionRuntimeHost,
+} from './web-server-session-runtime-factory.js';
+import {
   PENDING_PLAN_INPUT_RECONNECT_GRACE_MS,
   type ActiveRunState,
   type CallbackControlHandlers,
@@ -406,27 +414,6 @@ export class WebServer {
     });
   }
 
-  private applyDefaultWebMcpFallback(config: AgentConfig): AgentConfig {
-    const configuredServers = Array.isArray(config.mcp.servers) ? config.mcp.servers : [];
-    if (configuredServers.length > 0) {
-      return config;
-    }
-
-    return {
-      ...config,
-      mcp: {
-        ...config.mcp,
-        enabled: true,
-        servers: [
-          {
-            ...DEFAULT_WEB_MCP_SERVER,
-            args: DEFAULT_WEB_MCP_SERVER.args ? [...DEFAULT_WEB_MCP_SERVER.args] : undefined,
-          },
-        ],
-      },
-    };
-  }
-
   constructor(config: WebServerConfig) {
     this.port = config.port;
     this.configPath = config.configPath;
@@ -448,7 +435,7 @@ export class WebServer {
     }
     configManager.loadFromYaml(this.configPath);
 
-    const loadedConfig = this.applyDefaultWebMcpFallback(configManager.get());
+    const loadedConfig = configManager.get();
     webServerLogger.info(`Using config source: ${this.configPath}`);
     webServerLogger.info(`Skills directory: ${loadedConfig.agent.skillsDir ?? '(not configured)'}`);
 
@@ -807,6 +794,125 @@ export class WebServer {
     setTimeout(() => {
       process.kill(process.pid, 'SIGTERM');
     }, delayMs).unref?.();
+  }
+
+  private getSessionRuntimeHost(): WebServerSessionRuntimeHost {
+    const server = this;
+    return {
+      agent: this.agent,
+      sessionRuntimes: this.sessionRuntimes,
+      get bootMissingApiKey() {
+        return server.bootMissingApiKey;
+      },
+      getContextNamespaceMetaSafe: this.getContextNamespaceMetaSafe.bind(this),
+      buildSessionRuntimeKey: this.buildSessionRuntimeKey.bind(this),
+      getSessionRuntime: this.getSessionRuntime.bind(this),
+      hasActiveRunForContext: this.hasActiveRunForContext.bind(this),
+      cleanupSessionRuntime: this.cleanupSessionRuntime.bind(this),
+      installDownloadLinkIssuer: this.installDownloadLinkIssuer.bind(this),
+      cloneRuntimeConfig: this.cloneRuntimeConfig.bind(this),
+      cloneExternalMcpServers: this.cloneExternalMcpServers.bind(this),
+      touchSessionRuntime: this.touchSessionRuntime.bind(this),
+    };
+  }
+
+  private getPlanTodoHost(): WebServerPlanTodoHost {
+    return {
+      agent: this.agent,
+      readPlanningState: this.readPlanningState.bind(this),
+      getPendingStructuredContextValue: this.getPendingStructuredContextValue.bind(this),
+      resolveWorkspaceDirForContext: this.resolveWorkspaceDirForContext.bind(this),
+      resolveAgentForContext: this.resolveAgentForContext.bind(this),
+      getSessionTodoProtocolState: this.getSessionTodoProtocolState.bind(this),
+      getContextNamespaceMetaSafe: this.getContextNamespaceMetaSafe.bind(this),
+      updateContextNamespaceMetaSafe: this.updateContextNamespaceMetaSafe.bind(this),
+      getAutoLoopConfigSafe: this.getAutoLoopConfigSafe.bind(this),
+      getAutoLoopStateSafe: this.getAutoLoopStateSafe.bind(this),
+      updateAutoLoopConfigSafe: this.updateAutoLoopConfigSafe.bind(this),
+      stopAutoLoopSafe: this.stopAutoLoopSafe.bind(this),
+    };
+  }
+
+  private getChatPreparationHost(): WebServerChatPreparationHost {
+    const server = this;
+    return {
+      agent: this.agent,
+      get currentSessionId() {
+        return server.currentSessionId;
+      },
+      set currentSessionId(value: string | null) {
+        server.currentSessionId = value;
+      },
+      get rootRuntimeConfigDirty() {
+        return server.rootRuntimeConfigDirty;
+      },
+      get rootRuntimeCleanupPromise() {
+        return server.rootRuntimeCleanupPromise;
+      },
+      resolveChatContext: this.resolveChatContext.bind(this),
+      canWebSocketAccessContext: this.canWebSocketAccessContext.bind(this),
+      emitToClient: this.emitToClient.bind(this),
+      resolveRunOrigin: this.resolveRunOrigin.bind(this),
+      createRunScopedDispatcher: this.createRunScopedDispatcher.bind(this),
+      resolveWorkspaceDirForRun: this.resolveWorkspaceDirForRun.bind(this),
+      persistSessionRunMetadata: this.persistSessionRunMetadata.bind(this),
+      validateRequestedLlmSelection: this.validateRequestedLlmSelection.bind(this),
+      resolveRequestedSessionLlmSelection: this.resolveRequestedSessionLlmSelection.bind(this),
+      resolvePlanningStateForChat: this.resolvePlanningStateForChat.bind(this),
+      cloneExternalMcpServers: this.cloneExternalMcpServers.bind(this),
+      resolveContinuationExternalMcpServers: this.resolveContinuationExternalMcpServers.bind(this),
+      persistExternalMcpAttachment: this.persistExternalMcpAttachment.bind(this),
+      resolveUserPrompt: this.resolveUserPrompt.bind(this),
+      refreshGlobalAgentCatalog: this.refreshGlobalAgentCatalog.bind(this),
+      resolveAgentRuntimeLlmSelection: this.resolveAgentRuntimeLlmSelection.bind(this),
+      hasUsableApiKeyForRuntime: this.hasUsableApiKeyForRuntime.bind(this),
+      hasActiveRunForContext: this.hasActiveRunForContext.bind(this),
+      getActiveRunState: this.getActiveRunState.bind(this),
+      makeRunContextStateKey: this.makeRunContextStateKey.bind(this),
+      getActiveRunControllerMap: this.getActiveRunControllerMap.bind(this),
+      getWebSocketScopeMap: this.getWebSocketScopeMap.bind(this),
+      getActiveRunIdsForContext: this.getActiveRunIdsForContext.bind(this),
+      summarizeWebSocketScopeForLog: this.summarizeWebSocketScopeForLog.bind(this),
+      hasCancelingRunForContext: this.hasCancelingRunForContext.bind(this),
+      waitForNoActiveRunForContext: this.waitForNoActiveRunForContext.bind(this),
+      bindRunController: this.bindRunController.bind(this),
+      reserveTrackedRun: this.reserveTrackedRun.bind(this),
+      releaseRunController: this.releaseRunController.bind(this),
+      ensureSessionRuntime: this.ensureSessionRuntime.bind(this),
+      hasActiveRootAgentRun: this.hasActiveRootAgentRun.bind(this),
+      cleanupRootRuntimeAfterConfigChangeIfIdle: this.cleanupRootRuntimeAfterConfigChangeIfIdle.bind(this),
+      createCallback: this.createCallback.bind(this),
+      resolveAgentForContext: this.resolveAgentForContext.bind(this),
+      activateTrackedRun: this.activateTrackedRun.bind(this),
+      getContextNamespaceMetaSafe: this.getContextNamespaceMetaSafe.bind(this),
+      clearTodoPlanConfirmationPending: this.clearTodoPlanConfirmationPending.bind(this),
+      ensureTodoDrivenAutoLoop: this.ensureTodoDrivenAutoLoop.bind(this),
+      getAutoLoopConfigSafe: this.getAutoLoopConfigSafe.bind(this),
+      getAutoLoopStateSafe: this.getAutoLoopStateSafe.bind(this),
+      startAutoLoopSafe: this.startAutoLoopSafe.bind(this),
+      touchSessionRuntime: this.touchSessionRuntime.bind(this),
+    };
+  }
+
+  private getObservationCallbackHost(): WebServerObservationCallbackHost {
+    return {
+      getContextBudget: this.getContextBudget.bind(this),
+      updateContextNamespaceMetaSafe: this.updateContextNamespaceMetaSafe.bind(this),
+    };
+  }
+
+  private getControlCallbackHost(): WebServerControlCallbackHost {
+    return {
+      rejectPendingPlanInputByRunId: this.rejectPendingPlanInputByRunId.bind(this),
+      refreshGlobalAgentCatalog: this.refreshGlobalAgentCatalog.bind(this),
+      requestUserInputFromSocket: this.requestUserInputFromSocket.bind(this),
+      getRunningInputQueue: this.getRunningInputQueue.bind(this),
+      broadcastRunningInputQueue: this.broadcastRunningInputQueue.bind(this),
+      resolveUserPrompt: this.resolveUserPrompt.bind(this),
+      resolveWorkspaceDirForContext: this.resolveWorkspaceDirForContext.bind(this),
+      handleCallbackCompletion: this.handleCallbackCompletion.bind(this),
+      requestAutoLoopExitFromCallback: this.requestAutoLoopExitFromCallback.bind(this),
+    };
   }
 
   private hasUsableApiKeyForRuntime(llmRuntime: ResolvedLlmRuntimeConfig): boolean {
@@ -1184,7 +1290,7 @@ export class WebServer {
 
   private getApprovedExecutionPlanMarkdown(context: ContextRef): string | undefined {
     return getApprovedExecutionPlanMarkdownImpl(
-      this as unknown as Parameters<typeof getApprovedExecutionPlanMarkdownImpl>[0],
+      this.getPlanTodoHost(),
       context
     );
   }
@@ -1195,7 +1301,7 @@ export class WebServer {
     answers: PlanInputAnswer[]
   ): { approved: boolean; activated: boolean; planId?: string; reason?: string; stepCount?: number } {
     return activatePendingPlanIfApprovalSelectedImpl(
-      this as unknown as Parameters<typeof activatePendingPlanIfApprovalSelectedImpl>[0],
+      this.getPlanTodoHost(),
       context,
       request,
       answers
@@ -1518,7 +1624,7 @@ export class WebServer {
 
   private getSessionTodoProtocolState(sessionId: string, workspaceDir?: string): TodoProtocolState {
     return getSessionTodoProtocolStateImpl(
-      this as unknown as Parameters<typeof getSessionTodoProtocolStateImpl>[0],
+      this.getPlanTodoHost(),
       sessionId,
       workspaceDir
     );
@@ -1526,21 +1632,21 @@ export class WebServer {
 
   private markTodoPlanConfirmationPending(sessionId: string): void {
     markTodoPlanConfirmationPendingImpl(
-      this as unknown as Parameters<typeof markTodoPlanConfirmationPendingImpl>[0],
+      this.getPlanTodoHost(),
       sessionId
     );
   }
 
   private clearTodoPlanConfirmationPending(sessionId: string): void {
     clearTodoPlanConfirmationPendingImpl(
-      this as unknown as Parameters<typeof clearTodoPlanConfirmationPendingImpl>[0],
+      this.getPlanTodoHost(),
       sessionId
     );
   }
 
   private ensureTodoDrivenAutoLoop(sessionId: string, workspaceDir?: string): void {
     ensureTodoDrivenAutoLoopImpl(
-      this as unknown as Parameters<typeof ensureTodoDrivenAutoLoopImpl>[0],
+      this.getPlanTodoHost(),
       sessionId,
       workspaceDir
     );
@@ -2051,7 +2157,7 @@ export class WebServer {
     externalMcpServers?: MCPServerConfig[]
   ): Promise<{ agent: DPAgent; reused: boolean }> {
     return ensureWebServerSessionRuntime(
-      this as unknown as Parameters<typeof ensureWebServerSessionRuntime>[0],
+      this.getSessionRuntimeHost(),
       sessionId,
       workspaceDir,
       llmRuntime,
@@ -2061,7 +2167,7 @@ export class WebServer {
   }
 
   private async prepareChatExecution(ws: WebSocket, request: ChatRequest): Promise<PreparedChatExecution | null> {
-    return prepareWebServerChatExecution(this as unknown as Parameters<typeof prepareWebServerChatExecution>[0], ws, request);
+    return prepareWebServerChatExecution(this.getChatPreparationHost(), ws, request);
   }
 
   private recordRuntimeErrorMessage(
@@ -2217,7 +2323,7 @@ export class WebServer {
     llmRuntime?: ResolvedLlmRuntimeConfig
   ): CallbackObservationHandlers {
     return createWebServerObservationCallbacks(
-      this as unknown as Parameters<typeof createWebServerObservationCallbacks>[0],
+      this.getObservationCallbackHost(),
       dispatcher,
       context,
       llmRuntime
@@ -2232,7 +2338,7 @@ export class WebServer {
     dispatcher: CallbackEventDispatcher
   ): CallbackControlHandlers {
     return createWebServerControlCallbacks(
-      this as unknown as Parameters<typeof createWebServerControlCallbacks>[0],
+      this.getControlCallbackHost(),
       ws,
       context,
       runId,

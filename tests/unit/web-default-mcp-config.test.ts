@@ -16,7 +16,7 @@ function cleanup(tempDir: string): void {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
-function testWebServerAppliesDefaultMcpFallbackWhenConfigHasNoServers(): void {
+function testWebServerLeavesMcpDisabledWhenConfigHasNoServers(): void {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-default-mcp-config-case-'));
   const { tempDir, configPath } = createTempConfig({
     api: {
@@ -55,11 +55,8 @@ function testWebServerAppliesDefaultMcpFallbackWhenConfigHasNoServers(): void {
     }) as unknown as { agent: { getConfig: () => { mcp: { enabled: boolean; servers: Array<{ name: string; command?: string; args?: string[] }> } } } };
 
     const config = server.agent.getConfig();
-    assert.equal(config.mcp.enabled, true);
-    assert.equal(config.mcp.servers.length, 1);
-    assert.equal(config.mcp.servers[0]?.name, 'MiniMax-Coding-Plan');
-    assert.equal(config.mcp.servers[0]?.command, 'uvx');
-    assert.deepEqual(config.mcp.servers[0]?.args, ['minimax-coding-plan-mcp', '-y']);
+    assert.equal(config.mcp.enabled, false);
+    assert.equal(config.mcp.servers.length, 0);
   } finally {
     cleanup(baseDir);
     cleanup(tempDir);
@@ -123,7 +120,7 @@ function testWebServerKeepsExplicitMcpServersUntouched(): void {
 }
 
 function runAll(): void {
-  testWebServerAppliesDefaultMcpFallbackWhenConfigHasNoServers();
+  testWebServerLeavesMcpDisabledWhenConfigHasNoServers();
   testWebServerKeepsExplicitMcpServersUntouched();
   console.log('web-default-mcp-config tests passed');
 }

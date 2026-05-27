@@ -18,7 +18,6 @@ import {
   type CallbackEventDispatcher,
   type PreparedChatExecution,
   type ResolvedUserPromptResult,
-  type SessionRuntime,
 } from './web-server-runtime-contracts.js';
 import {
   createRunId,
@@ -115,7 +114,10 @@ export interface WebServerChatPreparationHost {
     context: ContextRef,
     dispatcher: CallbackEventDispatcher,
     llmRuntime?: ResolvedLlmRuntimeConfig,
-    runFamilyId?: string,
+    state?: {
+      runFamilyId?: string;
+      draftId?: string;
+    },
     runOrigin?: SessionOrigin
   ): void;
   getContextNamespaceMetaSafe(context: ContextRef): ContextNamespaceMeta | undefined;

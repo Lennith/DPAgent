@@ -7,7 +7,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 
 const PACKAGE_NAME = '@dpvr/dpagent';
-const DEFAULT_REGISTRY = process.env.DPAGENT_NPM_REGISTRY || 'http://10.100.1.10:4873';
+const DEFAULT_REGISTRY = process.env.DPAGENT_NPM_REGISTRY || 'https://registry.npmjs.org';
 const DEFAULT_BASE_URL = process.env.DPAGENT_BASE_URL || `http://127.0.0.1:${process.env.DPAGENT_PORT || '53721'}`;
 
 const COMMANDS = {

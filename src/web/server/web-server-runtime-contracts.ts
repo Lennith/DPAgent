@@ -3,7 +3,6 @@ import type { DPAgent } from '../../dpagent-runtime.js';
 import type { AutoLoopController } from '../../auto-loop/index.js';
 import type {
   AgentCallback,
-  AgentConfig,
   AgentRuntimeOverrides,
   ContextNamespaceMeta,
   ContextRef,
@@ -28,13 +27,6 @@ export interface WebServerConfig {
 }
 
 export const PENDING_PLAN_INPUT_RECONNECT_GRACE_MS = 5 * 60 * 1000;
-
-export const DEFAULT_WEB_MCP_SERVER: MCPServerConfig = {
-  name: 'MiniMax-Coding-Plan',
-  type: 'stdio',
-  command: 'uvx',
-  args: ['minimax-coding-plan-mcp', '-y'],
-};
 
 export interface PendingPlanInput {
   runId: string;

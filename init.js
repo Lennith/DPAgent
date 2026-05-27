@@ -44,12 +44,14 @@ function createTemplate({
       workspaceDir: './workspace',
       contextDir: './contexts',
       runtimeDataDir: './runtime',
-      skillListPath: './skill-list.yaml',
+      defaultToolset: 'windows-safe',
+      globalAgentsDir: './agents',
       skillsDir,
     },
     tools: {
       enableFileTools: true,
-      enableShell: true,
+      enableWeb: false,
+      enableShell: false,
       shellType: 'powershell',
       shellTimeout: 30000,
     },
@@ -131,8 +133,8 @@ async function main() {
     console.log(`\nWrote ${configPath}`);
     console.log('Next steps:');
     console.log('1. npm install');
-    console.log('2. npm run build:web');
-    console.log('3. npm run start:web');
+    console.log('2. npm run dev:web');
+    console.log('3. Switch to windows-dev only when shell/write access is needed.');
   } finally {
     rl.close();
   }

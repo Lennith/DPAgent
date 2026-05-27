@@ -21,6 +21,9 @@ Thumbs.db
 npm-debug.log*
 logs/
 
+# Local configuration
+config.yaml
+
 # Test
 coverage/
 
@@ -47,6 +50,8 @@ Mini-Agent-Reference/
 
 # Refactor work reports
 slim_refactor/
+slim-refactor/
+slim refactor/
 
 # Temp files
 *.tmp

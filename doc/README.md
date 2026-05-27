@@ -1,8 +1,6 @@
 # DPAgent Documentation Index
 
-`doc/` is the only current documentation tree for this repository. Do not add
-new current-state documentation under legacy `docs/` or slim-refactor round
-folders.
+`doc/` is the only current documentation tree for this repository. Do not add new current-state documentation under legacy `docs/` or slim-refactor round folders.
 
 ## Documentation Layers
 - PRD: product intent. It explains why the product exists, who uses it, what outcomes matter, and which user-visible requirements are in scope. It avoids code ownership and wire contracts.
@@ -12,6 +10,7 @@ folders.
 - Protocol: exact runtime contracts under `spec/protocols/`. Protocol docs own wire/event/state-machine semantics and are the tie-breaker for DTO or lifecycle ambiguity.
 - Code: source map and module guide. It explains where code lives, what each module owns, key files, edit boundaries, and tests. It does not redefine product behavior.
 - Playbook: commands, release gates, operational procedures, and handoff steps.
+- Internal: mirror, Gerrit, or private registry procedures that are not the public GitHub contribution path.
 - History: archived records. History is not current specification.
 
 ## PRD
@@ -74,13 +73,15 @@ folders.
 - [Release gate overview](playbook/release-gate-overview.md)
 - [Release E2E gate](playbook/release-e2e-gate.md)
 - [Release toolcall context gate](playbook/release-toolcall-context-gate.md)
-- [Internal npm publish](playbook/internal-npm-publish.md)
+- [GitHub release](playbook/github-release.md)
 - [NPM official publish](playbook/npm-official-publish.md)
 - [Local config and profile hygiene](playbook/local-config-profile-hygiene.md)
-- [Gerrit release handoff](playbook/gerrit-release-handoff.md)
 - [Windows easy-run handoff](playbook/windows-easy-run-handoff.md)
 - [Logging guide](playbook/logging-guide.md)
 - [UX iteration standard](playbook/ux-iteration-standard.md)
+
+## Internal
+- [Internal workflow index](internal/README.md)
 
 ## History
 - [Findings ledger](history/findings-ledger.md)

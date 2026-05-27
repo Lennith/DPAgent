@@ -47,7 +47,7 @@ recovery state.
 - Continuation: Todo, Ralph, workspace, and automation flows can continue when policy allows.
 - Memory and skills: users can retain durable facts and governed reusable workflows.
 - Subagents: users can delegate bounded child work while keeping parent traceability.
-- Release confidence: maintainers can run source gates, E2E gates, toolcall gates, and internal npm publish checks.
+- Release confidence: maintainers can run source gates, E2E gates, toolcall gates, and official npm publish preflight checks.
 
 ## Non-goals
 - The runtime is not a generic unrestricted remote execution service; filesystem and shell access are governed by workspace and toolset policy.
@@ -58,7 +58,7 @@ recovery state.
 - UX iteration commands are not release gates.
 
 ## Release And Operations Constraints
-- Gerrit is the upstream merge path: push to `refs/for/master`.
+- GitHub pull requests are the public upstream merge path. Internal mirrors may keep their own review workflow under `doc/internal/`.
 - Releases must pass the maintained source gate before publish.
 - Runtime artifacts, logs, workspaces, dist output, local context stores, and local release profiles are not source artifacts.
 - User-visible behavior changes must be recorded in [findings ledger](../history/findings-ledger.md) with trigger, impact, and fix boundary.

@@ -5,6 +5,7 @@ const require = createRequire(import.meta.url);
 const {
   buildOfficialPublishArgs,
   createPlan,
+  getDefaultOfficialPublishAuditConfig,
   getNpmOfficialPublishConfig,
   normalizeOfficialPackageName,
   sanitizePackageJsonForOfficial,
@@ -26,9 +27,16 @@ const {
     publish: boolean;
     publishTag?: string;
   };
+  getDefaultOfficialPublishAuditConfig: () => {
+    userSmoke: unknown;
+    requiredPackPaths: string[];
+    forbiddenPackPaths: string[];
+    releaseE2EGate: unknown;
+    releaseToolcallGate: unknown;
+  };
   getNpmOfficialPublishConfig: (
     pkg: Record<string, unknown>,
-    internalCfg: {
+    auditCfg?: {
       userSmoke: unknown;
       requiredPackPaths: string[];
       forbiddenPackPaths: string[];
@@ -72,7 +80,7 @@ function testOfficialPublishConfigUsesPublicNpmRegistry(): void {
   const cfg = getNpmOfficialPublishConfig(
     {
       npmOfficialPublish: {
-        packageName: '@lennith/dpagent',
+        packageName: '@dpvr/dpagent',
         registry: 'https://registry.npmjs.org',
         access: 'public',
       },
@@ -80,11 +88,29 @@ function testOfficialPublishConfigUsesPublicNpmRegistry(): void {
     baseInternalConfig()
   );
 
-  assert.equal(cfg.packageName, '@lennith/dpagent');
+  assert.equal(cfg.packageName, '@dpvr/dpagent');
   assert.equal(cfg.registry, 'https://registry.npmjs.org');
   assert.equal(cfg.access, 'public');
   assert.deepEqual(cfg.requiredPackPaths, ['dist/', 'README.md']);
   assert.deepEqual(cfg.forbiddenPackPaths, ['runtime/', 'logs/', '.env']);
+}
+
+function testOfficialPublishConfigDoesNotRequireInternalPublish(): void {
+  const cfg = getNpmOfficialPublishConfig({
+    npmOfficialPublish: {
+      packageName: '@dpvr/dpagent',
+      registry: 'https://registry.npmjs.org',
+      access: 'public',
+    },
+  });
+  assert.equal(cfg.packageName, '@dpvr/dpagent');
+  assert.ok(cfg.requiredPackPaths.includes('SECURITY.md'));
+  assert.ok(cfg.requiredPackPaths.includes('SUPPORT.md'));
+  assert.ok(cfg.forbiddenPackPaths.includes('config.yaml'));
+
+  const defaults = getDefaultOfficialPublishAuditConfig();
+  assert.deepEqual(cfg.requiredPackPaths, defaults.requiredPackPaths);
+  assert.deepEqual(cfg.forbiddenPackPaths, defaults.forbiddenPackPaths);
 }
 
 function testOfficialPublishConfigRejectsPrivateRegistry(): void {
@@ -93,8 +119,8 @@ function testOfficialPublishConfigRejectsPrivateRegistry(): void {
       getNpmOfficialPublishConfig(
         {
           npmOfficialPublish: {
-            packageName: '@lennith/dpagent',
-            registry: 'http://10.100.1.10:4873',
+            packageName: '@dpvr/dpagent',
+            registry: 'http://registry.internal.example:4873',
             access: 'public',
           },
         },
@@ -105,9 +131,9 @@ function testOfficialPublishConfigRejectsPrivateRegistry(): void {
 }
 
 function testOfficialPackageNameMustBeScoped(): void {
-  assert.equal(normalizeOfficialPackageName('@lennith/dpagent'), '@lennith/dpagent');
+  assert.equal(normalizeOfficialPackageName('@dpvr/dpagent'), '@dpvr/dpagent');
   assert.throws(() => normalizeOfficialPackageName('dpagent'), /scoped npm package name/i);
-  assert.throws(() => normalizeOfficialPackageName('@lennith/'), /scoped npm package name/i);
+  assert.throws(() => normalizeOfficialPackageName('@dpvr/'), /scoped npm package name/i);
 }
 
 function testOfficialPackageJsonIsSanitized(): void {
@@ -128,23 +154,23 @@ function testOfficialPackageJsonIsSanitized(): void {
         typescript: '^5.3.0',
       },
       scripts: {
-        'publish:private': 'npm publish --registry http://10.100.1.10:4873',
+        'publish:private': 'npm publish --registry http://registry.internal.example:4873',
       },
       publishConfig: {
-        registry: 'http://10.100.1.10:4873',
+        registry: 'http://registry.internal.example:4873',
       },
       internalPublish: {
-        registry: 'http://10.100.1.10:4873',
+        registry: 'http://registry.internal.example:4873',
       },
     },
     {
-      packageName: '@lennith/dpagent',
+      packageName: '@dpvr/dpagent',
       registry: 'https://registry.npmjs.org',
       access: 'public',
     }
   );
 
-  assert.equal(sanitized.name, '@lennith/dpagent');
+  assert.equal(sanitized.name, '@dpvr/dpagent');
   assert.equal((sanitized.publishConfig as { registry: string }).registry, 'https://registry.npmjs.org');
   assert.equal((sanitized.publishConfig as { access: string }).access, 'public');
   assert.deepEqual(sanitized.dependencies, { express: '^4.18.2' });
@@ -186,6 +212,7 @@ function testOfficialPublishPlanAndArgs(): void {
 
 function runAll(): void {
   testOfficialPublishConfigUsesPublicNpmRegistry();
+  testOfficialPublishConfigDoesNotRequireInternalPublish();
   testOfficialPublishConfigRejectsPrivateRegistry();
   testOfficialPackageNameMustBeScoped();
   testOfficialPackageJsonIsSanitized();

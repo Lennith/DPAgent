@@ -16,7 +16,7 @@ export class ToolsetRegistry {
   private readonly definitions = new Map<string, ToolsetDefinition>();
   private readonly defaultToolsetName: string;
 
-  constructor(defaultToolsetName = 'full-access', customDefinitions: ToolsetDefinition[] = []) {
+  constructor(defaultToolsetName = 'windows-safe', customDefinitions: ToolsetDefinition[] = []) {
     const builtinNames = new Set(DEFAULT_TOOLSETS.map((definition) => definition.name.trim().toLowerCase()));
     for (const definition of DEFAULT_TOOLSETS) {
       this.definitions.set(definition.name.trim().toLowerCase(), {
@@ -43,7 +43,7 @@ export class ToolsetRegistry {
         ),
       });
     }
-    this.defaultToolsetName = defaultToolsetName.trim().toLowerCase() || 'full-access';
+    this.defaultToolsetName = defaultToolsetName.trim().toLowerCase() || 'windows-safe';
   }
 
   list(): ToolsetDefinition[] {

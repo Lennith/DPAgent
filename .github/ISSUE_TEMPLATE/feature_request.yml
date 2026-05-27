@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a workflow or capability for DPAgent
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: Describe the real task or user flow this feature should improve.
+      placeholder: "As a local DPAgent user, I want to..."
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current workaround
+      description: What do you do today, and where does it fail?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Keep this focused on observable behavior rather than implementation details.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent runtime
+        - Web UI
+        - CLI
+        - Toolsets or permissions
+        - MCP
+        - Memory or context
+        - Skills or subagents
+        - Automation
+        - Documentation
+        - Release or packaging
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security impact
+      options:
+        - label: This feature may involve shell, file writes, MCP, remote access, credentials, or full-access.
+          required: false
+

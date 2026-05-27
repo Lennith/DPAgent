@@ -88,7 +88,7 @@ function createAgent(
 ): DPAgent {
   const agent = new DPAgent({
     allowMissingApiKeyAtBoot: true,
-    configPath: path.join(process.cwd(), 'config.yaml'),
+    configPath: path.join(process.cwd(), 'config.example.yaml'),
     workspaceDir: harness.workspaceDir,
     runtimeDataDir: harness.runtimeDir,
     contextDir: harness.contextDir,

@@ -39,12 +39,12 @@ function runAll(): void {
   const todoTool = new FakeTool('todo', 'todo');
   const unknownTool = new FakeTool('custom_unknown_tool', 'custom');
 
-  assert.equal(registry.getDefaultName(), 'full-access');
+  assert.equal(registry.getDefaultName(), 'windows-safe');
   assert.equal(registry.list().some((toolset) => toolset.name === 'full-access'), false);
   assert.equal(registry.has('windows-dev'), true);
   assert.equal(registry.has('typo-dev'), false);
   assert.equal(registry.find('windows-dev')?.name, 'windows-dev');
-  assert.equal(registry.get('typo-dev').name, 'full-access');
+  assert.equal(registry.get('typo-dev').name, 'windows-safe');
   assert.throws(() => registry.requireToolset('typo-dev', 'test toolset'), /Unknown test toolset: typo-dev/);
   assert.equal(registry.allowsTool('full-access', unknownTool), true);
   assert.equal(registry.allowsTool('windows-dev', shellTool), true);

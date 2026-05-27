@@ -138,7 +138,7 @@ export function buildPublicSettingsView(
       maxSteps: config.agent.maxSteps,
       completionMarkerEnforcementEnabled:
         config.agent.completionMarkerEnforcementEnabled === true,
-      defaultToolset: config.agent.defaultToolset || 'windows-dev',
+      defaultToolset: config.agent.defaultToolset || 'windows-safe',
       contextReplayMinRounds: config.agent.contextReplayMinRounds ?? 6,
       contextReplayMaxRounds: config.agent.contextReplayMaxRounds ?? 12,
       contextReplayBudgetRatio: config.agent.contextReplayBudgetRatio ?? 0.55,

@@ -1141,7 +1141,11 @@ export class DPAgent {
       return this.toolsetRegistry.requireToolset(workspacePreset.toolsetName, 'workspace toolset preset').name;
     }
     if (workspaceDir) {
-      const seeded = this.toolsetPresetStore.setWorkspacePreset(workspaceDir, 'full-access');
+      const configuredDefaultToolset = String(this.config.get().agent.defaultToolset ?? '').trim();
+      const defaultToolset = configuredDefaultToolset
+        ? this.toolsetRegistry.requireToolset(configuredDefaultToolset, 'default toolset').name
+        : this.toolsetRegistry.getDefaultName();
+      const seeded = this.toolsetPresetStore.setWorkspacePreset(workspaceDir, defaultToolset);
       return this.toolsetRegistry.requireToolset(seeded.toolsetName, 'workspace toolset preset').name;
     }
     const configuredDefaultToolset = String(this.config.get().agent.defaultToolset ?? '').trim();

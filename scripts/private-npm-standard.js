@@ -1295,7 +1295,7 @@ async function main() {
   info(`mode=${mode}${plan.publishTag ? ` tag=${plan.publishTag}` : ''}`);
   validatePublishTagForVersion(pkg, plan.publishTag);
   if (plan.registrySmoke && !cfg.userSmoke) {
-    fail('internalPublish.userSmoke is required because publish:standard runs post-publish registry smoke.');
+    fail('internalPublish.userSmoke is required because the internal publish path runs post-publish registry smoke.');
   }
   validateCleanGitWorktree(ROOT);
   checkRegistryConsistency(pkg, cfg);

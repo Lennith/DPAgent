@@ -125,7 +125,7 @@ async function main(): Promise<void> {
     '## Workflow',
     '1. `npm run build:web`',
     '2. `npm test`',
-    '3. `npm run publish:standard:preflight`',
+    '3. `npm run publish:npm-official:preflight`',
     '',
     '## Notes',
     '- Publish only after all checks succeed',

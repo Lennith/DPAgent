@@ -11,7 +11,6 @@ import {
 } from '../utils/workflow-signal.js';
 import { readSkillVersion, upsertSkillMetadata } from './skill-markdown.js';
 import type {
-  SkillWriteAction,
   SkillWriteRecord,
   SkillWriteTarget,
   SkillRevisionRecord,
@@ -211,7 +210,6 @@ export class SkillWriteStore {
       }
     }
 
-    let action: SkillWriteAction = 'create';
     let baseVersion: string | undefined;
     let nextVersion = '1';
     if (fs.existsSync(targetPath)) {
@@ -219,7 +217,6 @@ export class SkillWriteStore {
       if (normalizeWorkflowText(existingContent) === normalizeWorkflowText(nextMarkdown)) {
         return null;
       }
-      action = 'update';
       baseVersion = readSkillVersion(existingContent);
       nextVersion = bumpVersion(baseVersion);
     }

@@ -10,7 +10,7 @@ Coordinate safe release completion. Verify version state, changelog readiness, b
 
 ## Use When
 - A beta, alpha, or stable package is about to be published.
-- Gerrit submission, version bump, or release gate status needs coordination.
+- GitHub release, version bump, or release gate status needs coordination.
 - The user asks whether a version is ready to ship.
 
 ## Do Not Use When

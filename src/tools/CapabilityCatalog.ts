@@ -14,7 +14,7 @@ export const SUBAGENT_PROTECTED_TOOL_NAMES = new Set(['context_manage', 'subagen
 export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
   {
     name: 'full-access',
-    description: 'Hidden internal default toolset that allows all built-in capabilities plus unknown MCP tools.',
+    description: 'Hidden opt-in toolset that allows all built-in capabilities plus unknown MCP tools.',
     capabilities: [
       'file_read',
       'tool_result_read',
@@ -44,7 +44,7 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
   },
   {
     name: 'windows-dev',
-    description: 'Default Windows development toolset with file, shell, memory, skill, and delegation support.',
+    description: 'Opt-in Windows development toolset with file, shell, memory, skill, and delegation support.',
     capabilities: [
       'file_read',
       'tool_result_read',

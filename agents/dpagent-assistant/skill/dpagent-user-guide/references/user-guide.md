@@ -25,7 +25,7 @@ DPAgent 不适合当成完全开放的公网远程执行服务。它可以读写
 如果你已经通过 npm 安装：
 
 ```powershell
-npm i -g @dpvr/dpagent --registry http://10.100.1.10:4873
+npm i -g @dpvr/dpagent --registry https://registry.npmjs.org
 npx dpagent
 ```
 

@@ -1,4 +1,4 @@
-import { autoLoopManager, DEFAULT_AUTO_LOOP_CONFIG, type AutoLoopConfig } from '../../auto-loop/index.js';
+import { autoLoopManager, type AutoLoopConfig } from '../../auto-loop/index.js';
 import type { DPAgent } from '../../dpagent-runtime.js';
 import type {
   ContextRef,

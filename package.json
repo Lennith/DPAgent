@@ -15,85 +15,22 @@
     "doc/guide/user-guide.md",
     "doc/guide/assets/user-guide/**",
     "README.md",
-    "LICENSE*"
+    "LICENSE*",
+    "CONFIG.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "SUPPORT.md",
+    "CHANGELOG.md",
+    "config.example.yaml"
   ],
   "publishConfig": {
-    "registry": "http://10.100.1.10:4873"
-  },
-  "npmOfficialPublish": {
-    "packageName": "@lennith/dpagent",
     "registry": "https://registry.npmjs.org",
     "access": "public"
   },
-  "internalPublish": {
-    "registry": "http://10.100.1.10:4873",
-    "requireUsabilityEntrypoint": true,
-    "requiredReadmeInitCommand": "npx dpagent",
-    "userSmoke": {
-      "command": "npx dpagent --no-open",
-      "timeoutMs": 120000,
-      "successPattern": "Starting web server at http://localhost:{PORT}"
-    },
-    "requiredPackPaths": [
-      "dist/",
-      "agents/browser/AGENTS.md",
-      "agents/checkpoint/AGENTS.md",
-      "agents/coding/AGENTS.md",
-      "agents/design/AGENTS.md",
-      "agents/dpagent-assistant/AGENTS.md",
-      "agents/guard/AGENTS.md",
-      "agents/health/AGENTS.md",
-      "agents/investigate/AGENTS.md",
-      "agents/planner/AGENTS.md",
-      "agents/qa/AGENTS.md",
-      "agents/release/AGENTS.md",
-      "agents/report/AGENTS.md",
-      "agents/research/AGENTS.md",
-      "agents/review/AGENTS.md",
-      "agents/security/AGENTS.md",
-      "doc/guide/user-guide.md",
-      "doc/guide/assets/user-guide/",
-      "README.md"
-    ],
-    "forbiddenPackPaths": [
-      "runtime/",
-      "sessions/",
-      "contexts/",
-      "logs/",
-      "workspace/",
-      "release-toolcall-profiles.dev.json",
-      "release-toolcall-profiles.local.json",
-      ".env"
-    ],
-    "releaseToolcallGate": {
-      "outputRoot": "logs/release-gate-toolcall-context-session",
-      "aggregateFile": "release-toolcall-context-gate.json",
-      "markdownFile": "release-toolcall-context-gate.md",
-      "manualReviewFile": "release-toolcall-context-manual-review.json",
-      "requiredRuns": 2,
-      "requiredRoundsPerRun": 10,
-      "requiredModel": "multi-profile",
-      "requiredProfiles": [
-        "deepseek",
-        "minimax"
-      ],
-      "requiredProfileModels": {
-        "deepseek": "deepseek-v4-flash",
-        "minimax": "MiniMax-M2.7-highspeed"
-      },
-      "minimumPassRate": 0.9
-    },
-    "releaseE2EGate": {
-      "outputRoot": "logs/release-gate-e2e",
-      "aggregateFile": "release-e2e-gate.json",
-      "markdownFile": "release-e2e-gate.md",
-      "requiredCases": [
-        "e2e:release-agent-web-regression",
-        "e2e:release-plan-mode-lifecycle",
-        "e2e:release-plan-mode-ux",
-        "e2e:release-cli-long-session"
-      ]
-    }
+  "npmOfficialPublish": {
+    "packageName": "@dpvr/dpagent",
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
   },
   "scripts": {
     "clean:dist": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
@@ -101,13 +38,8 @@
     "clean:modules": "node -e \"require('fs').rmSync('node_modules', { recursive: true, force: true })\"",
     "build": "npm run clean:dist && tsc",
     "prepublishOnly": "npm run build:web",
-    "publish:check": "npm config get registry && npm whoami --registry http://10.100.1.10:4873",
+    "publish:check": "npm config get registry && npm whoami --registry https://registry.npmjs.org",
     "publish:dry-run": "npm run build:web && npm pack --dry-run",
-    "publish:private": "npm publish --registry http://10.100.1.10:4873",
-    "publish:standard:preflight": "node scripts/private-npm-standard.js --mode preflight",
-    "publish:standard": "node scripts/private-npm-standard.js --mode publish",
-    "publish:standard:beta:preflight": "node scripts/private-npm-standard.js --mode preflight --tag beta",
-    "publish:standard:beta": "node scripts/private-npm-standard.js --mode publish --tag beta",
     "publish:npm-official:preflight": "node scripts/npm-official-publish.js --mode preflight --skip-release-gate",
     "publish:npm-official": "node scripts/npm-official-publish.js --mode publish --skip-release-gate",
     "publish:npm-official:beta:preflight": "node scripts/npm-official-publish.js --mode preflight --tag beta --skip-release-gate",
@@ -208,7 +140,6 @@
     "test:governance-tool-audit": "tsx tests/unit/governance-tool-audit.test.ts",
     "test:eval-toolcall-context-session": "tsx tests/unit/eval-toolcall-context-session.test.ts",
     "test:release-toolcall-context-gate": "tsx tests/unit/release-toolcall-context-gate.test.ts",
-    "test:private-npm-standard": "tsx tests/unit/private-npm-standard.test.ts",
     "test:npm-official-publish": "tsx tests/unit/npm-official-publish.test.ts",
     "test:web-composer-input-state": "tsx tests/unit/composer-input-state.test.ts",
     "test:web-i18n": "tsx tests/unit/web-i18n.test.ts",

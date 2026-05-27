@@ -37,6 +37,7 @@ function createRuntimeConfig(tempDir: string, workspaceDir: string) {
       contextDir: path.join(tempDir, 'contexts'),
       globalAgentsDir: path.join(tempDir, 'agents'),
       skillsDir: path.join(tempDir, 'skills'),
+      defaultToolset: 'windows-dev',
     },
     mcp: {
       enabled: false,

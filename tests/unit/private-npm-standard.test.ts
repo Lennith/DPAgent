@@ -648,7 +648,7 @@ function testPassesWhenReleaseOnlyReviewReusesSourceGate(): void {
           scope: 'release-process-only',
           previousReviewedCommitSha: previousCommitSha,
           currentCommitSha: CURRENT_COMMIT_SHA,
-          diffScope: ['scripts/private-npm-standard.js', 'doc/playbook/internal-npm-publish.md'],
+          diffScope: ['scripts/private-npm-standard.js', 'doc/internal/internal-npm-publish.md'],
           skippedCommands: ['npm run release:source-gate'],
           rationale: 'Only release workflow handling changed; runtime, UI, and LLM logic were not changed.',
         },

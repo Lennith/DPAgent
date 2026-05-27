@@ -18,6 +18,12 @@ const ROOT = process.cwd();
 export const DEFAULT_RELEASE_E2E_CASE_TIMEOUT_MS = 30 * 60 * 1000;
 export const RELEASE_E2E_AGGREGATE_FILE = 'release-e2e-gate.json';
 export const RELEASE_E2E_MARKDOWN_FILE = 'release-e2e-gate.md';
+export const DEFAULT_RELEASE_E2E_REQUIRED_CASES = [
+  'e2e:release-agent-web-regression',
+  'e2e:release-plan-mode-lifecycle',
+  'e2e:release-plan-mode-ux',
+  'e2e:release-cli-long-session',
+] as const;
 
 export interface ReleaseE2EArgs {
   tag: string;
@@ -61,21 +67,29 @@ function resolveReleaseCases(tag: string): TestManifestEntry[] {
 function resolveRequiredCasesFromPackageJson(): string[] {
   const packagePath = path.join(ROOT, 'package.json');
   const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8')) as {
+    releaseGate?: {
+      releaseE2E?: {
+        requiredCases?: unknown;
+      };
+    };
     internalPublish?: {
       releaseE2EGate?: {
         requiredCases?: unknown;
       };
     };
   };
-  const requiredCases = pkg.internalPublish?.releaseE2EGate?.requiredCases;
+  const requiredCases =
+    pkg.releaseGate?.releaseE2E?.requiredCases ??
+    pkg.internalPublish?.releaseE2EGate?.requiredCases ??
+    [...DEFAULT_RELEASE_E2E_REQUIRED_CASES];
   if (!Array.isArray(requiredCases)) {
-    throw new Error('package.json internalPublish.releaseE2EGate.requiredCases must be an array.');
+    throw new Error('package.json releaseGate.releaseE2E.requiredCases must be an array.');
   }
   const normalized = requiredCases
     .map((item) => String(item ?? '').trim())
     .filter((item) => item.length > 0);
   if (normalized.length === 0 || normalized.length !== requiredCases.length) {
-    throw new Error('package.json internalPublish.releaseE2EGate.requiredCases must contain non-empty strings.');
+    throw new Error('package.json releaseGate.releaseE2E.requiredCases must contain non-empty strings.');
   }
   return normalized;
 }
