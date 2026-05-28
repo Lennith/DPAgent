@@ -426,7 +426,7 @@ function writeRealServerConfig(input: {
         workspaceDir: input.workspaceDir,
         runtimeDataDir: input.runtimeDataDir,
         contextDir: input.contextDir,
-        defaultToolset: 'read-only',
+        defaultToolset: 'windows-safe',
       },
       tools: {
         enableFileTools: true,

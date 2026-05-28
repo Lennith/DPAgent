@@ -32,6 +32,7 @@ const ROOT = process.cwd();
 const DONE_MARKER = '\u3010\u5b8c\u6210\uff01\u3011';
 const REPORT_END_MARKER = '\u3010\u6c47\u62a5\u7ed3\u675f\uff01\u3011';
 
+const RELEASE_EVAL_TOOLSET_NAME = 'windows-dev';
 type RoundMode = 'work' | 'review';
 
 interface SeedSpec {
@@ -706,7 +707,13 @@ async function main(): Promise<void> {
         minToolCalls: spec.minToolCalls,
       };
     });
-    writeJsonArtifact(args.outputRoot, path.basename(summaryPath), { dryRun: true, workspaceDir, context, rounds });
+    writeJsonArtifact(args.outputRoot, path.basename(summaryPath), {
+      dryRun: true,
+      workspaceDir,
+      context,
+      toolsetName: RELEASE_EVAL_TOOLSET_NAME,
+      rounds,
+    });
     console.log(`Dry-run plan saved: ${summaryPath}`);
     if (!args.keepTemp) {
       fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -745,6 +752,9 @@ async function main(): Promise<void> {
         prompt: spec.prompt,
         context,
         workspaceDir,
+        agentRuntimeOverrides: {
+          toolsetName: RELEASE_EVAL_TOOLSET_NAME,
+        },
         callback: {
           onContextPrecompress: (event: ContextPrecompressEvent) => {
             if (typeof event.durationMs !== 'number' || !Number.isFinite(event.durationMs)) {

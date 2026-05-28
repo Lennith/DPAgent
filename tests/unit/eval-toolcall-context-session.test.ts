@@ -10,7 +10,7 @@ import {
   validateRequiredOperations,
 } from '../../scripts/lib/eval-toolcall-context-core.ts';
 
-function runDryRun(outputRoot: string): { rounds: Array<{ round: number; prompt: string }> } {
+function runDryRun(outputRoot: string): { toolsetName?: string; rounds: Array<{ round: number; prompt: string }> } {
   const result = spawnSync(
     process.execPath,
     [
@@ -35,7 +35,7 @@ function runDryRun(outputRoot: string): { rounds: Array<{ round: number; prompt:
   }
 
   const summaryPath = path.join(outputRoot, 'toolcall-context-session-report.json');
-  return JSON.parse(fs.readFileSync(summaryPath, 'utf8')) as { rounds: Array<{ round: number; prompt: string }> };
+  return JSON.parse(fs.readFileSync(summaryPath, 'utf8')) as { toolsetName?: string; rounds: Array<{ round: number; prompt: string }> };
 }
 
 async function runCase(): Promise<void> {
@@ -43,6 +43,7 @@ async function runCase(): Promise<void> {
   try {
     const dryRun = runDryRun(outputRoot);
     const workPrompt = dryRun.rounds.find((round) => round.round === 2)?.prompt ?? '';
+    assert.equal(dryRun.toolsetName, 'windows-dev');
     const reviewPrompt = dryRun.rounds.find((round) => round.round === 3)?.prompt ?? '';
 
     assert.match(workPrompt, /extract `TOKEN` and copy that exact value into `PREV_TOKEN`/);
