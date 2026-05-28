@@ -62,6 +62,7 @@ const UNIT_TEST_FILES = [
   'tests/unit/llm-provider-runtime-contracts.test.ts',
   'tests/unit/llm-session-state.test.ts',
   'tests/unit/llm-thinking-signature.test.ts',
+  'tests/unit/llm-vendor-dialects.test.ts',
   'tests/unit/local-file-picker-mobile-layout.test.ts',
   'tests/unit/markdown-rendering.test.ts',
   'tests/unit/mcp-connector-reconnect.test.ts',

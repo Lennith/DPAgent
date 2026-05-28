@@ -22,6 +22,16 @@ export {
 export type { AssistantToolBundleAnalysis, ToolProtocolAnalysisResult } from './tool-protocol-analyzer.js';
 export { resolveAnthropicReasoningEffort, resolveAnthropicThinkingBudgetTokens } from './anthropic-thinking-budget.js';
 export type { AnthropicReasoningEffort } from './anthropic-thinking-budget.js';
+export {
+  resolveLlmVendorDialect,
+  resolveOpenAiThinkingRequest,
+  resolveProviderRuntimeBaseUrlForDialect,
+} from './vendor-dialects/index.js';
+export type {
+  LlmVendorDialectContext,
+  LlmVendorDialectId,
+  LlmVendorDialectPolicy,
+} from './vendor-dialects/index.js';
 export { normalizeTokenUsage } from './token-usage.js';
 export {
   resolveProviderRuntimeBaseUrl,

@@ -202,6 +202,70 @@ async function testDropsUnsignedThinkingFromReplayPayload(): Promise<void> {
   assert.equal(String(requestMessages[1]?.content ?? '').includes('tool request'), true);
 }
 
+async function testReplaysUnsignedXiaomiMimoThinkingFromReplayPayload(): Promise<void> {
+  const requests: Array<Record<string, unknown>> = [];
+  const client = createClient(
+    requests,
+    [],
+    {
+      content: [
+        {
+          type: 'text',
+          text: 'ok',
+        },
+      ],
+      usage: {
+        input_tokens: 5,
+        output_tokens: 3,
+      },
+      stop_reason: 'end_turn',
+    },
+    {
+      profileId: 'xiaomi-mimo',
+      provider: 'anthropic',
+      apiKey: 'test-api-key',
+      apiBase: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+      model: 'mimo-v2.5-pro',
+      maxOutputTokens: 4096,
+      reasoningPreset: 'high',
+      capabilities: {
+        reasoningEffort: false,
+        thinkingBudget: true,
+      },
+    }
+  );
+
+  const messages: Message[] = [
+    { role: 'user', content: 'question' },
+    {
+      role: 'assistant',
+      content: 'tool request',
+      thinking: 'inspect files first',
+      metadata: {
+        llmProviderProfileId: 'xiaomi-mimo',
+        llmProvider: 'anthropic',
+        llmModel: 'mimo-v2.5-pro',
+        thinkingComplete: true,
+      },
+    },
+  ];
+
+  await client.generateWithCallbacks(messages, {});
+
+  const requestMessages = requests[0]?.messages as Array<Record<string, unknown>>;
+  assert.equal(Array.isArray(requestMessages), true);
+  const assistantContent = requestMessages[1]?.content as Array<Record<string, unknown>>;
+  assert.deepEqual(assistantContent[0], {
+    type: 'thinking',
+    thinking: 'inspect files first',
+  });
+  assert.equal('signature' in assistantContent[0], false);
+  assert.deepEqual(assistantContent[1], {
+    type: 'text',
+    text: 'tool request',
+  });
+}
+
 async function testDropsSignatureOnlyThinkingFromReplayPayload(): Promise<void> {
   const requests: Array<Record<string, unknown>> = [];
   const client = createClient(
@@ -488,6 +552,7 @@ async function runAll(): Promise<void> {
   await testCapturesThinkingSignatureFromStreamDelta();
   await testReplaysThinkingWithSignature();
   await testDropsUnsignedThinkingFromReplayPayload();
+  await testReplaysUnsignedXiaomiMimoThinkingFromReplayPayload();
   await testDropsSignatureOnlyThinkingFromReplayPayload();
   await testEmitsToolUseOnToolStartBeforeComplete();
   await testMapsReasoningPresetToThinkingBudget();

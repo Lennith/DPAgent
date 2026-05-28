@@ -643,6 +643,130 @@ async function testGenerateReplaysDeepSeekThinkingAsReasoningContent(): Promise<
   assert.equal(syntheticAssistant.reasoning_content, '');
 }
 
+async function testGenerateReplaysXiaomiMimoThinkingAsReasoningContent(): Promise<void> {
+  const adapter = createAdapter({
+    profileId: 'xiaomi-mimo',
+    provider: 'openai',
+    apiKey: 'test-api-key',
+    apiBase: 'https://token-plan-cn.xiaomimimo.com/v1',
+    model: 'mimo-v2.5-pro',
+    maxOutputTokens: 4096,
+    reasoningPreset: 'high',
+    capabilities: {
+      reasoningEffort: true,
+      thinkingBudget: false,
+    },
+  });
+  let capturedRequest: Record<string, unknown> | undefined;
+
+  (adapter as any).client = {
+    chat: {
+      completions: {
+        create: async (requestParams: Record<string, unknown>) => {
+          capturedRequest = requestParams;
+          return {
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  content: 'done',
+                },
+              },
+            ],
+          };
+        },
+      },
+    },
+  };
+
+  await adapter.generate(
+    buildPreparedPayload([
+      { role: 'user', content: 'Plan this task' },
+      {
+        role: 'assistant',
+        content: '',
+        thinking: '  Need to finalize before executing.\n',
+        metadata: {
+          llmProviderProfileId: 'xiaomi-mimo',
+          llmProvider: 'openai',
+          llmModel: 'mimo-v2.5-pro',
+          thinkingComplete: true,
+        },
+        toolCalls: [
+          {
+            id: 'call_5',
+            type: 'function',
+            function: {
+              name: 'finalize_plan',
+              arguments: { title: 'Plan' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        toolCallId: 'call_5',
+        content: '{"decision":"approved","executionContinuation":"approved_new_turn"}',
+      },
+      { role: 'user', content: '[TODO_LOOP]\nContinue execution.' },
+    ])
+  );
+
+  assert.deepEqual(capturedRequest?.thinking, { type: 'enabled' });
+  assert.equal('reasoning_effort' in (capturedRequest ?? {}), false);
+
+  const requestMessages = capturedRequest?.messages as Array<Record<string, unknown>>;
+  const assistantMessage = requestMessages.find(
+    (message) => message.role === 'assistant' && Array.isArray(message.tool_calls)
+  );
+  assert.ok(assistantMessage);
+  assert.equal(assistantMessage.reasoning_content, '  Need to finalize before executing.\n');
+  assert.equal(assistantMessage.content, '');
+  assert.doesNotMatch(String(assistantMessage.content ?? ''), /<think>/);
+  assert.equal(Array.isArray(assistantMessage.tool_calls), true);
+}
+
+async function testGenerateOmitsXiaomiMimoThinkingRequestWhenReasoningOff(): Promise<void> {
+  const adapter = createAdapter({
+    profileId: 'xiaomi-mimo',
+    provider: 'openai',
+    apiKey: 'test-api-key',
+    apiBase: 'https://token-plan-cn.xiaomimimo.com/v1',
+    model: 'mimo-v2.5-pro',
+    maxOutputTokens: 4096,
+    reasoningPreset: 'off',
+    capabilities: {
+      reasoningEffort: true,
+      thinkingBudget: false,
+    },
+  });
+  let capturedRequest: Record<string, unknown> | undefined;
+
+  (adapter as any).client = {
+    chat: {
+      completions: {
+        create: async (requestParams: Record<string, unknown>) => {
+          capturedRequest = requestParams;
+          return {
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  content: 'done',
+                },
+              },
+            ],
+          };
+        },
+      },
+    },
+  };
+
+  await adapter.generate(buildPreparedPayload([{ role: 'user', content: 'answer' }]));
+  assert.equal('thinking' in (capturedRequest ?? {}), false);
+  assert.equal('reasoning_effort' in (capturedRequest ?? {}), false);
+}
+
 async function testGenerateRejectsMalformedPreparedToolUseReplay(): Promise<void> {
   const adapter = createAdapter();
 
@@ -863,6 +987,8 @@ async function runAll(): Promise<void> {
   await testGenerateStreamMovesLeadingThinkBlocksToThinking();
   await testGenerateReplaysAssistantThinkingForToolOnlyTurns();
   await testGenerateReplaysDeepSeekThinkingAsReasoningContent();
+  await testGenerateReplaysXiaomiMimoThinkingAsReasoningContent();
+  await testGenerateOmitsXiaomiMimoThinkingRequestWhenReasoningOff();
   await testGenerateRejectsMalformedPreparedToolUseReplay();
   await testGenerateRejectsOrphanPreparedToolResultReplay();
   await testGenerateAddsReasoningEffortWhenRuntimeSupportsIt();

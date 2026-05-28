@@ -160,6 +160,11 @@ function testRunTimeoutCanBeSetExplicitly(): void {
   assert.equal(args.runTimeoutMs, 120000);
 }
 
+function testDefaultProfilesMatchMaintainedReleaseMatrix(): void {
+  const args = parseArgs([]);
+  assert.deepEqual(args.profiles, ['deepseek', 'minimax', 'xiaomi']);
+}
+
 function testDevProfilesCanOmitKimiModelAndLocalProfilesOverride(): void {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'release-toolcall-gate-profiles-'));
   try {
@@ -378,14 +383,84 @@ function testMiniMaxModelContractRejectsStaleOverride(): void {
   }
 }
 
+function testProfilesCanResolveApiKeyFromEnvironment(): void {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'release-toolcall-gate-env-key-'));
+  const previous = process.env.RELEASE_XIAOMI_MIMO_API_KEY;
+  process.env.RELEASE_XIAOMI_MIMO_API_KEY = 'env-test-key';
+  try {
+    const args = {
+      ...createArgs(outputRoot),
+      profiles: ['xiaomi'],
+    };
+    fs.writeFileSync(args.configPath, 'api:\n  model: MiniMax-M2.7-highspeed\n', 'utf8');
+    writeJson(outputRoot, 'release-toolcall-profiles.local.json', {
+      profiles: [
+        {
+          id: 'xiaomi-local',
+          label: 'xiaomi',
+          name: 'Xiaomi MiMo',
+          provider: 'anthropic',
+          apiKeyEnv: 'RELEASE_XIAOMI_MIMO_API_KEY',
+          apiBase: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+          model: 'mimo-v2.5-pro',
+        },
+      ],
+    });
+
+    const profiles = resolveRuntimeProfiles(args);
+    assert.equal(profiles[0]?.apiKey, 'env-test-key');
+  } finally {
+    if (previous === undefined) {
+      delete process.env.RELEASE_XIAOMI_MIMO_API_KEY;
+    } else {
+      process.env.RELEASE_XIAOMI_MIMO_API_KEY = previous;
+    }
+    fs.rmSync(outputRoot, { recursive: true, force: true });
+  }
+}
+
+function testXiaomiModelContractRejectsStaleOverride(): void {
+  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'release-toolcall-gate-bad-xiaomi-'));
+  try {
+    const args = {
+      ...createArgs(outputRoot),
+      profiles: ['xiaomi'],
+    };
+    fs.writeFileSync(args.configPath, 'api:\n  model: MiniMax-M2.7-highspeed\n', 'utf8');
+    writeJson(outputRoot, 'release-toolcall-profiles.dev.json', {
+      profiles: [
+        {
+          id: 'xiaomi-dev',
+          label: 'xiaomi',
+          name: 'Xiaomi MiMo',
+          provider: 'anthropic',
+          apiKey: 'test-key',
+          apiBase: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+          model: 'mimo-v2-flash',
+        },
+      ],
+    });
+
+    assert.throws(
+      () => resolveRuntimeProfiles(args),
+      /xiaomi.*must use model mimo-v2\.5-pro/i
+    );
+  } finally {
+    fs.rmSync(outputRoot, { recursive: true, force: true });
+  }
+}
+
 function runAll(): void {
   testWriteGateArtifactsProducesManualReviewTemplate();
   testDefaultRunTimeoutIsFifteenMinutes();
   testRunTimeoutCanBeSetExplicitly();
+  testDefaultProfilesMatchMaintainedReleaseMatrix();
   testDevProfilesCanOmitKimiModelAndLocalProfilesOverride();
   testDeepSeekModelContractRejectsStaleOverride();
   testKimiModelContractRejectsStaleExplicitOverride();
   testMiniMaxModelContractRejectsStaleOverride();
+  testProfilesCanResolveApiKeyFromEnvironment();
+  testXiaomiModelContractRejectsStaleOverride();
   console.log('release-toolcall-context-gate tests passed');
 }
 

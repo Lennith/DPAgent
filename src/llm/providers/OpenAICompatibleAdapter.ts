@@ -4,6 +4,8 @@ import { messageTextContent } from '../message-preparation.js';
 import { prepareToolProtocol } from '../tool-protocol-analyzer.js';
 import { resolveProviderRuntimeBaseUrl } from '../provider-endpoints.js';
 import { normalizeTokenUsage } from '../token-usage.js';
+import { resolveLlmVendorDialect, resolveOpenAiThinkingRequest } from '../vendor-dialects/index.js';
+import type { LlmVendorDialectPolicy } from '../vendor-dialects/index.js';
 import type { LLMClientConfig, LLMRequestOptions, LLMStreamEvent, PreparedProviderPayload } from '../runtime-types.js';
 import type {
   LLMResponse,
@@ -31,14 +33,22 @@ export class OpenAICompatibleAdapter {
   private readonly model: string;
   private readonly maxTokens: number;
   private readonly llmRuntime?: ResolvedLlmRuntimeConfig;
+  private readonly vendorDialect: LlmVendorDialectPolicy;
 
   constructor(config: LLMClientConfig) {
     this.model = config.model;
     this.maxTokens = config.maxTokens;
     this.llmRuntime = config.llmRuntime;
+    this.vendorDialect = resolveLlmVendorDialect(
+      config.llmRuntime ?? { provider: 'openai', apiBase: config.apiBase, model: config.model }
+    );
     this.client = new OpenAI({
       apiKey: config.apiKey,
-      baseURL: resolveProviderRuntimeBaseUrl('openai', config.apiBase),
+      baseURL: resolveProviderRuntimeBaseUrl(
+        'openai',
+        config.apiBase,
+        config.llmRuntime ?? { provider: 'openai', apiBase: config.apiBase, model: config.model }
+      ),
     });
   }
 
@@ -208,9 +218,16 @@ export class OpenAICompatibleAdapter {
       requestParams.stream_options = { include_usage: true };
     }
 
-    const reasoningEffort = resolveOpenAiReasoningEffort(this.llmRuntime);
-    if (reasoningEffort) {
-      requestParams.reasoning_effort = reasoningEffort;
+    const thinkingRequest = resolveOpenAiThinkingRequest(this.llmRuntime);
+    if (thinkingRequest) {
+      requestParams.thinking = thinkingRequest;
+    } else {
+      if (!this.vendorDialect.openai.suppressReasoningEffort) {
+        const reasoningEffort = resolveOpenAiReasoningEffort(this.llmRuntime);
+        if (reasoningEffort) {
+          requestParams.reasoning_effort = reasoningEffort;
+        }
+      }
     }
 
     return requestParams;
@@ -298,23 +315,7 @@ export class OpenAICompatibleAdapter {
   }
 
   private shouldReplayThinkingAsReasoningContent(message?: Message): boolean {
-    const runtime = this.llmRuntime;
-    const metadata =
-      message?.metadata && typeof message.metadata === 'object'
-        ? (message.metadata as Record<string, unknown>)
-        : {};
-    const candidates = [
-      runtime?.profileId,
-      runtime?.model,
-      runtime?.apiBase,
-      metadata.llmProviderProfileId,
-      metadata.llmProvider,
-      metadata.llmModel,
-      this.model,
-    ]
-      .map((value) => String(value ?? '').toLowerCase())
-      .filter(Boolean);
-    return candidates.some((value) => value.includes('deepseek'));
+    return this.vendorDialect.openai.replayAssistantThinkingAsReasoningContent;
   }
 
   private convertToolMessage(message: Message): Record<string, unknown> {

@@ -53,6 +53,13 @@ The LLM layer accepts canonical prepared payloads. Anthropic-compatible and
 OpenAI-compatible adapters convert payloads into provider syntax, normalize
 streaming events, normalize finish reasons, and return usage when available.
 
+Provider adapters consume a vendor dialect policy resolved from the runtime
+profile, API base, and model. The protocol adapter owns wire-shape conversion;
+the dialect policy owns supplier-specific quirks such as endpoint normalization,
+reasoning request parameters, historical thinking replay carriers, and whether
+unsigned Anthropic thinking blocks are replayable. New supplier quirks should be
+added as dialect policies, not as ad hoc checks inside protocol adapters.
+
 OpenAI-compatible tool arguments must parse to a JSON object before they can
 become canonical tool calls. Malformed or non-object arguments are provider
 protocol errors, not executable fallback payloads.

@@ -1,4 +1,5 @@
 import type { Message, ResolvedLlmRuntimeConfig } from '../types.js';
+import { resolveLlmVendorDialect } from './vendor-dialects/index.js';
 
 export interface ReplayableThinkingBlock {
   thinking: string;
@@ -65,7 +66,8 @@ export function getReplayableThinkingBlock(
   }
 
   const signature = String(message.thinkingSignature ?? '').trim();
-  if (!signature && (!llmRuntime || llmRuntime.provider === 'anthropic')) {
+  const dialect = resolveLlmVendorDialect(llmRuntime);
+  if (!signature && (!llmRuntime || (llmRuntime.provider === 'anthropic' && !dialect.anthropic.allowUnsignedThinkingReplay))) {
     return null;
   }
 

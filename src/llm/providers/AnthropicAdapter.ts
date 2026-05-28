@@ -24,7 +24,11 @@ export class AnthropicAdapter {
     this.maxTokens = config.maxTokens;
     this.llmRuntime = config.llmRuntime;
     this.reasoningReplayPolicy = createReasoningReplayPolicy(this.llmRuntime);
-    const apiBase = resolveProviderRuntimeBaseUrl('anthropic', config.apiBase);
+    const apiBase = resolveProviderRuntimeBaseUrl(
+      'anthropic',
+      config.apiBase,
+      config.llmRuntime ?? { provider: 'anthropic', apiBase: config.apiBase, model: config.model }
+    );
 
     this.client = new Anthropic({
       apiKey: config.apiKey,

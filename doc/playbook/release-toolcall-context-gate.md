@@ -11,11 +11,12 @@ npm run test:release-toolcall-context-session
 ```
 
 ## Maintained Profile Matrix
-The release gate runs two active release profiles:
+The release gate runs three active release profiles:
 
 ```text
 deepseek
 minimax
+xiaomi
 ```
 
 Each profile runs 10 tool-heavy rounds. The minimum pass rate is 90%, so each
@@ -25,6 +26,7 @@ Model expectations:
 
 - `deepseek`: `deepseek-v4-flash`
 - `minimax`: `MiniMax-M2.7-highspeed`
+- `xiaomi`: `mimo-v2.5-pro`
 
 Kimi is not part of the maintained release gate while no active release key is
 available. Reintroduce it by adding the profile back to the package script and

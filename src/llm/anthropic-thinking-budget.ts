@@ -1,4 +1,5 @@
 import type { ResolvedLlmRuntimeConfig } from '../types.js';
+import { resolveLlmVendorDialect } from './vendor-dialects/index.js';
 
 export type AnthropicReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -8,9 +9,7 @@ function hasPositiveThinkingBudgetOverride(llmRuntime: ResolvedLlmRuntimeConfig)
 }
 
 function isOfficialAnthropicEffortRuntime(llmRuntime: ResolvedLlmRuntimeConfig): boolean {
-  const apiBase = String(llmRuntime.apiBase ?? '').toLowerCase();
-  const model = String(llmRuntime.model ?? '').toLowerCase();
-  return apiBase.includes('anthropic.com') || model.startsWith('claude-');
+  return resolveLlmVendorDialect(llmRuntime).anthropic.reasoningRequest === 'output_config_effort';
 }
 
 export function resolveAnthropicReasoningEffort(

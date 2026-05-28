@@ -17,6 +17,7 @@ const RELEASE_REQUIRED_PROFILE_MODELS: Record<string, string> = {
   kimi: KIMI_RELEASE_DEFAULT_MODEL,
   deepseek: 'deepseek-v4-flash',
   minimax: 'MiniMax-M2.7-highspeed',
+  xiaomi: 'mimo-v2.5-pro',
 };
 
 export const MAX_COMPRESSION_DURATION_MS = 180_000;
@@ -132,7 +133,7 @@ export function parseArgs(argv: string[]): GateArgs {
   const map = parseFlagArgs(argv);
 
   const runsRaw = map.has('runs') ? Number.parseInt(String(map.get('runs')), 10) : Number.NaN;
-  const profiles = String(map.get('profiles') || 'kimi,deepseek,minimax')
+  const profiles = String(map.get('profiles') || 'deepseek,minimax,xiaomi')
     .split(',')
     .map((item) => normalizeProfileLabel(item))
     .filter(Boolean);
@@ -150,7 +151,7 @@ export function parseArgs(argv: string[]): GateArgs {
         ? minPassRateRaw
         : 0.9,
     model: String(map.get('model') || 'multi-profile').trim() || 'multi-profile',
-    profiles: uniqueProfiles.length > 0 ? uniqueProfiles : ['kimi', 'deepseek', 'minimax'],
+    profiles: uniqueProfiles.length > 0 ? uniqueProfiles : ['deepseek', 'minimax', 'xiaomi'],
     configPath: path.resolve(String(map.get('config-path') || path.join(ROOT, 'config.yaml'))),
     devProfilesPath: path.resolve(
       String(map.get('dev-profiles') || path.join(ROOT, 'release-toolcall-profiles.dev.json'))
@@ -193,7 +194,8 @@ function normalizeRuntimeProfile(raw: unknown, fallbackLabel: string, fallbackMo
   const id = String(record.id ?? fallbackLabel).trim();
   const label = normalizeProfileLabel(String(record.label ?? (name || id || fallbackLabel)));
   const provider = String(record.provider ?? 'anthropic').trim().toLowerCase();
-  const apiKey = String(record.apiKey ?? '').trim();
+  const apiKeyEnv = String(record.apiKeyEnv ?? '').trim();
+  const apiKey = String(record.apiKey ?? '').trim() || (apiKeyEnv ? String(process.env[apiKeyEnv] ?? '').trim() : '');
   const apiBase = String(record.apiBase ?? '').trim();
   const explicitModel = String(record.model ?? record.defaultModel ?? '').trim();
   const model = explicitModel || (label === 'kimi' ? KIMI_RELEASE_DEFAULT_MODEL : fallbackModel).trim();

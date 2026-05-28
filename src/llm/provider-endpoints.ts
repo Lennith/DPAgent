@@ -1,22 +1,16 @@
-import type { APIProvider } from '../types.js';
-
-const MINIMAX_DOMAINS = ['api.minimax.io', 'api.minimaxi.com'];
+import type { APIProvider, ResolvedLlmRuntimeConfig } from '../types.js';
+import { resolveProviderRuntimeBaseUrlForDialect, type LlmVendorDialectContext } from './vendor-dialects/index.js';
 
 function trimTrailingSlash(value: string): string {
   return String(value ?? '').trim().replace(/\/+$/u, '');
 }
 
-export function resolveProviderRuntimeBaseUrl(provider: APIProvider, apiBase: string): string {
-  const normalized = trimTrailingSlash(apiBase);
-  if (provider !== 'anthropic') {
-    return normalized;
-  }
-  const isMinimax = MINIMAX_DOMAINS.some((domain) => normalized.includes(domain));
-  if (!isMinimax) {
-    return normalized;
-  }
-  const withoutProtocolSuffix = normalized.replace('/anthropic', '').replace('/v1', '');
-  return `${withoutProtocolSuffix}/anthropic`;
+export function resolveProviderRuntimeBaseUrl(
+  provider: APIProvider,
+  apiBase: string,
+  runtime?: ResolvedLlmRuntimeConfig | LlmVendorDialectContext
+): string {
+  return resolveProviderRuntimeBaseUrlForDialect(provider, apiBase, runtime);
 }
 
 export function buildOpenAiModelDiscoveryUrls(apiBase: string): string[] {
