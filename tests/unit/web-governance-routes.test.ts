@@ -12,6 +12,7 @@ function createHarness(options: { observeOnly?: boolean; throwOnWorkspaceResolve
   const createTodoInputs: unknown[] = [];
   const updateTodoInputs: unknown[] = [];
   const dismissTodoInputs: unknown[] = [];
+  const dismissUnfinishedInputs: unknown[] = [];
   const organizeMemoryInputs: unknown[] = [];
   const ensureTodoLoopInputs: unknown[] = [];
   const workspaceResolutionCalls: unknown[] = [];
@@ -42,8 +43,17 @@ function createHarness(options: { observeOnly?: boolean; throwOnWorkspaceResolve
           listTodoInputs.push(input);
           return [{ id: 'todo-1' }];
         },
-        getProtocolState: () => ({ items: [] }),
+        getProtocolState: (input: unknown) => ({
+          input,
+          items: [],
+          unfinishedItems: [],
+          hasUnfinished: false,
+        }),
         clearCompletedTodos: () => 0,
+        dismissUnfinishedTodos: (input: unknown) => {
+          dismissUnfinishedInputs.push(input);
+          return [{ id: 'todo-dismissed', status: 'dismissed' }];
+        },
         setTodoPlan: () => [],
         createTodo: (input: unknown) => {
           createTodoInputs.push(input);
@@ -92,6 +102,7 @@ function createHarness(options: { observeOnly?: boolean; throwOnWorkspaceResolve
     createTodoInputs,
     updateTodoInputs,
     dismissTodoInputs,
+    dismissUnfinishedInputs,
     organizeMemoryInputs,
     ensureTodoLoopInputs,
     workspaceResolutionCalls,
@@ -169,6 +180,10 @@ async function testObserveOnlyWritesRejectBeforeWorkspaceResolution(): Promise<v
   await addHandler({ body: { action: 'add', sessionId: 'sess-observe', work: 'blocked' } }, addRes);
   assert.equal(addRes.statusCode, 409);
 
+  const dismissUnfinishedRes = createResponseRecorder();
+  await addHandler({ body: { action: 'dismiss_unfinished', sessionId: 'sess-observe' } }, dismissUnfinishedRes);
+  assert.equal(dismissUnfinishedRes.statusCode, 409);
+
   const updateRes = createResponseRecorder();
   await updateHandler(
     { params: { id: 'todo-1' }, body: { action: 'dismiss', sessionId: 'sess-observe' } },
@@ -190,6 +205,7 @@ async function testObserveOnlyWritesRejectBeforeWorkspaceResolution(): Promise<v
   assert.deepEqual(harness.workspaceResolutionCalls, []);
   assert.deepEqual(harness.createTodoInputs, []);
   assert.deepEqual(harness.dismissTodoInputs, []);
+  assert.deepEqual(harness.dismissUnfinishedInputs, []);
   assert.deepEqual(harness.organizeMemoryInputs, []);
 }
 
@@ -254,11 +270,67 @@ async function testTodoWritesUseSessionWorkspaceAfterObserveGate(): Promise<void
   ]);
 }
 
+async function testDismissUnfinishedTodosRequiresSessionScope(): Promise<void> {
+  const harness = createHarness();
+  const handler = harness.routes.postRoutes.get('/api/todos');
+  assert.ok(handler);
+
+  const missingSessionRes = createResponseRecorder();
+  await handler({ body: { action: 'dismiss_unfinished' } }, missingSessionRes);
+  assert.equal(missingSessionRes.statusCode, 400);
+  assert.match(String(missingSessionRes.body?.error ?? ''), /session scope and sessionId/i);
+
+  const workspaceScopeRes = createResponseRecorder();
+  await handler(
+    { body: { action: 'dismiss_unfinished', sessionId: 'sess-1', scope: 'workspace' } },
+    workspaceScopeRes
+  );
+  assert.equal(workspaceScopeRes.statusCode, 400);
+  assert.match(String(workspaceScopeRes.body?.error ?? ''), /session scope and sessionId/i);
+  assert.deepEqual(harness.dismissUnfinishedInputs, []);
+}
+
+async function testDismissUnfinishedTodosUsesSessionWorkspaceAndRefreshesLoop(): Promise<void> {
+  const harness = createHarness();
+  const handler = harness.routes.postRoutes.get('/api/todos');
+  assert.ok(handler);
+
+  const res = createResponseRecorder();
+  await handler({ body: { action: 'dismiss_unfinished', sessionId: ' sess-1 ' } }, res);
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body?.success, true);
+  assert.equal(res.body?.action, 'dismiss_unfinished');
+  assert.equal(res.body?.dismissed, 1);
+  assert.deepEqual(harness.dismissUnfinishedInputs, [
+    {
+      scope: 'session',
+      sessionId: 'sess-1',
+      workspaceDir: harness.sessionWorkspaceDir,
+    },
+  ]);
+  assert.deepEqual(harness.ensureTodoLoopInputs, [
+    { sessionId: 'sess-1', workspaceDir: harness.sessionWorkspaceDir },
+  ]);
+  assert.deepEqual(res.body?.protocol, {
+    input: {
+      scope: 'session',
+      sessionId: 'sess-1',
+      workspaceDir: harness.sessionWorkspaceDir,
+    },
+    items: [],
+    unfinishedItems: [],
+    hasUnfinished: false,
+  });
+}
+
 async function runAll(): Promise<void> {
   await testReadRoutesResolveSessionWorkspace();
   await testReadRoutesUseDefaultWorkspaceWithoutSession();
   await testObserveOnlyWritesRejectBeforeWorkspaceResolution();
   await testTodoWritesUseSessionWorkspaceAfterObserveGate();
+  await testDismissUnfinishedTodosRequiresSessionScope();
+  await testDismissUnfinishedTodosUsesSessionWorkspaceAndRefreshesLoop();
   console.log('web-governance-routes tests passed');
 }
 

@@ -19,6 +19,7 @@ import {
 import { useI18n } from '../../i18n/index.js';
 import type { ThemeConfig } from '../../styles/theme/index.js';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
+import type { RequestConfirm } from '../common/ConfirmDialog.js';
 
 type Frequency = 'interval' | 'hourly' | 'daily' | 'weekly';
 type ApiFrequency = Frequency | 'once';
@@ -103,6 +104,7 @@ interface AutomationCenterProps {
   workspaceDir: string;
   llmProfiles: LlmProfilesConfigView | null;
   onOpenSession: (sessionId: string) => void;
+  requestConfirm?: RequestConfirm;
 }
 
 interface JobFormState {
@@ -232,7 +234,7 @@ async function readApiError(response: Response): Promise<string> {
   return cleaned || fallback;
 }
 
-export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: AutomationCenterProps) {
+export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession, requestConfirm }: AutomationCenterProps) {
   const theme = useThemeConfig();
   const { t } = useI18n();
   const [jobs, setJobs] = useState<AutomationJobView[]>([]);
@@ -522,7 +524,19 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
 
   const handleDelete = useCallback(
     async (job: AutomationJobView) => {
-      if (job.readOnly || !window.confirm(t('automation.delete.confirm', { name: job.name }))) {
+      if (job.readOnly) {
+        return;
+      }
+      if (!requestConfirm) {
+        return;
+      }
+      const confirmed = await requestConfirm({
+        title: t('confirm.deleteAutomation.title'),
+        body: t('automation.delete.confirm', { name: job.name }),
+        confirmLabel: t('confirm.deleteAutomation.confirm'),
+        variant: 'danger',
+      });
+      if (!confirmed) {
         return;
       }
       setDeletingJobId(job.id);
@@ -541,7 +555,7 @@ export function AutomationCenter({ workspaceDir, llmProfiles, onOpenSession }: A
         setDeletingJobId(null);
       }
     },
-    [loadJobs, resetForm, t]
+    [loadJobs, requestConfirm, resetForm, t]
   );
 
   const handleRunNow = useCallback(

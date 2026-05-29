@@ -34,6 +34,12 @@ normal Plan execution exit.
 Dismiss is never an LLM tool action. The model can report a blocker with Todo
 `set_status`, but only the user can dismiss a blocked item.
 
+After the user stops or cancels an active run, Web may expose a current-session
+cleanup action when unfinished Todo items remain. Cleanup is user-confirmed and
+marks all current session `pending`, `in_progress`, and `blocked` items as
+`dismissed`. It does not delete Todo history and does not affect completed or
+already dismissed items.
+
 ## Ralph
 Ralph settings are editable during Web-owned active runs for future use. The
 current in-flight run is unchanged. When the run completes, the continuation
@@ -51,6 +57,7 @@ errors are fatal unless another explicit recovery contract exists.
 - Approving a plan creates Todo-constrained execution.
 - Unfinished Todo prevents Ralph from taking priority.
 - Blocked Todo can be resumed or dismissed by the user.
+- After a user stop or cancel, current-session cleanup can dismiss unfinished Todo work.
 - Dismissed Todo does not drive continuation or block Plan execution exit.
 - Recoverable checkpoint errors schedule continuation.
 - Observe-only sessions cannot change Ralph.

@@ -20,6 +20,14 @@ Each record must include:
 
 ## Round 49 Records
 
+### Stopped sessions can clean up unfinished Todo work
+
+- Trigger: Stopping or canceling a run could leave current-session Todo items in `pending`, `in_progress`, or `blocked` state with no explicit user control to terminate that Todo contract.
+- Observed behavior: The Todo loop could still see unfinished work after a user-initiated stop, and Web confirmation flows used a mix of browser-native dialogs and app UI.
+- Impact: After a user stop or cancel, the Todo panel can expose a cleanup action for the current session. Confirming it marks unfinished session Todo items as `dismissed`, refreshes the Todo loop state, and uses the shared app confirmation dialog. Existing delete and Plan Mode exit confirmations now use the same dialog style instead of `window.confirm`.
+- Fix boundary: Todo store mutation, Web governance route, Web Todo panel, confirmation UI, affected client flows, tests, and current docs only. Todo history is not deleted, observe-only sessions still cannot mutate, and non-confirmation alerts remain out of scope.
+- Commit: pending Round 49.
+
 ### Default LLM configuration is setup-first
 
 - Trigger: The packaged runtime still created a MiniMax-shaped default provider profile and model even when the user had not configured any LLM provider.

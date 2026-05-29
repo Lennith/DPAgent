@@ -9,9 +9,21 @@ interface RightToolbarProps {
   onHide: () => void;
   onResumeTodo?: (id: string) => void;
   onDismissTodo?: (id: string) => void;
+  todoCleanupAvailable?: boolean;
+  todoCleanupLoading?: boolean;
+  onCleanupTodos?: () => void;
 }
 
-export function RightToolbar({ sessionId, todoItems, onHide, onResumeTodo, onDismissTodo }: RightToolbarProps) {
+export function RightToolbar({
+  sessionId,
+  todoItems,
+  onHide,
+  onResumeTodo,
+  onDismissTodo,
+  todoCleanupAvailable = false,
+  todoCleanupLoading = false,
+  onCleanupTodos,
+}: RightToolbarProps) {
   const theme = useThemeConfig();
   const { t } = useI18n();
   const openTodoItems = todoItems.filter((item) => item.status !== 'completed' && item.status !== 'dismissed');
@@ -43,9 +55,27 @@ export function RightToolbar({ sessionId, todoItems, onHide, onResumeTodo, onDis
             <span className="text-xs font-semibold uppercase tracking-[0.14em]" style={{ color: theme.colors.text.muted }}>
               {t('toolbar.todoSection')}
             </span>
-            <span className="rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ color: theme.colors.primary.DEFAULT, backgroundColor: `${theme.colors.primary.DEFAULT}14` }}>
-              {t('todo.openCount', { count: openTodoItems.length })}
-            </span>
+            <div className="flex items-center gap-2">
+              {todoCleanupAvailable && onCleanupTodos && (
+                <button
+                  type="button"
+                  onClick={onCleanupTodos}
+                  disabled={todoCleanupLoading}
+                  className="rounded-full border px-2 py-0.5 text-[11px] font-semibold transition-opacity disabled:cursor-not-allowed disabled:opacity-60"
+                  style={{
+                    borderColor: theme.colors.toolResult.error.border,
+                    color: theme.colors.toolResult.error.text,
+                    backgroundColor: theme.colors.toolResult.error.bg,
+                  }}
+                  data-testid="todo-cleanup-button"
+                >
+                  {todoCleanupLoading ? t('todo.action.cleanupRunning') : t('todo.action.cleanup')}
+                </button>
+              )}
+              <span className="rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ color: theme.colors.primary.DEFAULT, backgroundColor: `${theme.colors.primary.DEFAULT}14` }}>
+                {t('todo.openCount', { count: openTodoItems.length })}
+              </span>
+            </div>
           </div>
           <TodoPanel
             items={openTodoItems}

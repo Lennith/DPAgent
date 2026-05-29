@@ -102,9 +102,15 @@ export function registerGovernanceRoutes(deps: WebServerRouteRegistrationDepende
     try {
       const rawBody = (req.body ?? {}) as Record<string, unknown>;
       const action = String(rawBody.action ?? '').trim().toLowerCase();
-      if (action !== 'add' && action !== 'plan_set' && action !== 'list' && action !== 'clear_completed') {
+      if (
+        action !== 'add' &&
+        action !== 'plan_set' &&
+        action !== 'list' &&
+        action !== 'clear_completed' &&
+        action !== 'dismiss_unfinished'
+      ) {
         res.status(400).json({
-          error: 'Todo requests require action=add, action=plan_set, action=list, or action=clear_completed.',
+          error: 'Todo requests require action=add, action=plan_set, action=list, action=clear_completed, or action=dismiss_unfinished.',
         });
         return;
       }
@@ -155,6 +161,41 @@ export function registerGovernanceRoutes(deps: WebServerRouteRegistrationDepende
           workspaceDir,
         });
         res.json({ success: true, action, removed });
+        return;
+      }
+      if (action === 'dismiss_unfinished') {
+        const unexpectedKeys = listUnexpectedTodoKeys(
+          rawBody,
+          new Set(['action', 'sessionId', 'scope'])
+        );
+        if (unexpectedKeys.length > 0) {
+          res.status(400).json({
+            error: `Todo dismiss_unfinished does not accept: ${unexpectedKeys.join(', ')}.`,
+          });
+          return;
+        }
+        if (!sessionId || scope !== 'session') {
+          res.status(400).json({ error: 'Todo dismiss_unfinished requires a session scope and sessionId.' });
+          return;
+        }
+        const dismissed = deps.agent.getTodoStore().dismissUnfinishedTodos({
+          scope,
+          sessionId,
+          workspaceDir,
+        });
+        todoServices.ensureTodoDrivenAutoLoop(sessionId, workspaceDir);
+        const protocol = deps.agent.getTodoStore().getProtocolState({
+          scope,
+          sessionId,
+          workspaceDir,
+        });
+        res.json({
+          success: true,
+          action,
+          dismissed: dismissed.length,
+          items: dismissed,
+          protocol,
+        });
         return;
       }
       if (action === 'plan_set') {

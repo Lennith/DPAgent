@@ -242,6 +242,59 @@ function testRightToolbarShowsSubAgentsAndTodoList(): void {
   assert.doesNotMatch(html, /Sub Agents \+ Todo/);
 }
 
+function testRightToolbarShowsTodoCleanupAfterStop(): void {
+  const html = renderNodeWithLocale(
+    React.createElement(RightToolbar, {
+      sessionId: 'sess-1',
+      onHide: () => undefined,
+      todoCleanupAvailable: true,
+      onCleanupTodos: () => undefined,
+      todoItems: [
+        {
+          id: 'todo-pending',
+          work: 'Pending cleanup candidate',
+          detectionStandard: 'Done when cleanup is visible.',
+          status: 'pending',
+          priority: 'medium',
+          createdAt: '2026-04-13T10:00:00.000Z',
+          updatedAt: '2026-04-13T10:00:00.000Z',
+        },
+      ],
+    }),
+    'en-US'
+  );
+
+  assert.match(html, /data-testid="todo-cleanup-button"/);
+  assert.match(html, /Clean up/);
+  assert.match(html, /Pending cleanup candidate/);
+}
+
+function testRightToolbarHidesTodoCleanupWithoutStopEligibility(): void {
+  const html = renderNodeWithLocale(
+    React.createElement(RightToolbar, {
+      sessionId: 'sess-1',
+      onHide: () => undefined,
+      todoCleanupAvailable: false,
+      onCleanupTodos: () => undefined,
+      todoItems: [
+        {
+          id: 'todo-pending',
+          work: 'Pending without cleanup',
+          detectionStandard: 'Done when cleanup is hidden.',
+          status: 'pending',
+          priority: 'medium',
+          createdAt: '2026-04-13T10:00:00.000Z',
+          updatedAt: '2026-04-13T10:00:00.000Z',
+        },
+      ],
+    }),
+    'en-US'
+  );
+
+  assert.doesNotMatch(html, /data-testid="todo-cleanup-button"/);
+  assert.match(html, /Pending without cleanup/);
+}
+
 function testRightToolbarClearsCompletedOnlyTodos(): void {
   localStorage.setItem(LOCALE_STORAGE_KEY, 'en');
   const html = renderNode(
@@ -963,6 +1016,8 @@ function runAll(): void {
   testTodoPanelShowsProtocolFields();
   testChatContainerDoesNotRenderTodoProtocolInMainChat();
   testRightToolbarShowsSubAgentsAndTodoList();
+  testRightToolbarShowsTodoCleanupAfterStop();
+  testRightToolbarHidesTodoCleanupWithoutStopEligibility();
   testRightToolbarClearsCompletedOnlyTodos();
   testRightToolbarClearsDismissedOnlyTodos();
   testRightToolbarHidesTodoAreaWhenNoOpenTodos();

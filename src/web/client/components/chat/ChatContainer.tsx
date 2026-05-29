@@ -36,6 +36,7 @@ import type {
   SessionPlanningState,
 } from '../../app-shell-types.js';
 import type { WSMessage } from '../../hooks/useWebSocket.js';
+import type { RequestConfirm } from '../common/ConfirmDialog.js';
 
 export type LiveEvent =
   | {
@@ -126,6 +127,7 @@ interface ChatContainerProps {
   onPlanningStateChange?: (state: SessionPlanningState) => void;
   onExitPlanDraft?: () => void | Promise<void>;
   onExitPlanExecution?: () => void | Promise<void>;
+  requestConfirm?: RequestConfirm;
   onCancel?: () => void;
   isRunning: boolean;
   isCanceling?: boolean;
@@ -177,6 +179,7 @@ export function ChatContainer({
   onPlanningStateChange,
   onExitPlanDraft,
   onExitPlanExecution,
+  requestConfirm,
   onCancel,
   isRunning,
   isCanceling = false,
@@ -866,6 +869,7 @@ export function ChatContainer({
             onPlanningStateChange={onPlanningStateChange}
             onExitPlanDraft={onExitPlanDraft}
             onExitPlanExecution={onExitPlanExecution}
+            requestConfirm={requestConfirm}
             onCancel={onCancel}
             isRunning={isRunning}
             isCanceling={isCanceling}

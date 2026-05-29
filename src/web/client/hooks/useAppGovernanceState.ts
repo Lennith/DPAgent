@@ -19,6 +19,7 @@ export function useAppGovernanceState({
   const [memoryPromotionState, setMemoryPromotionState] = useState<MemoryPromotionStateView | null>(null);
   const [memoryOrganizeLoading, setMemoryOrganizeLoading] = useState(false);
   const [memoryOrganizeError, setMemoryOrganizeError] = useState<string | null>(null);
+  const [todoCleanupLoading, setTodoCleanupLoading] = useState(false);
   const currentSessionIdRef = useRef<string | null>(currentSessionId);
   const governanceRequestSeqRef = useRef(0);
 
@@ -28,6 +29,7 @@ export function useAppGovernanceState({
     setMemoryPromotionState(null);
     setMemoryOrganizeLoading(false);
     setMemoryOrganizeError(null);
+    setTodoCleanupLoading(false);
   }, []);
 
   const loadGovernanceState = useCallback(async (sessionId: string) => {
@@ -173,6 +175,34 @@ export function useAppGovernanceState({
     [handleTodoAction]
   );
 
+  const handleDismissUnfinishedTodos = useCallback(async () => {
+    const sessionId = currentSessionId;
+    if (!sessionId || todoCleanupLoading) {
+      return false;
+    }
+    setTodoCleanupLoading(true);
+    try {
+      const response = await fetch('/api/todos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'dismiss_unfinished', sessionId }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error || `status=${response.status}`);
+      }
+      await Promise.all([fetchGovernanceState(sessionId), refreshSessions()]);
+      return true;
+    } catch (error) {
+      console.error('Failed to dismiss unfinished todos:', error);
+      return false;
+    } finally {
+      setTodoCleanupLoading(false);
+    }
+  }, [currentSessionId, fetchGovernanceState, refreshSessions, todoCleanupLoading]);
+
   const memoryPendingCount = useMemo(
     () => memoryPromotionState?.pendingTurnCount ?? 0,
     [memoryPromotionState]
@@ -184,11 +214,13 @@ export function useAppGovernanceState({
     memoryPromotionState,
     memoryOrganizeLoading,
     memoryOrganizeError,
+    todoCleanupLoading,
     memoryPendingCount,
     resetGovernanceState,
     fetchGovernanceState,
     handleOrganizeMemory,
     handleDismissTodo,
     handleResumeTodo,
+    handleDismissUnfinishedTodos,
   };
 }

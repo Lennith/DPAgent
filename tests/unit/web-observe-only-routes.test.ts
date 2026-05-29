@@ -321,6 +321,33 @@ function runAll(): void {
     let nextCalled = false;
     sharedMiddleware(
       {
+        path: '/api/todos',
+        method: 'POST',
+        headers: {},
+        query: { shareToken: 'token-shared' },
+        params: {},
+        body: { action: 'dismiss_unfinished', sessionId: 'sess-shared' },
+      },
+      res,
+      () => {
+        nextCalled = true;
+      }
+    );
+    assert.equal(nextCalled, false);
+    assert.equal(res.statusCode, 403);
+    assert.equal((res.body as any).code, 'SHARE_SCOPE_FORBIDDEN');
+  }
+  {
+    const sharedRoutes = createDeps({
+      isLoopback: () => false,
+      isAuthenticatedForRemoteAccess: () => false,
+      sharedAccessSessionId: () => 'sess-shared',
+    });
+    const sharedMiddleware = sharedRoutes.use[1];
+    const res = createResponseRecorder();
+    let nextCalled = false;
+    sharedMiddleware(
+      {
         path: '/download/abcdefabcdefabcdefabcdefabcdefabcdef/report.md',
         method: 'GET',
         headers: {},

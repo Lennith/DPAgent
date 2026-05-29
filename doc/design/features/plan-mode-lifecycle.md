@@ -60,6 +60,8 @@ and the agent must update the plan instead of executing.
 - Clearing composer intent in a normal session is a local UI action, not a draft exit.
 - Normal execution exit requires no unfinished plan Todo items.
 - Forced execution exit must make the interruption explicit and stop or pause the execution loop.
+- After a user stop or cancel, the Todo panel can offer confirmed cleanup for
+  unfinished current-session Todo items, marking them `dismissed` without deleting history.
 - A canceled runtime error should not remain pinned as the final transcript card after the next run starts.
 
 ## Acceptance Checks
@@ -68,4 +70,5 @@ and the agent must update the plan instead of executing.
 - Draft mode exposes planning tools and read-only exploration only.
 - Unclear product requirements trigger `request_user_input`.
 - Approval moves to execution and Todo loop governance.
+- Stopping a run can expose Todo cleanup only when unfinished current-session Todo work remains.
 - Cancel and next-run recovery do not leave stale error cards at the bottom of the transcript.

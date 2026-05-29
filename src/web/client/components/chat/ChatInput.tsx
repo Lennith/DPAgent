@@ -11,6 +11,7 @@ import { useVoiceInput } from './useVoiceInput.js';
 import { LocalFilePickerModal } from '../common/LocalFilePickerModal.js';
 import { mergeFileReferences } from './fileReferencePrompt.js';
 import type { WSMessage } from '../../hooks/useWebSocket.js';
+import type { RequestConfirm } from '../common/ConfirmDialog.js';
 import type { ChatDisplayFilters } from './chat-display-filters.js';
 import {
   resolveChatInputInteractivity,
@@ -41,6 +42,7 @@ interface ChatInputProps {
   onPlanningStateChange?: (state: SessionPlanningState) => void;
   onExitPlanDraft?: () => void | Promise<void>;
   onExitPlanExecution?: () => void | Promise<void>;
+  requestConfirm?: RequestConfirm;
   onCancel?: () => void;
   isRunning: boolean;
   isCanceling?: boolean;
@@ -78,6 +80,7 @@ export function ChatInput({
   onPlanningStateChange,
   onExitPlanDraft,
   onExitPlanExecution,
+  requestConfirm,
   onCancel,
   isRunning,
   isCanceling: isCancelingProp,
@@ -336,7 +339,7 @@ export function ChatInput({
       : planningState === 'plan_drafting'
         ? isRunning || (!onExitPlanDraft && !onPlanningStateChange)
         : !onPlanModeIntentChange);
-  const handlePlanModeButtonClick = () => {
+  const handlePlanModeButtonClick = async () => {
     const effect = resolveComposerPlanModeButtonClick({
       planningState,
       planModeIntent,
@@ -350,7 +353,16 @@ export function ChatInput({
       return;
     }
     if (effect.kind === 'exit_plan_draft') {
-      if (!window.confirm(t('chatInput.planMode.exitDraftConfirm'))) {
+      if (!requestConfirm) {
+        return;
+      }
+      const confirmed = await requestConfirm({
+        title: t('confirm.planDraftExit.title'),
+        body: t('chatInput.planMode.exitDraftConfirm'),
+        confirmLabel: t('confirm.planDraftExit.confirm'),
+        variant: 'danger',
+      });
+      if (!confirmed) {
         return;
       }
       if (onExitPlanDraft) {
@@ -449,7 +461,9 @@ export function ChatInput({
             {!observeOnly && llmSelection && onChangeLlmSelection && (
               <button
                 type="button"
-                onClick={handlePlanModeButtonClick}
+                onClick={() => {
+                  void handlePlanModeButtonClick();
+                }}
                 disabled={planModeButtonDisabled}
                 className="shrink-0 text-xs px-2.5 py-1.5 rounded-xl border transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{

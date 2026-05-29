@@ -149,6 +149,10 @@ function isTerminal(item: TodoItem): boolean {
   return isCompleted(item) || isDismissed(item);
 }
 
+function isCleanupTarget(item: TodoItem): boolean {
+  return item.status === 'pending' || item.status === 'in_progress' || item.status === 'blocked';
+}
+
 export class TodoStore {
   private readonly baseDir: string;
   private readonly bucketsDir: string;
@@ -501,6 +505,26 @@ export class TodoStore {
     bucket.items = bucket.items.map((item) => (item.id === id ? next : item));
     this.saveBucket(bucket);
     return next;
+  }
+
+  dismissUnfinishedTodos(input: { scope?: TodoScope; sessionId?: string; workspaceDir?: string }): TodoItem[] {
+    const target = this.resolveTarget(input);
+    const bucket = this.loadBucket(target.scope, target.namespace, target.namespaceLabel);
+    const unfinishedItems = bucket.items.filter((item) => isCleanupTarget(item));
+    if (unfinishedItems.length === 0) {
+      return [];
+    }
+    const dismissedAt = nowIso();
+    const dismissedIds = new Set(unfinishedItems.map((item) => item.id));
+    const dismissedItems = unfinishedItems.map((item) => ({
+      ...item,
+      status: 'dismissed' as const,
+      updatedAt: dismissedAt,
+    }));
+    const dismissedById = new Map(dismissedItems.map((item) => [item.id, item]));
+    bucket.items = bucket.items.map((item) => dismissedIds.has(item.id) ? dismissedById.get(item.id)! : item);
+    this.saveBucket(bucket);
+    return this.sortItems(dismissedItems);
   }
 
   clearCompletedTodos(input: { scope?: TodoScope; sessionId?: string; workspaceDir?: string }): number {

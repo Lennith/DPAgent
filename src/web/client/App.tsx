@@ -7,6 +7,7 @@ import { ConfigModal } from './components/ConfigModal';
 import { RightToolbar } from './components/toolbar/RightToolbar.js';
 import { WorkspaceGovernanceSettings } from './components/settings/WorkspaceGovernanceSettings.js';
 import { LocalFilePickerModal } from './components/common/LocalFilePickerModal.js';
+import { useConfirmDialog } from './components/common/ConfirmDialog.js';
 import AutomationCenter from './components/automation/AutomationCenter.js';
 import { useThemeConfig } from './components/providers/ThemeProvider.js';
 import { COMPOSER_DRAFT_KEY } from './composer-input-state.js';
@@ -192,6 +193,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
     buildWsUrl(shareToken),
     { labels: websocketLabels }
   );
+  const confirmDialog = useConfirmDialog();
   const theme = useThemeConfig();
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'chat' | 'automations'>('chat');
@@ -233,6 +235,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
     addToast,
     t: translate,
     onRefreshGovernance: handleGovernanceRefresh,
+    requestConfirm: confirmDialog.requestConfirmation,
   });
 
   const governanceState = useAppGovernanceState({
@@ -279,6 +282,63 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
   const handleOpenAutomations = useCallback(() => {
     setActiveView('automations');
   }, []);
+
+  const currentTodoHasUnfinished = useMemo(
+    () => governanceState.todoItems.some((item) => item.status !== 'completed' && item.status !== 'dismissed'),
+    [governanceState.todoItems]
+  );
+  const currentTodoCleanupAvailable =
+    sessionController.currentTodoCleanupEligible &&
+    !sessionController.currentRuntime.isRunning &&
+    !sessionController.currentCanceling &&
+    currentTodoHasUnfinished &&
+    sessionController.currentRuntime.interactionState?.mode !== 'observe_only';
+  const todoCleanupGuardRef = useRef<{ sessionId: string | null; available: boolean }>({
+    sessionId: null,
+    available: false,
+  });
+
+  useEffect(() => {
+    todoCleanupGuardRef.current = {
+      sessionId: currentSessionId,
+      available: currentTodoCleanupAvailable,
+    };
+  }, [currentSessionId, currentTodoCleanupAvailable]);
+
+  const handleCleanupCurrentTodos = useCallback(async () => {
+    const targetSessionId = currentSessionId;
+    if (!targetSessionId || !todoCleanupGuardRef.current.available) {
+      return;
+    }
+    const confirmed = await confirmDialog.requestConfirmation({
+      title: t('confirm.todoCleanup.title'),
+      body: t('confirm.todoCleanup.body'),
+      confirmLabel: t('confirm.todoCleanup.confirm'),
+      variant: 'danger',
+    });
+    if (!confirmed) {
+      return;
+    }
+    const latestCleanupGuard = todoCleanupGuardRef.current;
+    if (latestCleanupGuard.sessionId !== targetSessionId || !latestCleanupGuard.available) {
+      return;
+    }
+    const cleaned = await governanceState.handleDismissUnfinishedTodos();
+    if (cleaned) {
+      sessionController.clearTodoCleanupEligibilityForSession(targetSessionId);
+      addToast({
+        type: 'success',
+        message: t('todo.cleanupSucceeded'),
+        autoDismiss: true,
+      });
+    } else {
+      addToast({
+        type: 'error',
+        message: t('todo.cleanupFailed'),
+        autoDismiss: true,
+      });
+    }
+  }, [addToast, confirmDialog.requestConfirmation, currentSessionId, governanceState, sessionController, t]);
 
   useEffect(() => {
     if (!shareToken) {
@@ -539,6 +599,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
             <AutomationCenter
               workspaceDir={workspaceState.workspaceDir}
               llmProfiles={workspaceState.llmProfiles}
+              requestConfirm={confirmDialog.requestConfirmation}
               onOpenSession={(sessionId) => {
                 void sessionController.handleOpenAutomationSession(sessionId);
               }}
@@ -574,6 +635,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                     onPlanningStateChange={sessionController.setCurrentPlanningState}
                     onExitPlanDraft={sessionController.handleExitCurrentPlanDraft}
                     onExitPlanExecution={sessionController.handleExitCurrentPlanExecution}
+                    requestConfirm={confirmDialog.requestConfirmation}
                     onCancel={sessionController.handleCancelCurrentRun}
                     isRunning={sessionController.currentRuntime.isRunning}
                     isCanceling={sessionController.currentCanceling}
@@ -640,6 +702,9 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                           ? undefined
                           : governanceState.handleDismissTodo
                       }
+                      todoCleanupAvailable={currentTodoCleanupAvailable}
+                      todoCleanupLoading={governanceState.todoCleanupLoading}
+                      onCleanupTodos={handleCleanupCurrentTodos}
                       onHide={() => setShowSubAgentPanel(false)}
                     />
                   </div>
@@ -914,6 +979,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
             </div>
           </div>
         )}
-    </div>
-  );
+        {confirmDialog.dialog}
+      </div>
+    );
 }

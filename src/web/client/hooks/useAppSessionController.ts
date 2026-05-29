@@ -126,6 +126,7 @@ import {
   applyToolCallRuntimeEvent,
   applyToolResultRuntimeEvent,
 } from './session-controller-runtime-events.js';
+import type { RequestConfirm } from '../components/common/ConfirmDialog.js';
 
 export {
   normalizeThinkingDeltaForDisplay,
@@ -150,6 +151,7 @@ interface UseAppSessionControllerOptions {
   }) => string;
   t: (key: string, vars?: Record<string, string | number>) => string;
   onRefreshGovernance: (sessionId: string | null) => void | Promise<void>;
+  requestConfirm: RequestConfirm;
 }
 
 export function useAppSessionController({
@@ -166,6 +168,7 @@ export function useAppSessionController({
   addToast,
   t,
   onRefreshGovernance,
+  requestConfirm,
 }: UseAppSessionControllerOptions) {
   const [composerInputBySession, setComposerInputBySession] = useState<ComposerInputBySession>({});
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -184,6 +187,7 @@ export function useAppSessionController({
   const [runningInputEditRestoreBySession, setRunningInputEditRestoreBySession] = useState<
     Record<string, { id: string; fileReferences?: string[] }>
   >({});
+  const [todoCleanupEligibleBySession, setTodoCleanupEligibleBySession] = useState<Record<string, boolean>>({});
 
   const runtimeBySessionRef = useRef<RuntimeMap>({});
   const messagesBySessionRef = useRef<MessageMap>({});
@@ -222,6 +226,20 @@ export function useAppSessionController({
 
   const clearPlanModeIntentForSession = useCallback((sessionId: string | null | undefined) => {
     setPlanModeIntentBySession((prev) => clearPlanModeIntentState(prev, sessionId));
+  }, []);
+
+  const clearTodoCleanupEligibilityForSession = useCallback((sessionId: string | null | undefined) => {
+    if (!sessionId) {
+      return;
+    }
+    setTodoCleanupEligibleBySession((prev) => {
+      if (!prev[sessionId]) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
   }, []);
 
   const sendWithReconnectRetry = useCallback(
@@ -625,6 +643,14 @@ export function useAppSessionController({
           },
           runningInputQueue: payload.runningInputQueue ?? runtime.runningInputQueue,
         }));
+        setTodoCleanupEligibleBySession((prev) => {
+          if (!prev[sessionId]) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[sessionId];
+          return next;
+        });
         setSessions((prev) => {
           const existing = prev.find((item) => item.id === sessionId);
           const startedAt = payload.startedAt ?? new Date().toISOString();
@@ -1207,6 +1233,7 @@ export function useAppSessionController({
           return;
         }
 
+        let shouldEnableTodoCleanup = false;
         updateRuntime(sessionId, (runtime) => {
           if (!shouldApplyRunTerminalEvent(runtime, payload.runId)) {
             return runtime;
@@ -1226,6 +1253,9 @@ export function useAppSessionController({
           }
           if (errorText) {
             upsertRuntimeErrorMessage(sessionId, payload.runId, errorText);
+          }
+          if (payload.terminalCode === 'cancelled') {
+            shouldEnableTodoCleanup = true;
           }
           return {
             ...nextRuntime,
@@ -1254,6 +1284,12 @@ export function useAppSessionController({
             interactionState: { mode: 'normal' },
           };
         });
+        if (shouldEnableTodoCleanup) {
+          setTodoCleanupEligibleBySession((prev) => ({
+            ...prev,
+            [sessionId]: true,
+          }));
+        }
 
         if (currentSessionIdRef.current === sessionId) {
           void loadSessionMessages(sessionId);
@@ -1282,11 +1318,13 @@ export function useAppSessionController({
           return;
         }
 
+        let shouldEnableTodoCleanup = false;
         updateRuntime(sessionId, (runtime) => {
           if (!shouldApplyCancelAck(runtime, payload.runId ?? null)) {
             return runtime;
           }
           const nextRuntime = addIgnoredRunId(runtime, payload.runId ?? runtime.runId);
+          shouldEnableTodoCleanup = true;
           return {
             ...nextRuntime,
             runId: null,
@@ -1305,6 +1343,12 @@ export function useAppSessionController({
             interactionState: { mode: 'normal' },
           };
         });
+        if (shouldEnableTodoCleanup) {
+          setTodoCleanupEligibleBySession((prev) => ({
+            ...prev,
+            [sessionId]: true,
+          }));
+        }
       })
     );
 
@@ -1696,6 +1740,10 @@ export function useAppSessionController({
       return;
     }
     const runId = runtime?.runId;
+    setTodoCleanupEligibleBySession((prev) => ({
+      ...prev,
+      [currentSessionId]: true,
+    }));
 
     updateRuntime(currentSessionId, (state) => ({
       ...addIgnoredRunId(state, runId),
@@ -1724,6 +1772,11 @@ export function useAppSessionController({
         cancelRequestedAt: 0,
         error: t('app.websocket.cancelFailed'),
       }));
+      setTodoCleanupEligibleBySession((prev) => {
+        const next = { ...prev };
+        delete next[currentSessionId];
+        return next;
+      });
     }
   }, [currentSessionId, runtimeBySession, send, t, updateRuntime]);
 
@@ -1816,14 +1869,28 @@ export function useAppSessionController({
     if (runtimeBySession[currentSessionId]?.interactionState.mode === 'observe_only') {
       return;
     }
-    if (!window.confirm(t('chatInput.planMode.exitExecutingConfirm'))) {
+    if (
+      !(await requestConfirm({
+        title: t('confirm.planExecutionExit.title'),
+        body: t('chatInput.planMode.exitExecutingConfirm'),
+        confirmLabel: t('confirm.planExecutionExit.confirm'),
+        variant: 'danger',
+      }))
+    ) {
       return;
     }
     try {
       await exitPlanExecution(currentSessionId, 'normal', 'Plan execution completed from UI');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!window.confirm(t('chatInput.planMode.exitForceConfirm', { message }))) {
+      if (
+        !(await requestConfirm({
+          title: t('confirm.planExecutionForceExit.title'),
+          body: t('chatInput.planMode.exitForceConfirm', { message }),
+          confirmLabel: t('confirm.planExecutionForceExit.confirm'),
+          variant: 'danger',
+        }))
+      ) {
         return;
       }
       try {
@@ -1850,7 +1917,7 @@ export function useAppSessionController({
     });
     await fetchSessions();
     await loadSessionMessages(currentSessionId);
-  }, [addToast, currentSessionId, fetchSessions, loadSessionMessages, runtimeBySession, t]);
+  }, [addToast, currentSessionId, fetchSessions, loadSessionMessages, requestConfirm, runtimeBySession, t]);
 
   const handleExitCurrentPlanDraft = useCallback(async () => {
     const key = currentSessionId ?? COMPOSER_DRAFT_KEY;
@@ -1988,7 +2055,14 @@ export function useAppSessionController({
 
   const handleDeleteSession = useCallback(
     async (sessionId: string) => {
-      if (!window.confirm(t('app.deleteSession.confirm'))) {
+      if (
+        !(await requestConfirm({
+          title: t('confirm.deleteSession.title'),
+          body: t('app.deleteSession.confirm'),
+          confirmLabel: t('confirm.deleteSession.confirm'),
+          variant: 'danger',
+        }))
+      ) {
         return;
       }
       const target = sessions.find((item) => item.id === sessionId);
@@ -2038,6 +2112,7 @@ export function useAppSessionController({
       addToast,
       onRefreshGovernance,
       removeComposerInputForSession,
+      requestConfirm,
       setCurrentSessionId,
       sessions,
       t,
@@ -2096,6 +2171,10 @@ export function useAppSessionController({
   const currentCanceling = useMemo(
     () => currentRuntime.cancelInitiated === true && currentRuntime.cancelAcknowledged !== true,
     [currentRuntime]
+  );
+  const currentTodoCleanupEligible = useMemo(
+    () => Boolean(currentSessionId && todoCleanupEligibleBySession[currentSessionId]),
+    [currentSessionId, todoCleanupEligibleBySession]
   );
 
   useEffect(() => {
@@ -2165,6 +2244,7 @@ export function useAppSessionController({
     handleOpenAutomationSession,
     handleRenameSession,
     handleDeleteSession,
+    clearTodoCleanupEligibilityForSession,
     currentMessages,
     currentRuntime,
     currentPlanningState,
@@ -2175,6 +2255,7 @@ export function useAppSessionController({
     setCurrentPlanningState,
     currentInteractionLocked,
     currentCanceling,
+    currentTodoCleanupEligible,
     currentLlmSelection,
     setCurrentSessionLlmSelection,
     runningSessionIds,

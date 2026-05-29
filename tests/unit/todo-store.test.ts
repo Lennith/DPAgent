@@ -176,6 +176,126 @@ function runAll(): void {
     });
     assert.equal(afterDismissReplanState.dismissedItems.some((item) => item.id === blockedForDismiss.id), true);
 
+    const bulkDismissPlan = harness.store.setTodoPlan({
+      sessionId: 'sess-bulk-dismiss',
+      workspaceDir: harness.workspaceDir,
+      planId: 'plan-bulk-dismiss',
+      items: [
+        {
+          work: 'Active bulk dismiss item',
+          detectionStandard: 'Active item is dismissed by user cleanup.',
+          status: 'in_progress',
+          planStepId: 'bulk-active',
+        },
+        {
+          work: 'Pending bulk dismiss item',
+          detectionStandard: 'Pending item is dismissed by user cleanup.',
+          status: 'pending',
+          planStepId: 'bulk-pending',
+        },
+        {
+          work: 'Blocked bulk dismiss item',
+          detectionStandard: 'Blocked item is dismissed by user cleanup.',
+          status: 'blocked',
+          blockedReason: 'Stopped by user before blocker resolution.',
+          planStepId: 'bulk-blocked',
+        },
+      ],
+      sourceSessionId: 'sess-bulk-dismiss',
+    });
+    const completedBeforeBulkDismiss = harness.store.updateTodo(bulkDismissPlan[1]!.id, {
+      sessionId: 'sess-bulk-dismiss',
+      workspaceDir: harness.workspaceDir,
+      status: 'completed',
+      completionTaskId: bulkDismissPlan[1]!.id,
+      evidence: ['pending item completed before cleanup'],
+    });
+    assert.equal(completedBeforeBulkDismiss?.status, 'completed');
+    const bulkDismissed = harness.store.dismissUnfinishedTodos({
+      sessionId: 'sess-bulk-dismiss',
+      workspaceDir: harness.workspaceDir,
+    });
+    assert.equal(bulkDismissed.length, 2);
+    assert.deepEqual(
+      bulkDismissed.map((item) => item.status),
+      ['dismissed', 'dismissed']
+    );
+    assert.equal(bulkDismissed.every((item) => item.planId === 'plan-bulk-dismiss'), true);
+    const bulkDismissState = harness.store.getProtocolState({
+      sessionId: 'sess-bulk-dismiss',
+      workspaceDir: harness.workspaceDir,
+    });
+    assert.equal(bulkDismissState.hasUnfinished, false);
+    assert.equal(bulkDismissState.unfinishedItems.length, 0);
+    assert.equal(bulkDismissState.dismissedItems.length, 2);
+    assert.equal(bulkDismissState.completedItems.length, 1);
+    assert.equal(
+      bulkDismissState.completedItems.some((item) => item.id === completedBeforeBulkDismiss?.id),
+      true
+    );
+    assert.equal(
+      harness.store.dismissUnfinishedTodos({
+        sessionId: 'sess-bulk-dismiss',
+        workspaceDir: harness.workspaceDir,
+      }).length,
+      0
+    );
+
+    const corruptCleanupHarness = createHarness();
+    try {
+      const bucketDir = path.join(corruptCleanupHarness.tempDir, 'todos', 'buckets', 'session');
+      fs.mkdirSync(bucketDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(bucketDir, 'cleanup-corrupt-sess.json'),
+        JSON.stringify(
+          {
+            scope: 'session',
+            namespace: 'cleanup-corrupt-sess',
+            namespaceLabel: 'cleanup-corrupt-sess',
+            items: [
+              {
+                id: 'todo-corrupt-completed',
+                work: 'Corrupt completed row',
+                detectionStandard: 'This row has no completion evidence.',
+                status: 'completed',
+                priority: 'medium',
+                tags: [],
+                createdAt: '2026-04-30T00:00:00.000Z',
+                updatedAt: '2026-04-30T00:00:00.000Z',
+              },
+              {
+                id: 'todo-cleanup-pending',
+                work: 'Pending cleanup row',
+                detectionStandard: 'This row should be dismissed.',
+                status: 'pending',
+                priority: 'medium',
+                tags: [],
+                createdAt: '2026-04-30T00:00:00.000Z',
+                updatedAt: '2026-04-30T00:00:00.000Z',
+              },
+            ],
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+      const dismissed = corruptCleanupHarness.store.dismissUnfinishedTodos({
+        sessionId: 'cleanup-corrupt-sess',
+        workspaceDir: corruptCleanupHarness.workspaceDir,
+      });
+      assert.deepEqual(dismissed.map((item) => item.id), ['todo-cleanup-pending']);
+      const archived = corruptCleanupHarness.store.listTodos({
+        sessionId: 'cleanup-corrupt-sess',
+        workspaceDir: corruptCleanupHarness.workspaceDir,
+        includeCompleted: true,
+      });
+      assert.equal(archived.find((item) => item.id === 'todo-corrupt-completed')?.status, 'completed');
+      assert.equal(archived.find((item) => item.id === 'todo-cleanup-pending')?.status, 'dismissed');
+    } finally {
+      cleanupHarness(corruptCleanupHarness.tempDir);
+    }
+
     const blockedForResume = harness.store.setTodoPlan({
       sessionId: 'sess-resume',
       workspaceDir: harness.workspaceDir,
