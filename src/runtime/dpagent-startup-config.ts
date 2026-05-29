@@ -1,6 +1,6 @@
 import type { AgentConfig, ResolvedLlmRuntimeConfig } from '../types.js';
 import { normalizeMaxOutputTokens } from '../dpagent-contracts.js';
-import { resolveLlmRuntimeConfig } from '../llm/provider-profiles.js';
+import { LLM_PROFILE_NOT_CONFIGURED_ERROR, resolveLlmRuntimeConfig } from '../llm/provider-profiles.js';
 
 export function resolveConfiguredMaxOutputTokens(runtimeConfig: ResolvedLlmRuntimeConfig): number {
   const normalized = normalizeMaxOutputTokens(runtimeConfig.maxOutputTokens);
@@ -18,15 +18,28 @@ export function assertDPAgentStartupConfig(
   }
 ): void {
   const requireApiKey = options?.requireApiKey !== false;
-  const defaultRuntime = options?.llmRuntime ?? resolveLlmRuntimeConfig({ llmProfiles: cfg.llmProfiles });
-  if (requireApiKey && (!defaultRuntime.apiKey || defaultRuntime.apiKey.trim().length < 20)) {
-    throw new Error('Invalid config: llmProfiles default profile apiKey must be set in config.yaml.');
+  let defaultRuntime: ResolvedLlmRuntimeConfig | undefined = options?.llmRuntime;
+  if (!defaultRuntime) {
+    try {
+      defaultRuntime = resolveLlmRuntimeConfig({ llmProfiles: cfg.llmProfiles });
+    } catch (error) {
+      if (!requireApiKey && error instanceof Error && error.message === LLM_PROFILE_NOT_CONFIGURED_ERROR) {
+        defaultRuntime = undefined;
+      } else {
+        throw error;
+      }
+    }
   }
-  if (!defaultRuntime.apiBase || defaultRuntime.apiBase.trim().length === 0) {
-    throw new Error('Invalid config: llmProfiles default profile apiBase must be set in config.yaml.');
-  }
-  if (!defaultRuntime.model || defaultRuntime.model.trim().length === 0) {
-    throw new Error('Invalid config: llmProfiles default profile defaultModel must be set in config.yaml.');
+  if (defaultRuntime) {
+    if (requireApiKey && (!defaultRuntime.apiKey || defaultRuntime.apiKey.trim().length < 20)) {
+      throw new Error('Invalid config: llmProfiles default profile apiKey must be set in config.yaml.');
+    }
+    if (!defaultRuntime.apiBase || defaultRuntime.apiBase.trim().length === 0) {
+      throw new Error('Invalid config: llmProfiles default profile apiBase must be set in config.yaml.');
+    }
+    if (!defaultRuntime.model || defaultRuntime.model.trim().length === 0) {
+      throw new Error('Invalid config: llmProfiles default profile defaultModel must be set in config.yaml.');
+    }
   }
   if (!cfg.agent.workspaceDir || cfg.agent.workspaceDir.trim().length === 0) {
     throw new Error('Invalid config: agent.workspaceDir must be set in config.yaml.');

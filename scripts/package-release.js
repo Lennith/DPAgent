@@ -26,7 +26,7 @@ const STANDARD_FILES = [
   'doc/playbook/logging-guide.md',
 ];
 
-const STANDARD_DIRS = ['dist'];
+const STANDARD_DIRS = ['dist', 'skills'];
 
 const EASY_RUN_FILES = [
   'start-easy.js',
@@ -34,7 +34,7 @@ const EASY_RUN_FILES = [
   'doc/playbook/windows-easy-run-handoff.md',
 ];
 
-const EASY_RUN_DIRS = ['dist', 'agents', 'node_modules'];
+const EASY_RUN_DIRS = ['dist', 'agents', 'skills', 'node_modules'];
 
 function getShortCommit() {
   try {
@@ -105,24 +105,8 @@ function copyDirOrThrow(relativePath, targetRoot) {
 function createReleaseConfigTemplate() {
   return {
     llmProfiles: {
-      defaultProfileId: 'default',
-      profiles: [
-        {
-          id: 'default',
-          name: 'Default Profile',
-          provider: 'anthropic',
-          apiKey: '',
-          apiBase: 'https://api.minimaxi.com',
-          defaultModel: 'MiniMax-M2.7-highspeed',
-          maxOutputTokens: 32768,
-          enabled: true,
-          capabilities: {
-            modelDiscovery: true,
-            reasoningEffort: false,
-            thinkingBudget: true,
-          },
-        },
-      ],
+      defaultProfileId: '',
+      profiles: [],
     },
     agent: {
       maxSteps: 100,
@@ -178,7 +162,7 @@ function assertReleaseConfigIsSanitized(configPath) {
   const content = fs.readFileSync(configPath, 'utf8');
   const parsed = yaml.load(content) || {};
   const profiles = Array.isArray(parsed?.llmProfiles?.profiles) ? parsed.llmProfiles.profiles : [];
-  if (!parsed.llmProfiles || profiles.length === 0) {
+  if (!parsed.llmProfiles) {
     throw new Error(`Release config is missing llmProfiles: ${configPath}`);
   }
   if (/\bsk-[A-Za-z0-9_-]{12,}\b/.test(content)) {

@@ -6,8 +6,9 @@ import { DEFAULT_GLM_ASR_CONFIG, normalizeAsrConfig } from '../asr/index.js';
 import {
   createDefaultLlmProfile,
   getResolvedProfileCapabilities,
+  DEFAULT_LLM_PROFILE_ID,
   normalizeLlmProfilesConfig,
-  resolveDefaultLlmProfile,
+  resolveOptionalDefaultLlmProfile,
 } from '../llm/provider-profiles.js';
 import { DEFAULT_REMOTE_ACCESS_AUTH_SETTINGS } from '../shared/remote-access-auth-defaults.js';
 import {
@@ -29,13 +30,12 @@ export interface MCPRuntimeConfig {
 
 const DEFAULT_API_CONFIG: AgentConfig['api'] = {
   apiKey: '',
-  apiBase: 'https://api.minimax.io',
-  model: 'MiniMax-M2.5',
+  apiBase: '',
+  model: '',
   provider: 'anthropic',
   maxOutputTokens: 32768,
 };
 
-const DEFAULT_LLM_PROFILE = createDefaultLlmProfile();
 const REMOVED_AGENT_CONTEXT_KEYS = [
   'contextWindowChars',
   'contextPrecompressTriggerRatio',
@@ -55,8 +55,8 @@ const REMOVED_AGENT_CONFIG_KEYS = [
 const DEFAULT_CONFIG: AgentConfig = {
   api: DEFAULT_API_CONFIG,
   llmProfiles: {
-    defaultProfileId: DEFAULT_LLM_PROFILE.id,
-    profiles: [DEFAULT_LLM_PROFILE],
+    defaultProfileId: '',
+    profiles: [],
   },
   agent: {
     maxSteps: 100,
@@ -273,7 +273,7 @@ export class ConfigManager {
       typeof overrides.llmProfiles?.defaultProfileId === 'string' &&
       overrides.llmProfiles.defaultProfileId.trim().length > 0
         ? overrides.llmProfiles.defaultProfileId.trim()
-        : DEFAULT_LLM_PROFILE.id;
+        : DEFAULT_LLM_PROFILE_ID;
     const profiles = existingProfiles.length > 0 ? this.deepClone(existingProfiles) : [createDefaultLlmProfile(defaultProfileId)];
     const defaultIndex = profiles.findIndex((profile) => profile.id === defaultProfileId);
     const resolvedDefaultIndex = defaultIndex >= 0 ? defaultIndex : 0;
@@ -569,9 +569,9 @@ You are working in the specified workspace directory. All relative paths will be
   }
 
   getMcpRuntimeConfig(): MCPRuntimeConfig {
-    const defaultProfile = resolveDefaultLlmProfile({ llmProfiles: this.config.llmProfiles });
-    const apiKey = String(defaultProfile.apiKey ?? '').trim();
-    const apiBase = String(defaultProfile.apiBase ?? '').trim();
+    const defaultProfile = resolveOptionalDefaultLlmProfile({ llmProfiles: this.config.llmProfiles });
+    const apiKey = String(defaultProfile?.apiKey ?? '').trim();
+    const apiBase = String(defaultProfile?.apiBase ?? '').trim();
     const configuredServers = Array.isArray(this.config.mcp.servers)
       ? this.config.mcp.servers
       : [];
@@ -597,7 +597,10 @@ You are working in the specified workspace directory. All relative paths will be
   }
 
   setApiKey(apiKey: string): void {
-    const defaultProfile = resolveDefaultLlmProfile({ llmProfiles: this.config.llmProfiles });
+    const defaultProfile = resolveOptionalDefaultLlmProfile({ llmProfiles: this.config.llmProfiles });
+    if (!defaultProfile) {
+      throw new Error('Cannot set API key before an LLM profile exists.');
+    }
     this.config.llmProfiles = {
       ...this.config.llmProfiles,
       profiles: this.config.llmProfiles.profiles.map((profile) =>

@@ -309,7 +309,7 @@ export class ContextReplayAssembler {
       config: cfg,
       profileId: runtimeConfig?.profileId,
       provider: runtimeConfig?.provider ?? 'anthropic',
-      model: runtimeConfig?.model ?? 'MiniMax-M2.5',
+      model: runtimeConfig?.model ?? 'unknown',
       modelRuntimeOptions: resolveModelRuntimeBudgetOptions(runtimeConfig),
     });
   }
@@ -509,7 +509,7 @@ export class ContextReplayAssembler {
       formatVersion: 1,
       maxChars: this.resolveContextCompressionMaxChars(),
       provider: runtimeConfig?.provider ?? 'anthropic',
-      model: runtimeConfig?.model ?? 'MiniMax-M2.5',
+      model: runtimeConfig?.model ?? 'unknown',
       contextWindowTokens: budget.contextWindowTokens,
       compressionTriggerTokens: budget.compressionTriggerTokens,
       compressionTriggerRatio: budget.compressionTriggerRatio,

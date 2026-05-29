@@ -458,8 +458,8 @@ async function runFirstRunInitCreatesSafeProfileConfig(): Promise<void> {
   assert.equal(fs.existsSync(configPath), true);
   const config = fs.readFileSync(configPath, 'utf8');
   assert.match(config, /llmProfiles:/);
-  assert.match(config, /defaultProfileId: default/);
-  assert.match(config, /apiKey: ''/);
+  assert.match(config, /defaultProfileId: ''/);
+  assert.match(config, /profiles: \[\]/);
   assert.doesNotMatch(config, /skillListPath/);
   assert.doesNotMatch(config, /sk-[A-Za-z0-9_-]{12,}/);
 }

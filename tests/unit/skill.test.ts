@@ -46,6 +46,11 @@ async function testSkillBootstrapDoesNotRequireLiveApiKey(): Promise<void> {
     assert.equal(config.agent.runtimeDataDir, dirs.runtimeDir);
     assert.equal(config.agent.contextDir, dirs.contextDir);
     assert.equal(agent.getMcpStatus().summary.totalEnabled, 0);
+    const webAccessSkill = agent.getSkillLoader().getSkillByName('web-access', {
+      workspaceDir: dirs.workspaceDir,
+    });
+    assert.ok(webAccessSkill);
+    assert.equal(webAccessSkill?.source, 'native');
   } finally {
     await agent.cleanup();
     fs.rmSync(dirs.tempDir, { recursive: true, force: true });

@@ -23,6 +23,9 @@ controls, settings, automation, governance, subagents, and runtime telemetry.
 Committed transcript state comes from hydration or terminal events. Live deltas
 are transient. Web-owned active runs can edit next-turn draft/model/Ralph
 settings, while observe-only, canceling, and hydrating states are read-only.
+The session fork button lives to the right of the share button. It is disabled
+for shared/observe-only sessions, active runs, and pending plan input; success
+refreshes the session list and opens the new `-fork` session.
 
 ## Edit Guidance
 - Put state orchestration in hooks and rendering in components.

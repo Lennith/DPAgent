@@ -18,6 +18,32 @@ Each record must include:
 - Fix boundary
 - Commit
 
+## Round 49 Records
+
+### Default LLM configuration is setup-first
+
+- Trigger: The packaged runtime still created a MiniMax-shaped default provider profile and model even when the user had not configured any LLM provider.
+- Observed behavior: First-run config, CLI/setup templates, profile normalization, and runtime fallback paths could synthesize an executable-looking MiniMax profile.
+- Impact: DPAgent now ships with empty `llmProfiles`; Web can boot in setup mode, but chat, automation, and subagent execution require an explicit user-created provider profile. Legacy YAML with explicit root `api` credentials can still migrate into a profile.
+- Fix boundary: Config normalization, startup validation, Web setup handling, templates, tests, and current docs only. Explicit user-created MiniMax profiles and provider dialect support remain available.
+- Commit: pending Round 49.
+
+### Sessions can fork stable committed context snapshots
+
+- Trigger: Agent runtime and context storage are decoupled enough to let users branch one committed session into another session for later independent continuation.
+- Observed behavior: Sessions had no route or UI control for copying committed context into a new session; users had to continue in-place or manually recreate context.
+- Impact: Full-access Web users can fork a stable session from the composer. The child session defaults to `<source>-fork`, copies committed events and tool-result artifacts, inherits stable workspace/tool/model context, and rejects active, pending-input, or interrupted sources.
+- Fix boundary: Context event storage, session routes, Web composer controls, tests, and current docs only. Forked sessions still share the same workspace; concurrent file conflict avoidance is not implemented in this round.
+- Commit: pending Round 49.
+
+### Default web search is no longer registered
+
+- Trigger: Live stability testing showed the default Web search path coupled the runtime to a Web MCP server and an unreliable DuckDuckGo fallback.
+- Observed behavior: Empty Web MCP configuration could be replaced with the MiniMax Coding Plan MCP at WebServer startup, and the core `web_search` fallback path could fail slowly before a turn had any useful source evidence.
+- Impact: Default Web access now registers only `web_fetch` for known URL retrieval. DPAgent no longer injects a default Web MCP server, no longer includes the core DuckDuckGo/service `web_search` implementation, and ships a read-only native `web-access` skill as the strategy entrypoint for web information tasks. Explicit custom MCP search tools remain supported through the `web_search` capability family.
+- Fix boundary: Web tool registration, WebServer MCP defaulting, native skill loading, package manifests, tests, and current docs only. Explicit user-configured MCP servers and `web_fetch` behavior remain unchanged.
+- Commit: pending Round 49.
+
 ## Round 48 Records
 
 ### Skill writes no longer use internal pending records

@@ -25,6 +25,7 @@ import { ConfigManager } from '../../config/ConfigManager.js';
 import { normalizeSessionShareTtlHours } from '../../shared/session-share-defaults.js';
 import { ProfileIntrospectionService } from '../../llm/ProfileIntrospectionService.js';
 import {
+  LLM_PROFILE_NOT_CONFIGURED_ERROR,
   findResolvedLlmProfile,
   resolveLlmRuntimeConfig,
   resolveSessionLlmSelection,
@@ -439,11 +440,18 @@ export class WebServer {
     webServerLogger.info(`Using config source: ${this.configPath}`);
     webServerLogger.info(`Skills directory: ${loadedConfig.agent.skillsDir ?? '(not configured)'}`);
 
-    const loadedRuntime = resolveLlmRuntimeConfig(loadedConfig);
-    const rawApiKey = String(loadedRuntime.apiKey ?? '').trim();
+    let loadedRuntime: ReturnType<typeof resolveLlmRuntimeConfig> | undefined;
+    try {
+      loadedRuntime = resolveLlmRuntimeConfig(loadedConfig);
+    } catch (error) {
+      if (!allowMissingApiKeyAtBoot || !(error instanceof Error) || error.message !== LLM_PROFILE_NOT_CONFIGURED_ERROR) {
+        throw error;
+      }
+    }
+    const rawApiKey = String(loadedRuntime?.apiKey ?? '').trim();
     const hasValidApiKey = rawApiKey.length >= 20;
-    this.bootMissingApiKey = !hasValidApiKey;
-    if (this.bootMissingApiKey && allowMissingApiKeyAtBoot) {
+    this.bootMissingApiKey = !loadedRuntime || !hasValidApiKey;
+    if (this.bootMissingApiKey && allowMissingApiKeyAtBoot && loadedRuntime) {
       const defaultProfileId = loadedConfig.llmProfiles.defaultProfileId;
       const bootConfig: AgentConfig = {
         ...loadedConfig,
@@ -460,6 +468,14 @@ export class WebServer {
       });
       webServerLogger.warn(
         'API key is missing at boot. Web server starts in setup mode; chat requests will be blocked until API key is configured.'
+      );
+    } else if (this.bootMissingApiKey && allowMissingApiKeyAtBoot) {
+      this.agent = new DPAgent({
+        config: loadedConfig,
+        allowMissingApiKeyAtBoot: true,
+      });
+      webServerLogger.warn(
+        'LLM profile is missing at boot. Web server starts in setup mode; chat requests will be blocked until a provider profile is configured.'
       );
     } else {
       this.agent = new DPAgent({
@@ -666,7 +682,12 @@ export class WebServer {
   }
 
   private hasUsableApiKey(): boolean {
-    const apiKey = String(resolveLlmRuntimeConfig(this.agent.getConfig()).apiKey ?? '').trim();
+    let apiKey = '';
+    try {
+      apiKey = String(resolveLlmRuntimeConfig(this.agent.getConfig()).apiKey ?? '').trim();
+    } catch {
+      return false;
+    }
     if (!apiKey || apiKey.length < 20) {
       return false;
     }

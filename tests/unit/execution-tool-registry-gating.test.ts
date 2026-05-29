@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { ConfigManager } from '../../src/config/ConfigManager.js';
 import { DPAgent } from '../../src/index.js';
 import { buildTurnSystemPrompt } from '../../src/runtime/turn-prompt.js';
-import type { SendFileToUserLinkIssuer, Tool } from '../../src/tools/index.js';
+import { Tool, type SendFileToUserLinkIssuer } from '../../src/tools/index.js';
 import type { ContextRef } from '../../src/types.js';
 import {
   buildDPAgentExecutionToolRegistry,
@@ -15,6 +15,30 @@ import {
 
 const DONE_MARKER = '\u3010\u5b8c\u6210\uff01\u3011';
 const REPORT_END_MARKER = '\u3010\u6c47\u62a5\u7ed3\u675f\uff01\u3011';
+
+class FakeSearchTool extends Tool {
+  get name(): string {
+    return 'web_search';
+  }
+
+  get description(): string {
+    return 'Explicit MCP search web results by query';
+  }
+
+  get parameters(): Record<string, unknown> {
+    return {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+      },
+      required: ['query'],
+    };
+  }
+
+  async execute() {
+    return { success: true, content: 'ok' };
+  }
+}
 
 function getSchemaByName(schemas: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>, name: string) {
   const schema = schemas.find((item) => item.name === name);
@@ -231,9 +255,9 @@ async function runCase(): Promise<void> {
     const names = tools.map((tool: { name: string }) => tool.name);
     const schemas = registry.getSchemas();
 
-    assert.ok(names.length >= 17);
+    assert.ok(names.length >= 16);
     assert.equal(new Set(names).size, names.length);
-    assert.equal(names.filter((name: string) => name === 'web_search').length, 1);
+    assert.equal(names.includes('web_search'), false);
     assert.equal(names.filter((name: string) => name === 'web_fetch').length, 1);
     assert.equal(names.includes('context_manage'), true);
     assert.equal(names.includes('read_tool_result'), true);
@@ -245,6 +269,18 @@ async function runCase(): Promise<void> {
     assert.equal(names.includes('send_file_to_user'), true);
     assert.equal(names.includes('clarify'), false);
     assert.equal(names.includes('request_user_input'), false);
+
+    agent.getToolRegistry()?.register(new FakeSearchTool());
+    const explicitMcpSearchRegistry = buildDPAgentExecutionToolRegistry(registryFactory, {
+      context,
+      turnId: 'turn-explicit-mcp-search',
+      workspaceDir: harness.workspaceDir,
+      includeContextManage: true,
+      includeSubAgentManage: true,
+    });
+    const explicitMcpSearchNames = explicitMcpSearchRegistry.getAll().map((tool: { name: string }) => tool.name);
+    assert.equal(explicitMcpSearchNames.includes('web_search'), true);
+    agent.getToolRegistry()?.unregister('web_search');
 
     assert.throws(
       () =>
@@ -666,7 +702,7 @@ async function runCase(): Promise<void> {
     });
     const interactiveNames = interactiveRegistry.getAll().map((tool: { name: string }) => tool.name);
     assert.equal(interactiveNames.includes('clarify'), false);
-    assert.equal(interactiveNames.filter((name: string) => name === 'web_search').length, 1);
+    assert.equal(interactiveNames.includes('web_search'), false);
     assert.equal(interactiveNames.filter((name: string) => name === 'web_fetch').length, 1);
     const removedPlanToolName = ['update', 'plan'].join('_');
     assert.equal(interactiveNames.includes(removedPlanToolName), false);

@@ -33,6 +33,7 @@ function runAll(): void {
   const registry = new ToolsetRegistry();
   const shellTool = new FakeTool('shell_execute', 'shell');
   const webSearchTool = new FakeTool('web_search', 'search');
+  const webFetchTool = new FakeTool('web_fetch', 'fetch');
   const readToolResultTool = new FakeTool('read_tool_result', 'read stored tool result');
   const sendFileTool = new FakeTool('send_file_to_user', 'send file to user');
   const requestUserInputTool = new FakeTool('request_user_input', 'request user input');
@@ -49,7 +50,9 @@ function runAll(): void {
   assert.equal(registry.allowsTool('full-access', unknownTool), true);
   assert.equal(registry.allowsTool('windows-dev', shellTool), true);
   assert.equal(registry.allowsTool('windows-safe', shellTool), false);
-  assert.equal(registry.allowsTool('research', webSearchTool), true);
+  assert.equal(registry.allowsTool('full-access', webSearchTool), true);
+  assert.equal(registry.allowsTool('research', webSearchTool), false);
+  assert.equal(registry.allowsTool('research', webFetchTool), true);
   assert.equal(registry.allowsTool('windows-safe', webSearchTool), false);
   assert.equal(registry.allowsTool('full-access', readToolResultTool), true);
   assert.equal(registry.allowsTool('windows-dev', readToolResultTool), true);
@@ -75,6 +78,15 @@ function runAll(): void {
   assert.equal(customRegistry.allowsTool('novelist-tools', shellTool), false);
   assert.equal(customRegistry.allowsTool('novelist-tools', unknownTool), true);
   assert.equal(customRegistry.list().some((toolset) => toolset.name === 'novelist-tools'), true);
+
+  const customSearchRegistry = createToolsetRegistry('search-tools', [
+    {
+      name: 'search-tools',
+      description: 'Custom search MCP toolset',
+      capabilities: ['web_search'],
+    },
+  ]);
+  assert.equal(customSearchRegistry.allowsTool('search-tools', webSearchTool), true);
 
   assert.throws(
     () =>

@@ -16,7 +16,7 @@ function cleanup(tempDir: string): void {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
-function testWebServerLeavesMcpDisabledWhenConfigHasNoServers(): void {
+function testWebServerDoesNotInjectDefaultMcpWhenConfigHasNoServers(): void {
   const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-default-mcp-config-case-'));
   const { tempDir, configPath } = createTempConfig({
     api: {
@@ -120,7 +120,7 @@ function testWebServerKeepsExplicitMcpServersUntouched(): void {
 }
 
 function runAll(): void {
-  testWebServerLeavesMcpDisabledWhenConfigHasNoServers();
+  testWebServerDoesNotInjectDefaultMcpWhenConfigHasNoServers();
   testWebServerKeepsExplicitMcpServersUntouched();
   console.log('web-default-mcp-config tests passed');
 }

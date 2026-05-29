@@ -46,8 +46,7 @@ export function resolveDiscoveryProfileDraft(
   const now = new Date().toISOString();
 
   const defaultModel =
-    String(draft?.defaultModel ?? persistedProfile?.defaultModel ?? '').trim() ||
-    'MiniMax-M2.5';
+    String(draft?.defaultModel ?? persistedProfile?.defaultModel ?? '').trim();
 
   return {
     id,
@@ -55,8 +54,7 @@ export function resolveDiscoveryProfileDraft(
     provider,
     apiKey: String(draft?.apiKey ?? persistedProfile?.apiKey ?? '').trim(),
     apiBase:
-      String(draft?.apiBase ?? persistedProfile?.apiBase ?? '').trim() ||
-      'https://api.minimax.io',
+      String(draft?.apiBase ?? persistedProfile?.apiBase ?? '').trim(),
     defaultModel,
     availableModels: Array.isArray(draft?.availableModels)
       ? draft.availableModels
@@ -119,7 +117,7 @@ function buildLlmProfilesUpdate(
     const defaultModel =
       String(incoming.defaultModel ?? existing?.defaultModel ?? '').trim() ||
       existing?.defaultModel ||
-      'MiniMax-M2.5';
+      '';
 
     return {
       id,
@@ -135,7 +133,7 @@ function buildLlmProfilesUpdate(
       apiBase:
         String(incoming.apiBase ?? existing?.apiBase ?? '').trim() ||
         existing?.apiBase ||
-        'https://api.minimax.io',
+        '',
       defaultModel,
       availableModels: Array.isArray(incoming.availableModels)
         ? incoming.availableModels

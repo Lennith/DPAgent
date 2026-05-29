@@ -10,6 +10,9 @@ import {
 } from '../../src/runtime/context-window-budget.js';
 import {
   DEFAULT_SYNTHETIC_SELECTION_UPDATED_AT,
+  LLM_PROFILE_NOT_CONFIGURED_ERROR,
+  normalizeLlmProfilesConfig,
+  resolveLlmRuntimeConfig,
   resolveSessionLlmSelection,
 } from '../../src/llm/provider-profiles.js';
 
@@ -159,27 +162,57 @@ async function testConfigManagerPreservesProfilesOnPartialLlmProfilesOverride():
   }
 }
 
-function testConfigManagerIgnoresLegacyApiOverridesWithoutExplicitProfiles(): void {
-  const configManager = new ConfigManager({
-    api: {
-      apiKey: 'test-api-key-0123456789012345',
-      apiBase: 'https://openai-compatible.local/v1',
-      model: 'gpt-4o-mini',
-      provider: 'openai',
-      maxOutputTokens: 4096,
+function testConfigManagerMigratesExplicitLegacyApiOverrides(): void {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dpagent-legacy-api-'));
+  const configPath = path.join(tempDir, 'config.yaml');
+  try {
+    fs.writeFileSync(
+      configPath,
+      [
+        'api:',
+        '  apiKey: test-api-key-0123456789012345',
+        '  apiBase: https://openai-compatible.local/v1',
+        '  model: gpt-4o-mini',
+        '  provider: openai',
+        '  maxOutputTokens: 4096',
+        '',
+      ].join('\n'),
+      'utf8'
+    );
+    const configManager = new ConfigManager();
+    configManager.loadFromYaml(configPath);
+
+    const nextConfig = configManager.get();
+    assert.equal(nextConfig.api.apiKey, 'test-api-key-0123456789012345');
+    assert.equal(nextConfig.api.apiBase, 'https://openai-compatible.local/v1');
+    assert.equal(nextConfig.api.model, 'gpt-4o-mini');
+    assert.equal(nextConfig.api.provider, 'openai');
+    assert.equal(nextConfig.llmProfiles.defaultProfileId, 'default');
+    assert.equal(nextConfig.llmProfiles.profiles[0]?.apiKey, 'test-api-key-0123456789012345');
+    assert.equal(nextConfig.llmProfiles.profiles[0]?.apiBase, 'https://openai-compatible.local/v1');
+    assert.equal(nextConfig.llmProfiles.profiles[0]?.defaultModel, 'gpt-4o-mini');
+    assert.equal(nextConfig.llmProfiles.profiles[0]?.provider, 'openai');
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function testNormalizeLlmProfilesAllowsEmptySetupFirstConfig(): void {
+  const normalized = normalizeLlmProfilesConfig({
+    llmProfiles: {
+      defaultProfileId: '',
+      profiles: [],
     },
   });
 
-  const nextConfig = configManager.get();
-  assert.equal(nextConfig.api.apiKey, 'test-api-key-0123456789012345');
-  assert.equal(nextConfig.api.apiBase, 'https://openai-compatible.local/v1');
-  assert.equal(nextConfig.api.model, 'gpt-4o-mini');
-  assert.equal(nextConfig.api.provider, 'openai');
-  assert.equal(nextConfig.llmProfiles.defaultProfileId, 'default');
-  assert.equal(nextConfig.llmProfiles.profiles[0]?.apiKey, '');
-  assert.equal(nextConfig.llmProfiles.profiles[0]?.apiBase, 'https://api.minimax.io');
-  assert.equal(nextConfig.llmProfiles.profiles[0]?.defaultModel, 'MiniMax-M2.5');
-  assert.equal(nextConfig.llmProfiles.profiles[0]?.provider, 'anthropic');
+  assert.equal(normalized.defaultProfileId, '');
+  assert.deepEqual(normalized.profiles, []);
+  const selection = resolveSessionLlmSelection({ llmProfiles: normalized });
+  assert.equal(selection.profileId, '');
+  assert.equal(selection.model, '');
+  assert.throws(() => resolveLlmRuntimeConfig({ llmProfiles: normalized }), {
+    message: LLM_PROFILE_NOT_CONFIGURED_ERROR,
+  });
 }
 
 function testConfigManagerPreservesRootContextBudgetAndRemoteAuthOverrides(): void {
@@ -711,7 +744,8 @@ function testResolveSessionLlmSelectionFallsBackWhenModelIsUnavailable(): void {
 
 async function runAll(): Promise<void> {
   await testConfigManagerPreservesProfilesOnPartialLlmProfilesOverride();
-  testConfigManagerIgnoresLegacyApiOverridesWithoutExplicitProfiles();
+  testConfigManagerMigratesExplicitLegacyApiOverrides();
+  testNormalizeLlmProfilesAllowsEmptySetupFirstConfig();
   testResolveContextBudgetPrefersProfileOverrideOverModelOverride();
   testResolveContextBudgetFallsBackToModelOverrideThenDefault();
   testConfigManagerPreservesRootContextBudgetAndRemoteAuthOverrides();

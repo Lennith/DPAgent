@@ -27,6 +27,11 @@ Event history is the source of truth. Replay assembly may compress older
 history, but it cannot rewrite current user intent or fabricate tool outcomes.
 Interrupted artifacts are durable recovery metadata.
 
+Session fork copies only stable committed session state: event JSONL and
+tool-result artifacts. It does not copy active runs, pending plan input,
+share/runtime attachments, automation state, runtime errors, auto-loop state, or
+interrupted-turn files.
+
 ## Edit Guidance
 - Keep transaction boundaries in `ContextManager`.
 - Keep projection logic deterministic from events.
@@ -35,6 +40,7 @@ Interrupted artifacts are durable recovery metadata.
 
 ## Closest Tests
 - `tests/unit/context-history-replay.test.ts`
+- `tests/unit/session-fork.test.ts`
 - `tests/unit/context-payload-projector.test.ts`
 - `tests/unit/compressed-history-context-cache.test.ts`
 - `tests/integration/persistence.test.ts`

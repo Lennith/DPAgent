@@ -16,6 +16,8 @@ export const DEFAULT_LLM_PROFILE_ID = 'default';
 export const DEFAULT_REASONING_PRESET: ReasoningPreset = 'high';
 export const DEFAULT_MAX_OUTPUT_TOKENS = 32768;
 export const DEFAULT_SYNTHETIC_SELECTION_UPDATED_AT = '1970-01-01T00:00:00.000Z';
+export const LLM_PROFILE_NOT_CONFIGURED_ERROR =
+  'LLM profile is not configured. Create a provider profile before starting an agent run.';
 
 export function normalizeApiProvider(value: unknown): APIProvider {
   return value === 'openai' ? 'openai' : 'anthropic';
@@ -163,9 +165,9 @@ export function createDefaultLlmProfile(profileId = DEFAULT_LLM_PROFILE_ID): Llm
     name: 'Default Profile',
     provider,
     apiKey: '',
-    apiBase: 'https://api.minimax.io',
-    defaultModel: 'MiniMax-M2.5',
-    availableModels: ['MiniMax-M2.5'],
+    apiBase: '',
+    defaultModel: '',
+    availableModels: [],
     maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
     enabled: true,
     capabilities: getResolvedProfileCapabilities({ provider, capabilities: undefined }),
@@ -175,17 +177,15 @@ export function createDefaultLlmProfile(profileId = DEFAULT_LLM_PROFILE_ID): Llm
 export function normalizeLlmProfilesConfig(config: {
   llmProfiles?: LlmProfilesConfig | null | undefined;
 }): LlmProfilesConfig {
-  const fallbackProfile = createDefaultLlmProfile();
   const rawProfiles = Array.isArray(config.llmProfiles?.profiles) ? config.llmProfiles?.profiles : [];
-  const profilesToNormalize = rawProfiles.length > 0 ? rawProfiles : [fallbackProfile];
   const dedupedProfiles = new Map<string, LlmProviderProfileConfig>();
 
-  profilesToNormalize.forEach((rawProfile, index) => {
+  rawProfiles.forEach((rawProfile, index) => {
     const provider = normalizeApiProvider(rawProfile?.provider);
-    const fallbackId = index === 0 ? fallbackProfile.id : `profile-${index + 1}`;
+    const fallbackId = index === 0 ? DEFAULT_LLM_PROFILE_ID : `profile-${index + 1}`;
     const id = normalizeProfileId(rawProfile?.id, fallbackId);
-    const apiBase = String(rawProfile?.apiBase ?? '').trim() || fallbackProfile.apiBase;
-    const rawDefaultModel = String(rawProfile?.defaultModel ?? '').trim() || fallbackProfile.defaultModel;
+    const apiBase = String(rawProfile?.apiBase ?? '').trim();
+    const rawDefaultModel = String(rawProfile?.defaultModel ?? '').trim();
     const availableModels = normalizeAvailableModels(rawProfile?.availableModels, rawDefaultModel);
     const defaultModel = availableModels.includes(rawDefaultModel)
       ? rawDefaultModel
@@ -213,15 +213,15 @@ export function normalizeLlmProfilesConfig(config: {
   });
 
   const profiles = [...dedupedProfiles.values()];
-  const defaultProfileId = normalizeProfileId(config.llmProfiles?.defaultProfileId, profiles[0]?.id ?? fallbackProfile.id);
+  const defaultProfileId = normalizeProfileId(config.llmProfiles?.defaultProfileId, profiles[0]?.id ?? '');
   const resolvedDefaultProfileId =
     profiles.some((profile) => profile.id === defaultProfileId) && defaultProfileId
       ? defaultProfileId
-      : profiles[0]?.id ?? fallbackProfile.id;
+      : profiles[0]?.id ?? '';
 
   return {
     defaultProfileId: resolvedDefaultProfileId,
-    profiles: profiles.length > 0 ? profiles : [fallbackProfile],
+    profiles,
   };
 }
 
@@ -229,7 +229,18 @@ export function resolveDefaultLlmProfile(config: {
   llmProfiles: LlmProfilesConfig;
 }): LlmProviderProfileConfig {
   const normalized = normalizeLlmProfilesConfig(config);
-  return normalized.profiles.find((profile) => profile.id === normalized.defaultProfileId) ?? normalized.profiles[0] ?? createDefaultLlmProfile();
+  const profile = normalized.profiles.find((item) => item.id === normalized.defaultProfileId) ?? normalized.profiles[0];
+  if (!profile) {
+    throw new Error(LLM_PROFILE_NOT_CONFIGURED_ERROR);
+  }
+  return profile;
+}
+
+export function resolveOptionalDefaultLlmProfile(config: {
+  llmProfiles?: LlmProfilesConfig | null | undefined;
+}): LlmProviderProfileConfig | undefined {
+  const normalized = normalizeLlmProfilesConfig(config);
+  return normalized.profiles.find((profile) => profile.id === normalized.defaultProfileId) ?? normalized.profiles[0];
 }
 
 export function findResolvedLlmProfile(
@@ -275,9 +286,18 @@ export function resolveSessionLlmSelection(
   selection?: SessionLlmSelection | SessionLlmSelectionInput | null
 ): SessionLlmSelection {
   const llmProfiles = normalizeLlmProfilesConfig(config);
-  const defaultProfile = resolveDefaultLlmProfile({
-    llmProfiles,
-  });
+  const defaultProfile = resolveOptionalDefaultLlmProfile({ llmProfiles });
+  if (!defaultProfile) {
+    return {
+      profileId: '',
+      model: '',
+      reasoningPreset: normalizeReasoningPreset(selection?.reasoningPreset),
+      updatedAt: normalizeSelectionUpdatedAt(
+        (selection as SessionLlmSelection | SessionLlmSelectionInput | undefined)?.updatedAt,
+        DEFAULT_SYNTHETIC_SELECTION_UPDATED_AT
+      ),
+    };
+  }
   const requestedProfileId = typeof selection?.profileId === 'string' ? selection.profileId.trim() : '';
   const resolvedProfile =
     llmProfiles.profiles.find((profile) => profile.id === requestedProfileId) ?? defaultProfile;
@@ -347,20 +367,32 @@ export function resolveLlmRuntimeConfig(
   selection?: SessionLlmSelection | SessionLlmSelectionInput | null
 ): ResolvedLlmRuntimeConfig {
   const llmProfiles = normalizeLlmProfilesConfig(config);
+  if (llmProfiles.profiles.length === 0) {
+    throw new Error(LLM_PROFILE_NOT_CONFIGURED_ERROR);
+  }
   const resolvedSelection = resolveSessionLlmSelection(config, selection);
   const profile =
     llmProfiles.profiles.find((item) => item.id === resolvedSelection.profileId) ??
-    resolveDefaultLlmProfile({
-      llmProfiles,
-    });
+    resolveOptionalDefaultLlmProfile({ llmProfiles });
+  if (!profile) {
+    throw new Error(LLM_PROFILE_NOT_CONFIGURED_ERROR);
+  }
+  const apiBase = String(profile.apiBase ?? '').trim();
+  const model = String(resolvedSelection.model || profile.defaultModel || '').trim();
+  if (!apiBase) {
+    throw new Error('LLM profile apiBase is not configured. Set apiBase before starting an agent run.');
+  }
+  if (!model) {
+    throw new Error('LLM profile defaultModel is not configured. Set a model before starting an agent run.');
+  }
   const capabilities = getResolvedProfileCapabilities(profile);
 
   return {
     profileId: profile.id,
     provider: profile.provider,
     apiKey: profile.apiKey,
-    apiBase: profile.apiBase,
-    model: resolvedSelection.model || profile.defaultModel,
+    apiBase,
+    model,
     maxOutputTokens: normalizePositiveInteger(profile.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS),
     reasoningPreset: resolvedSelection.reasoningPreset,
     capabilities: {

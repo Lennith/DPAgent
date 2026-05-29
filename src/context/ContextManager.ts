@@ -447,6 +447,15 @@ export class ContextManager {
     return this.interruptedTurnStore.loadSideEffectLedger(this.normalizeRef(ref));
   }
 
+  hasInterruptedState(ref: ContextRef): boolean {
+    const normalized = this.normalizeRef(ref);
+    return (
+      this.getDraftRecord(normalized) !== undefined ||
+      this.getInterruptedArtifact(normalized) !== undefined ||
+      this.getInterruptedSideEffectLedger(normalized).length > 0
+    );
+  }
+
   clearInterruptedSideEffectLedger(ref: ContextRef): void {
     this.interruptedTurnStore.clearSideEffectLedger(this.normalizeRef(ref));
   }
@@ -523,6 +532,52 @@ export class ContextManager {
     };
     this.eventStore.saveMeta(normalized.scope, normalized.namespace, next);
     return next;
+  }
+
+  forkSessionNamespace(input: {
+    sourceNamespace: string;
+    targetNamespace: string;
+    name?: string;
+    origin?: ContextNamespaceMeta['origin'];
+  }): ContextNamespaceMeta {
+    const source: ContextRef = { scope: 'session', namespace: input.sourceNamespace };
+    const target: ContextRef = { scope: 'session', namespace: input.targetNamespace };
+    const sourceMeta = this.eventStore.loadMeta(source.scope, source.namespace);
+    if (!sourceMeta) {
+      throw new Error(`Session not found: ${input.sourceNamespace}`);
+    }
+    if (this.hasInterruptedState(source)) {
+      throw new Error(`Session is not stable enough to fork: ${input.sourceNamespace}`);
+    }
+    const sourceEvents = this.eventStore.readEvents(source.scope, source.namespace);
+    const forkedAt = new Date().toISOString();
+    const targetName = String(input.name ?? '').trim() || `${sourceMeta.name || input.sourceNamespace}-fork`;
+    const targetMeta: ContextNamespaceMeta = {
+      scope: target.scope,
+      namespace: target.namespace,
+      name: targetName,
+      createdAt: forkedAt,
+      updatedAt: forkedAt,
+      workspaceDir: sourceMeta.workspaceDir,
+      ...(sourceMeta.toolsetName ? { toolsetName: sourceMeta.toolsetName } : {}),
+      ...((input.origin ?? sourceMeta.origin) ? { origin: input.origin ?? sourceMeta.origin } : {}),
+      ...(sourceMeta.llmSelection ? { llmSelection: sourceMeta.llmSelection } : {}),
+      ...(sourceMeta.memoryPromotionState ? { memoryPromotionState: sourceMeta.memoryPromotionState } : {}),
+      ...(sourceMeta.compressedHistoryContext ? { compressedHistoryContext: sourceMeta.compressedHistoryContext } : {}),
+      ...(sourceMeta.agentInjectionState ? { agentInjectionState: sourceMeta.agentInjectionState } : {}),
+      forkedFrom: {
+        scope: 'session',
+        namespace: source.namespace,
+        sourceEventCount: sourceEvents.length,
+        forkedAt,
+      },
+    };
+    this.eventStore.copyCommittedNamespace({
+      source,
+      target,
+      meta: targetMeta,
+    });
+    return this.eventStore.loadMeta(target.scope, target.namespace) ?? targetMeta;
   }
 
   deleteNamespace(ref: ContextRef): boolean {

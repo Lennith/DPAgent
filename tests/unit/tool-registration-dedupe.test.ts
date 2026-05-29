@@ -1,6 +1,5 @@
 import * as assert from 'node:assert/strict';
 import {
-  WebSearchTool,
   WebFetchTool,
   Tool,
   ToolRegistry,
@@ -45,23 +44,20 @@ class FakeTool extends Tool {
   }
 }
 
-function testCoreWebToolsRegisterUnderProtocolNames(): void {
+function testCoreWebToolsRegisterOnlyFetchByDefault(): void {
   const registry = new ToolRegistry();
   const state = createToolRegistrationState();
 
-  const search = registerToolWithDedupe(registry, state, new WebSearchTool(), 'core');
   const fetchUrl = registerToolWithDedupe(registry, state, new WebFetchTool(), 'core');
 
-  assert.equal(search.skipped, false);
   assert.equal(fetchUrl.skipped, false);
-  assert.equal(registry.has('web_search'), true);
+  assert.equal(registry.has('web_search'), false);
   assert.equal(registry.has('web_fetch'), true);
 }
 
-function testMcpSearchReplacesCoreSearchByCapabilityInference(): void {
+function testMcpSearchCapabilityInferenceRemainsForExplicitTools(): void {
   const registry = new ToolRegistry();
   const state = createToolRegistrationState();
-  registerToolWithDedupe(registry, state, new WebSearchTool(), 'core');
 
   const mcpSearch = new FakeTool(
     'internet_lookup',
@@ -76,20 +72,15 @@ function testMcpSearchReplacesCoreSearchByCapabilityInference(): void {
   );
 
   assert.equal(resolveToolCapabilityFamilyForTool(mcpSearch), 'web_search');
-  const replaced = registerToolWithDedupe(registry, state, mcpSearch, 'team');
-  assert.equal(replaced.skipped, false);
-  if (replaced.skipped) {
-    throw new Error('expected MCP tool to replace core tool');
-  }
-  assert.equal(replaced.replaced?.toolName, 'web_search');
-  assert.equal(registry.has('web_search'), false);
+  const registered = registerToolWithDedupe(registry, state, mcpSearch, 'team');
+  assert.equal(registered.skipped, false);
+  assert.equal(registered.replaced, undefined);
   assert.equal(registry.has('internet_lookup'), true);
 }
 
-function testSameNameMcpSearchReplacesCoreSearch(): void {
+function testSameNameMcpSearchCanBeExplicitlyRegistered(): void {
   const registry = new ToolRegistry();
   const state = createToolRegistrationState();
-  registerToolWithDedupe(registry, state, new WebSearchTool(), 'core');
 
   const mcpSearch = new FakeTool(
     'web_search',
@@ -103,13 +94,9 @@ function testSameNameMcpSearchReplacesCoreSearch(): void {
     }
   );
 
-  const replaced = registerToolWithDedupe(registry, state, mcpSearch, 'team');
-  assert.equal(replaced.skipped, false);
-  if (replaced.skipped) {
-    throw new Error('expected same-name MCP tool to replace core tool');
-  }
-  assert.equal(replaced.replaced?.toolName, 'web_search');
-  assert.equal(replaced.replaced?.source, 'core');
+  const registered = registerToolWithDedupe(registry, state, mcpSearch, 'team');
+  assert.equal(registered.skipped, false);
+  assert.equal(registered.replaced, undefined);
   assert.equal(registry.get('web_search')?.description, 'MCP search web results by query');
 }
 
@@ -138,11 +125,8 @@ function testUnknownMcpToolDoesNotGetMisclassified(): void {
 }
 
 function testWebToolDescriptionsStayStable(): void {
-  const search = new WebSearchTool();
   const fetchUrl = new WebFetchTool();
 
-  assert.match(search.description, /configured search service/i);
-  assert.match(search.description, /simplified DuckDuckGo result set/i);
   assert.match(fetchUrl.description, /http\/https URL/i);
   assert.match(fetchUrl.description, /Output is truncated/i);
 }
@@ -152,16 +136,16 @@ function testCreateWebToolsReturnsProtocolNamedTools(): void {
   const state = createToolRegistrationState();
 
   const tools = createWebTools();
-  assert.equal(tools.length, 2);
+  assert.equal(tools.length, 1);
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ['web_search', 'web_fetch']
+    ['web_fetch']
   );
   for (const tool of tools) {
     registerToolWithDedupe(registry, state, tool, 'core');
   }
 
-  assert.equal(registry.has('web_search'), true);
+  assert.equal(registry.has('web_search'), false);
   assert.equal(registry.has('web_fetch'), true);
   assert.equal(registry.has('SearchWeb'), false);
   assert.equal(registry.has('FetchURL'), false);
@@ -200,9 +184,9 @@ function testToolResultArtifactDoesNotConflictWithFileReadCapability(): void {
 }
 
 function runAll(): void {
-  testCoreWebToolsRegisterUnderProtocolNames();
-  testMcpSearchReplacesCoreSearchByCapabilityInference();
-  testSameNameMcpSearchReplacesCoreSearch();
+  testCoreWebToolsRegisterOnlyFetchByDefault();
+  testMcpSearchCapabilityInferenceRemainsForExplicitTools();
+  testSameNameMcpSearchCanBeExplicitlyRegistered();
   testUnknownMcpToolDoesNotGetMisclassified();
   testWebToolDescriptionsStayStable();
   testCreateWebToolsReturnsProtocolNamedTools();

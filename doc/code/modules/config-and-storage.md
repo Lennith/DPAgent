@@ -30,6 +30,11 @@ Configuration defaults have one runtime source. UI defaults, CLI templates, and
 server public views must derive from resolved configuration. Runtime artifacts
 and local credentials are never source or package artifacts.
 
+The shipped LLM configuration is setup-first. `llmProfiles` may be empty, and
+runtime LLM resolution fails with a configuration error until the user creates a
+provider profile with API base, model, and credentials. Templates and first-run
+config generation must not inject a vendor-specific executable profile.
+
 ## Edit Guidance
 - Keep config validation near `ConfigManager`.
 - Use storage primitives rather than ad hoc file writes for runtime state.

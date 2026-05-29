@@ -36,9 +36,9 @@ export function createEmptyProfile(index: number): EditableProfile {
     id,
     name: `Profile ${index + 1}`,
     provider: 'anthropic',
-    apiBase: 'https://api.minimaxi.com',
-    defaultModel: 'MiniMax-M2.7',
-    availableModels: ['MiniMax-M2.7'],
+    apiBase: '',
+    defaultModel: '',
+    availableModels: [],
     maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
     enabled: true,
     capabilities: {

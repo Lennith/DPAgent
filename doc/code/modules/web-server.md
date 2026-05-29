@@ -33,6 +33,11 @@ URL uses `web.publicBaseUrl` when configured. Without that setting, the href is
 a same-origin `/download/...` path so remote browsers do not receive unusable
 `localhost` links.
 
+`POST /api/sessions/:id/fork` is a full-access-only mutation. It creates a new
+session from a stable committed snapshot, returns the new session info, and
+returns `409` when the source session is active, waiting for plan input, or has
+interrupted recovery state.
+
 ## Edit Guidance
 - Add domain routes in route modules instead of growing `WebServer.ts` when possible.
 - Keep ownership checks close to route/WebSocket mutation entrypoints.
@@ -46,3 +51,4 @@ a same-origin `/download/...` path so remote browsers do not receive unusable
 - `tests/unit/web-callback-event-messages.test.ts`
 - `tests/unit/web-request-user-input.test.ts`
 - `tests/unit/web-plan-input-response.test.ts`
+- `tests/unit/session-fork.test.ts`

@@ -19,24 +19,8 @@ function ensureConfigTemplate() {
   }
   const template = {
     llmProfiles: {
-      defaultProfileId: 'default',
-      profiles: [
-        {
-          id: 'default',
-          name: 'Default Profile',
-          provider: 'anthropic',
-          apiKey: '',
-          apiBase: 'https://api.minimaxi.com',
-          defaultModel: 'MiniMax-M2.7-highspeed',
-          maxOutputTokens: 32768,
-          enabled: true,
-          capabilities: {
-            modelDiscovery: true,
-            reasoningEffort: false,
-            thinkingBudget: true,
-          },
-        },
-      ],
+      defaultProfileId: '',
+      profiles: [],
     },
     agent: {
       maxSteps: 100,
@@ -92,7 +76,7 @@ function main() {
   console.log(`config: ${CONFIG_PATH}`);
   console.log(`maxOutputTokens: ${defaultProfile.maxOutputTokens ?? loaded.api?.maxOutputTokens}`);
   if (!apiKey) {
-    console.log('apiKey: not configured yet. Edit config.yaml before starting.');
+    console.log('apiKey: not configured yet. Open Web Settings and create a provider profile before starting a run.');
   } else {
     console.log('apiKey: configured');
   }

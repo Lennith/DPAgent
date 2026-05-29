@@ -117,7 +117,6 @@ export function buildExecutionToolRegistry({
           'context_manage',
           'request_user_input',
           'finalize_plan',
-          'web_search',
           'web_fetch',
         ])
       : null;

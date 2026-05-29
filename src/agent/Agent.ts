@@ -810,7 +810,7 @@ export class Agent {
     if (!this.llm) {
       this.isRunning = false;
       return {
-        content: '鈿狅笍 API Key not configured.\n\nPlease configure your MiniMax API Key in the settings (鈿欙笍 icon) and try again.\n\nYou can get your API Key from: https://platform.minimaxi.com',
+        content: 'API Key not configured.\n\nPlease configure a provider profile in Settings and try again.',
         step: 0,
       };
     }

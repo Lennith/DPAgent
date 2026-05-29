@@ -191,7 +191,14 @@ export async function prepareWebServerChatExecution(
     host.refreshGlobalAgentCatalog();
     return null;
   }
-  const llmRuntime = resolveLlmRuntimeConfig(host.agent.getConfig(), agentLlmSelection.selection);
+  let llmRuntime: ReturnType<typeof resolveLlmRuntimeConfig>;
+  try {
+    llmRuntime = resolveLlmRuntimeConfig(host.agent.getConfig(), agentLlmSelection.selection);
+  } catch (error) {
+    dispatcher.error(error instanceof Error ? error.message : String(error));
+    host.refreshGlobalAgentCatalog();
+    return null;
+  }
 
   if (!host.hasUsableApiKeyForRuntime(llmRuntime)) {
     dispatcher.error('API Key is not configured. Please open Settings and save a valid API Key first.');

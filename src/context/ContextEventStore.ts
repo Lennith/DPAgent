@@ -13,6 +13,12 @@ interface AppendEventOptions {
   expectedEventCount?: number;
 }
 
+interface CopyNamespaceInput {
+  source: ContextRef;
+  target: ContextRef;
+  meta: ContextNamespaceMeta;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -179,6 +185,32 @@ export class ContextEventStore {
     }
     fs.rmSync(target, { recursive: true, force: true });
     return true;
+  }
+
+  copyCommittedNamespace(input: CopyNamespaceInput): void {
+    const sourcePath = this.resolveNamespacePath(input.source.scope, input.source.namespace);
+    const targetPath = this.resolveNamespacePath(input.target.scope, input.target.namespace);
+    if (!fs.existsSync(sourcePath)) {
+      throw new Error(`Context namespace not found: ${input.source.scope}:${input.source.namespace}`);
+    }
+    if (fs.existsSync(targetPath)) {
+      throw new Error(`Context namespace already exists: ${input.target.scope}:${input.target.namespace}`);
+    }
+    fs.mkdirSync(targetPath, { recursive: true });
+
+    const sourceEventsPath = this.eventsFilePath(input.source.scope, input.source.namespace);
+    const targetEventsPath = this.eventsFilePath(input.target.scope, input.target.namespace);
+    fs.copyFileSync(sourceEventsPath, targetEventsPath);
+
+    const sourceToolResultsPath = path.join(sourcePath, 'tool-results');
+    if (fs.existsSync(sourceToolResultsPath)) {
+      fs.cpSync(sourceToolResultsPath, path.join(targetPath, 'tool-results'), {
+        recursive: true,
+        force: false,
+      });
+    }
+
+    this.saveMeta(input.target.scope, input.target.namespace, input.meta);
   }
 
   private ensureNamespace(scope: ContextScope, namespace: string, workspaceDir?: string): void {

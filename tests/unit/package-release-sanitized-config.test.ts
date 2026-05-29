@@ -43,7 +43,7 @@ function run(): void {
     assert.ok(typeof relativePath === 'string' && relativePath.length > 0, `easy-run dir is declared: ${relativePath}`);
   }
   assert.equal(Object.hasOwn(template.agent as Record<string, unknown>, 'skillListPath'), false);
-  assert.match(raw, /apiKey:\s*''/);
+  assert.deepEqual((template.llmProfiles as { profiles?: unknown[] }).profiles, []);
   assert.match(raw, /llmProfiles/);
   assert.match(raw, /sk-\[A-Za-z0-9_-]/);
   console.log('package-release sanitized config tests passed');

@@ -112,16 +112,20 @@ async function main() {
       }
     }
 
-    const apiKey = (await ask(rl, 'MiniMax API Key: ')).trim();
+    const apiKey = (await ask(rl, 'API Key: ')).trim();
     if (apiKey.length < 20) {
       throw new Error('Invalid API key. Expected length >= 20.');
     }
 
-    const apiBaseInput = (await ask(rl, 'API Base [https://api.minimaxi.com]: ')).trim();
-    const apiBase = apiBaseInput || 'https://api.minimaxi.com';
+    const apiBase = (await ask(rl, 'API Base: ')).trim();
+    if (!apiBase) {
+      throw new Error('API Base is required.');
+    }
 
-    const modelInput = (await ask(rl, 'Model [MiniMax-M2.7-highspeed]: ')).trim();
-    const model = modelInput || 'MiniMax-M2.7-highspeed';
+    const model = (await ask(rl, 'Model: ')).trim();
+    if (!model) {
+      throw new Error('Model is required.');
+    }
 
     const defaultSkillsDir = path.join(os.homedir(), '.codex', 'skills');
     const skillsInput = (await ask(rl, `Skills Dir [${defaultSkillsDir}]: `)).trim();

@@ -813,6 +813,12 @@ export interface ContextInspectableMeta {
   createdAt?: string;
   updatedAt?: string;
   workspaceDir?: string;
+  forkedFrom?: {
+    scope: 'session';
+    namespace: string;
+    sourceEventCount: number;
+    forkedAt: string;
+  };
   toolsetName?: string;
   origin?: ContextNamespaceMeta['origin'];
   lastRunOrigin?: ContextNamespaceMeta['lastRunOrigin'];
@@ -1029,6 +1035,12 @@ export interface ContextNamespaceMeta {
   createdAt: string;
   updatedAt: string;
   workspaceDir?: string;
+  forkedFrom?: {
+    scope: 'session';
+    namespace: string;
+    sourceEventCount: number;
+    forkedAt: string;
+  };
   toolsetName?: string;
   origin?: SessionOrigin;
   lastRunOrigin?: SessionOrigin;

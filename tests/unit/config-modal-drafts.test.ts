@@ -248,7 +248,8 @@ function testCreateEmptyProfileUsesExpectedDefaults(): void {
   assert.match(profile.id, /^profile-3-/);
   assert.equal(profile.name, 'Profile 3');
   assert.equal(profile.provider, 'anthropic');
-  assert.equal(profile.defaultModel, 'MiniMax-M2.7');
+  assert.equal(profile.defaultModel, '');
+  assert.deepEqual(profile.availableModels, []);
   assert.equal(profile.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS);
   assert.equal(profile.apiKeyEditing, true);
 }

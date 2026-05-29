@@ -41,7 +41,6 @@ export {
   type ExitAutoLoopToolOptions,
 } from './ExitAutoLoopTool.js';
 export {
-  WebSearchTool,
   WebFetchTool,
   createWebTools,
 } from './WebTools.js';

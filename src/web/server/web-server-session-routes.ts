@@ -16,6 +16,7 @@ import {
   toSessionContext,
   type WebServerRouteRegistrationDependencies,
 } from './web-server-route-contracts.js';
+import { createSessionNamespace } from './web-server-shared.js';
 import { rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
 import { webServerLogger } from '../../utils/logger.js';
 
@@ -313,6 +314,78 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       }
     }
   );
+
+  deps.app.post('/api/sessions/:id/fork', (req: Request, res: Response) => {
+    if (rejectFullAccessIfNeeded(accessServices, req, res, 'Share link cannot fork sessions')) {
+      return;
+    }
+    if (!accessServices.canAccessSession(req, req.params.id)) {
+      res.status(403).json({ error: 'Share link cannot access this session', code: 'SHARE_SCOPE_FORBIDDEN' });
+      return;
+    }
+    const ref = toSessionContext(req.params.id);
+    const meta = contextServices.getContextNamespaceMetaSafe(ref);
+    if (!meta) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    if (rejectObserveOnlyIfNeeded(deps, ref, res)) {
+      return;
+    }
+    if (contextServices.getActiveRunState(ref)) {
+      res.status(409).json({ error: 'Session has an active run and cannot be forked yet.' });
+      return;
+    }
+    if (meta.pendingPlanInput) {
+      res.status(409).json({ error: 'Session is waiting for plan input and cannot be forked yet.' });
+      return;
+    }
+    if (deps.agent.getContextManager().hasInterruptedState(ref)) {
+      res.status(409).json({ error: 'Session has interrupted state and cannot be forked yet.' });
+      return;
+    }
+
+    try {
+      const body = (req.body ?? {}) as { name?: unknown };
+      const nextNamespace = createSessionNamespace();
+      const nextMeta = deps.agent.getContextManager().forkSessionNamespace({
+        sourceNamespace: req.params.id,
+        targetNamespace: nextNamespace,
+        name: typeof body.name === 'string' ? body.name.trim() : undefined,
+        origin: 'web',
+      });
+      const config = deps.agent.getConfig();
+      const projection = deps.agent.getContextManager().getProjection({
+        scope: 'session',
+        namespace: nextNamespace,
+      });
+      const session = {
+        id: nextNamespace,
+        name: nextMeta.name || nextNamespace,
+        workspaceDir: nextMeta.workspaceDir,
+        createdAt: nextMeta.createdAt,
+        updatedAt: nextMeta.updatedAt,
+        contextVersion: projection.version,
+        toolsetName:
+          nextMeta.toolsetName ||
+          deps.agent.resolveToolsetName({ scope: 'session', namespace: nextNamespace }),
+        memoryPromotionState: nextMeta.memoryPromotionState ?? null,
+        automationRun: null,
+        completionMarkerStats: null,
+        origin: resolveSessionOrigin(nextMeta),
+        llmSelection: resolveSessionLlmSelection(config, nextMeta.llmSelection),
+        planningState: null,
+        activeRun: null,
+        interactionState: contextServices.getInteractionStateForContext({
+          scope: 'session',
+          namespace: nextNamespace,
+        }),
+      };
+      res.json({ success: true, session, meta: nextMeta });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
 
   deps.app.get('/api/sessions/:id/llm-selection', (req: Request, res: Response) => {
     if (rejectSessionAccessIfNeeded(accessServices, req, res, req.params.id)) {

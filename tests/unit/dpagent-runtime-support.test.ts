@@ -106,6 +106,17 @@ function testStartupConfigValidationUsesResolvedRuntime(): void {
   );
 }
 
+function testStartupConfigAllowsSetupFirstWithoutProfileOnlyWhenApiKeyCanBeMissing(): void {
+  const cfg = config({
+    llmProfiles: {
+      defaultProfileId: '',
+      profiles: [],
+    },
+  });
+  assert.doesNotThrow(() => assertDPAgentStartupConfig(cfg, { requireApiKey: false }));
+  assert.throws(() => assertDPAgentStartupConfig(cfg), /LLM profile is not configured/);
+}
+
 function testMcpStatusProjectionPreservesWireShape(): void {
   const runtimeConfig: MCPRuntimeConfig = {
     enabled: true,
@@ -219,6 +230,7 @@ function testCommittedTurnMessageFilteringAndSnapshotCollection(): void {
 
 testReadableDirsIncludeConfiguredAndSessionDroppedFiles();
 testStartupConfigValidationUsesResolvedRuntime();
+testStartupConfigAllowsSetupFirstWithoutProfileOnlyWhenApiKeyCanBeMissing();
 testMcpStatusProjectionPreservesWireShape();
 testCommittedTurnMessageFilteringAndSnapshotCollection();
 

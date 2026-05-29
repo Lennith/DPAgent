@@ -94,6 +94,10 @@ export class ToolsetRegistry {
         selectedTools.push(tool);
         continue;
       }
+      if (capability === 'web_search' && definition.allowUnknownTools) {
+        selectedTools.push(tool);
+        continue;
+      }
       if (capability.startsWith('tool:') && definition.allowUnknownTools) {
         selectedTools.push(tool);
       }
@@ -109,6 +113,9 @@ export class ToolsetRegistry {
     const definition = this.get(toolsetName);
     const capability = resolveToolCapabilityFamilyForTool(tool);
     if (definition.capabilities.includes(capability)) {
+      return true;
+    }
+    if (capability === 'web_search' && definition.allowUnknownTools) {
       return true;
     }
     return definition.allowUnknownTools === true && capability.startsWith('tool:');

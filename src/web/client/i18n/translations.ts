@@ -7,6 +7,8 @@ export const DEFAULT_LOCALE: SupportedLocale = 'zh-CN';
 export const LOCALE_STORAGE_KEY = 'minimax-ui-locale';
 
 const zhCN = {
+  'app.session.fork': 'Fork',
+  'app.session.forkSucceeded': 'Fork created',
   'common.cancel': '取消',
   'common.confirm': '确认',
   'common.save': '保存',
@@ -325,8 +327,8 @@ const zhCN = {
   'config.apiKey.label': 'API Key',
   'config.apiKey.configured': '已配置',
   'config.apiKey.placeholderConfigured': '********************',
-  'config.apiKey.placeholderEmpty': '请输入 MiniMax API Key',
-  'config.apiKey.placeholderAnthropic': '请输入 MiniMax API Key',
+  'config.apiKey.placeholderEmpty': '请输入 API Key',
+  'config.apiKey.placeholderAnthropic': '请输入 API Key',
   'config.apiKey.placeholderGeneric': '请输入 API Key',
   'config.apiKey.hint': '在 platform.minimaxi.com 获取 API key',
   'config.apiKey.hintAnthropic': '在 platform.minimaxi.com 获取 API key',
@@ -343,7 +345,7 @@ const zhCN = {
   'config.settingsTitle': '设置',
   'config.governance.empty': '选择会话后可使用治理控件。',
   'config.model': '模型',
-  'config.model.placeholder': '例如：MiniMax-M2.7 / gpt-4o-mini',
+  'config.model.placeholder': '例如：gpt-4o-mini',
   'config.skillsDir': '技能目录',
   'config.skillsDir.placeholder': '例如：C:\\Users\\name\\.codex\\skills',
   'config.skillsDir.hint': '包含技能子目录（每个子目录内有 SKILL.md）的路径。',
@@ -539,6 +541,8 @@ const zhCN = {
 export type TranslationKey = keyof typeof zhCN;
 
 const enUS: Record<TranslationKey, string> = {
+  'app.session.fork': 'Fork',
+  'app.session.forkSucceeded': 'Fork created',
   'common.cancel': 'Cancel',
   'common.confirm': 'Confirm',
   'common.save': 'Save',
@@ -858,8 +862,8 @@ const enUS: Record<TranslationKey, string> = {
   'config.apiKey.label': 'API Key',
   'config.apiKey.configured': 'Configured',
   'config.apiKey.placeholderConfigured': '********************',
-  'config.apiKey.placeholderEmpty': 'Enter your MiniMax API Key',
-  'config.apiKey.placeholderAnthropic': 'Enter your MiniMax API Key',
+  'config.apiKey.placeholderEmpty': 'Enter your API Key',
+  'config.apiKey.placeholderAnthropic': 'Enter your API Key',
   'config.apiKey.placeholderGeneric': 'Enter your API Key',
   'config.apiKey.hint': 'Get your API key from platform.minimaxi.com',
   'config.apiKey.hintAnthropic': 'Get your API key from platform.minimaxi.com',
@@ -875,7 +879,7 @@ const enUS: Record<TranslationKey, string> = {
   'config.loadingSettings': 'Loading settings...',
   'config.settingsTitle': 'Settings',
   'config.model': 'Model',
-  'config.model.placeholder': 'e.g. MiniMax-M2.7 or gpt-4o-mini',
+  'config.model.placeholder': 'e.g. gpt-4o-mini',
   'config.skillsDir': 'Skills Directory',
   'config.skillsDir.placeholder': 'e.g., C:\\Users\\name\\.codex\\skills',
   'config.skillsDir.hint': 'Path to directory containing skill subfolders with SKILL.md files.',

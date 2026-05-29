@@ -33,24 +33,8 @@ function ensureConfigTemplate(): void {
   }
   const template = {
     llmProfiles: {
-      defaultProfileId: 'default',
-      profiles: [
-        {
-          id: 'default',
-          name: 'Default Profile',
-          provider: 'anthropic',
-          apiKey: '',
-          apiBase: 'https://api.minimaxi.com',
-          defaultModel: 'MiniMax-M2.7-highspeed',
-          maxOutputTokens: 32768,
-          enabled: true,
-          capabilities: {
-            modelDiscovery: true,
-            reasoningEffort: false,
-            thinkingBudget: true,
-          },
-        },
-      ],
+      defaultProfileId: '',
+      profiles: [],
     },
     agent: {
       maxSteps: 100,

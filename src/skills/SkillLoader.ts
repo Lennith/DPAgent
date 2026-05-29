@@ -9,7 +9,7 @@ export interface SkillCatalogEntry {
   description: string;
   path: string;
   skillDir?: string;
-  source: 'global' | 'agent' | 'workspace' | 'team_pack' | 'workspace_pack';
+  source: 'native' | 'global' | 'agent' | 'workspace' | 'team_pack' | 'workspace_pack';
   content: string;
   metadata?: Record<string, unknown>;
   tags: string[];
@@ -38,8 +38,10 @@ export interface SkillPromptCapabilities {
 }
 
 const SKILL_SOURCE_BOUNDARY_LINES = [
-  'Skill source boundaries: workspace skills are project-local, agent skills are bundled with the selected agent profile, and global skills are shared runtime skills.',
+  'Skill source boundaries: workspace skills are project-local, agent skills are bundled with the selected agent profile, global skills are shared runtime skills, and native skills are package-bundled read-only baselines.',
 ];
+
+const DEFAULT_NATIVE_SKILLS_DIR = path.resolve(__dirname, '..', '..', 'skills');
 
 function compareVersionStrings(left: string, right: string): number {
   return left.localeCompare(right, undefined, {
@@ -50,6 +52,7 @@ function compareVersionStrings(left: string, right: string): number {
 
 export class SkillLoader {
   private skillsDir: string | null = null;
+  private nativeSkills: SkillCatalogEntry[] = this.scanDirectoryForSkills(DEFAULT_NATIVE_SKILLS_DIR, 'native');
   private globalSkills: SkillCatalogEntry[] = [];
   private supplementalDirectoriesResolver?: (workspaceDir?: string) => SupplementalSkillDirectory[];
 
@@ -75,6 +78,7 @@ export class SkillLoader {
     workspaceDir?: string;
     agentSkillDir?: string;
     includeGlobalSkills?: boolean;
+    includeNativeSkills?: boolean;
     includeWorkspaceSkills?: boolean;
     includePackSkills?: boolean;
     toolsetName?: string;
@@ -97,6 +101,7 @@ export class SkillLoader {
           )
         : [];
     const all = [
+      ...(options.includeNativeSkills === false ? [] : this.nativeSkills),
       ...(options.includeGlobalSkills === false ? [] : this.globalSkills),
       ...supplementalSkills,
       ...agentSkills,
@@ -125,6 +130,7 @@ export class SkillLoader {
       workspaceDir?: string;
       agentSkillDir?: string;
       includeGlobalSkills?: boolean;
+      includeNativeSkills?: boolean;
       includeWorkspaceSkills?: boolean;
       includePackSkills?: boolean;
       toolsetName?: string;
@@ -139,10 +145,11 @@ export class SkillLoader {
     return [...this.globalSkills];
   }
 
-  getSkillCounts(): { global: number; total: number } {
+  getSkillCounts(): { native: number; global: number; total: number } {
     return {
+      native: this.nativeSkills.length,
       global: this.globalSkills.length,
-      total: this.globalSkills.length,
+      total: this.nativeSkills.length + this.globalSkills.length,
     };
   }
 
@@ -151,6 +158,7 @@ export class SkillLoader {
       workspaceDir?: string;
       agentSkillDir?: string;
       includeGlobalSkills?: boolean;
+      includeNativeSkills?: boolean;
       includeWorkspaceSkills?: boolean;
       includePackSkills?: boolean;
       toolsetName?: string;
@@ -238,7 +246,7 @@ export class SkillLoader {
 
   private scanDirectoryForSkills(
     rootDir: string,
-    source: 'global' | 'agent' | 'workspace' | 'team_pack' | 'workspace_pack',
+    source: SkillCatalogEntry['source'],
     injectedMetadata: {
       packName?: string;
       packVersion?: string;
@@ -365,6 +373,8 @@ export class SkillLoader {
 
   private getSourcePriority(source: SkillCatalogEntry['source']): number {
     switch (source) {
+      case 'native':
+        return 0;
       case 'global':
         return 1;
       case 'team_pack':

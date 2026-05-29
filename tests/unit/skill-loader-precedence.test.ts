@@ -38,10 +38,12 @@ function createHarness(): {
   const teamPackNewerDir = path.join(tempDir, 'packs', 'team-new');
   const workspacePackDir = path.join(tempDir, 'packs', 'workspace');
   writeSkill(path.join(globalSkillsDir, 'release-helper'), 'release-helper', 'global release helper');
+  writeSkill(path.join(globalSkillsDir, 'web-access'), 'web-access', 'global web access override');
   writeSkill(path.join(teamPackOlderDir, 'release-helper'), 'release-helper', 'team pack older helper');
   writeSkill(path.join(teamPackNewerDir, 'release-helper'), 'release-helper', 'team pack newer helper');
   writeSkill(path.join(workspacePackDir, 'release-helper'), 'release-helper', 'workspace pack helper');
   writeSkill(path.join(workspaceDir, 'skills', 'release-helper'), 'release-helper', 'workspace local helper');
+  writeSkill(path.join(workspaceDir, 'skills', 'web-access'), 'web-access', 'workspace web access override');
   return {
     tempDir,
     workspaceDir,
@@ -132,6 +134,32 @@ function runAll(): void {
     assert.equal(resolvedTeamPack?.source, 'team_pack');
     assert.equal(resolvedTeamPack?.packName, 'team-pack-new');
     assert.equal(resolvedTeamPack?.packVersion, '2');
+
+    const nativeOnlyLoader = new SkillLoader();
+    const nativeWebAccess = nativeOnlyLoader.getSkillByName('web-access', {
+      toolsetName: 'windows-dev',
+    });
+    assert.ok(nativeWebAccess);
+    assert.equal(nativeWebAccess?.source, 'native');
+
+    const globalOverrideLoader = new SkillLoader();
+    globalOverrideLoader.loadCodexSkills(harness.globalSkillsDir);
+    const globalWebAccess = globalOverrideLoader.getSkillByName('web-access', {
+      toolsetName: 'windows-dev',
+    });
+    assert.ok(globalWebAccess);
+    assert.equal(globalWebAccess?.source, 'global');
+    assert.equal(globalWebAccess?.description, 'global web access override');
+
+    writeSkill(path.join(harness.workspaceDir, 'skills', 'web-access'), 'web-access', 'workspace web access override');
+    const workspaceWebAccess = globalOverrideLoader.getSkillByName('web-access', {
+      workspaceDir: harness.workspaceDir,
+      includeWorkspaceSkills: true,
+      toolsetName: 'windows-dev',
+    });
+    assert.ok(workspaceWebAccess);
+    assert.equal(workspaceWebAccess?.source, 'workspace');
+    assert.equal(workspaceWebAccess?.description, 'workspace web access override');
 
     console.log('skill-loader-precedence tests passed');
   } finally {

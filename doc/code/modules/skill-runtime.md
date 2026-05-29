@@ -8,11 +8,12 @@ write history, rollback, pack publication, and auto-generated skill governance.
 ## Source Paths
 - `src/skills/`
 - `src/tools/SkillTools.ts`
+- `skills/`
 
 ## Key Files
 - `src/skills/SkillLoader.ts`: discovers skills from the filesystem, resolves
-  precedence across workspace/global/user scopes, and produces prompt catalog
-  entries for injection into system prompts.
+  precedence across native/global/pack/agent/workspace scopes, and produces
+  prompt catalog entries for injection into system prompts.
 - `src/skills/SkillWriteStore.ts`: manages applied skill write records,
   generated-suggestion state, and versioned storage.
 - `src/skills/SkillPackStore.ts`: skill pack publication, activation, and
@@ -36,10 +37,14 @@ write history, rollback, pack publication, and auto-generated skill governance.
 ## Runtime Contracts
 Model-callable `skill_manage` create/update writes are applied immediately as
 approved skills. The runtime does not expose a pending skill approval queue.
-Skill loading precedence: workspace overrides global overrides user. Manual
+Package-native skills under the repository/package `skills/` directory are
+read-only baselines visible to all sessions and selected agents without
+`agent.skillsDir` configuration. Skill loading precedence is:
+workspace > agent > workspace_pack > team_pack > global > native. Manual
 auto-generated skill governance only touches Skill Manager generated workspace
-skills under the selected workspace's `skills/` directory; global skills,
-handwritten workspace skills, and pack skills are not in that governance scope.
+skills under the selected workspace's `skills/` directory; native skills, global
+skills, handwritten workspace skills, and pack skills are not in that governance
+scope.
 Pack publication is atomic and versioned.
 
 ## Edit Guidance

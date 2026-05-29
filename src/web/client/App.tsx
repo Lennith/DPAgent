@@ -26,6 +26,7 @@ import { copyShareUrlToClipboard } from './share-copy-feedback.js';
 import {
   createSessionShare,
   fetchSessionShareStatus,
+  forkSession,
   revokeSessionShare,
 } from './session-rest-api.js';
 
@@ -389,6 +390,28 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
     }
   }, [addToast, currentSessionId, isSharedMode, shareStatusBySession]);
 
+  const handleForkSession = useCallback(async () => {
+    if (!currentSessionId || isSharedMode) {
+      return;
+    }
+    try {
+      const created = await forkSession(currentSessionId);
+      await sessionController.fetchSessions();
+      await sessionController.handleSelectSession(created.session.id);
+      addToast({
+        type: 'success',
+        message: t('app.session.forkSucceeded'),
+        autoDismiss: true,
+      });
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        autoDismiss: true,
+      });
+    }
+  }, [addToast, currentSessionId, isSharedMode, sessionController, t]);
+
   const handleResyncCurrentSession = useCallback(async () => {
     if (!currentSessionId) {
       return;
@@ -578,6 +601,14 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                     shareActive={Boolean(currentShareStatus?.active)}
                     shareDisabled={isSharedMode || !currentSessionId}
                     onToggleShare={isSharedMode ? undefined : handleToggleShare}
+                    forkDisabled={
+                      isSharedMode ||
+                      !currentSessionId ||
+                      sessionController.currentRuntime.isRunning ||
+                      Boolean(sessionController.currentRuntime.pendingPlanInput) ||
+                      sessionController.currentRuntime.interactionState?.mode === 'observe_only'
+                    }
+                    onForkSession={isSharedMode ? undefined : handleForkSession}
                     onResyncSession={currentSessionId ? handleResyncCurrentSession : undefined}
                     websocketConnected={isConnected}
                     sendWebSocket={send}

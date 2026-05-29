@@ -37,7 +37,7 @@ node scripts/run.js apply --json @payload.json --confirm yes --output json
       "llmModel": "novel-model",
       "reasoningPreset": "medium",
       "toolsetName": "novelist-tools",
-      "allowedTools": ["read_file", "web_search"],
+      "allowedTools": ["read_file", "web_fetch"],
       "maxSteps": 12,
       "timeoutMs": 180000,
       "exposeAsSubagent": true

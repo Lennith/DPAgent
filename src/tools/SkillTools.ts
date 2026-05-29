@@ -173,9 +173,9 @@ export class SkillManageTool extends Tool {
   get description(): string {
     return [
       'Create or update an approved skill immediately when a verified, reusable workflow should be captured or revised after user correction or new evidence.',
-      'Workspace skills are project-local; agent skills are bundled with the selected agent profile and are read as approved references; global skills are shared runtime skills.',
+      'Workspace skills are project-local; agent skills are bundled with the selected agent profile and are read as approved references; global skills are shared runtime skills; native skills are package-bundled read-only baselines.',
       'Use target="workspace" for project-local skills and target="global" only for reusable skills that should become shared runtime skills.',
-      'This tool does not edit selected-agent bundled skills directly.',
+      'This tool does not edit selected-agent bundled skills or native skills directly.',
       'Use this for non-trivial methods worth reusing; skip simple one-off tasks, temporary workarounds, raw facts, and one-time outputs.',
       'This tool applies create/update writes directly; broader lifecycle actions such as removal, rollback, pack publication, and governance review are handled outside this runtime tool.',
     ].join(' ');
@@ -204,7 +204,7 @@ export class SkillManageTool extends Tool {
         target: {
           type: 'string',
           enum: ['workspace', 'global'],
-          description: 'Write target location. workspace means project-local; global means shared runtime skills. Defaults to workspace when available. Agent-bundled skills are not a writable target here.',
+          description: 'Write target location. workspace means project-local; global means shared runtime skills. Defaults to workspace when available. Agent-bundled and native skills are not writable targets here.',
         },
       },
       required: ['action'],

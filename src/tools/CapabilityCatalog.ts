@@ -23,7 +23,6 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
       'file_glob',
       'file_grep',
       'file_download',
-      'web_search',
       'web_fetch',
       'shell_exec',
       'note',
@@ -71,7 +70,7 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
   },
   {
     name: 'research',
-    description: 'Windows development toolset plus web search and fetch.',
+    description: 'Windows development toolset plus web fetch for known URLs.',
     capabilities: [
       'file_read',
       'tool_result_read',
@@ -90,7 +89,6 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
       'session_search',
       'todo_manage',
       'automation_manage',
-      'web_search',
       'web_fetch',
       'plan_request_user_input',
       'plan_finalize',

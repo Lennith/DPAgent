@@ -57,6 +57,8 @@ interface ChatInputProps {
   shareActive?: boolean;
   shareDisabled?: boolean;
   onToggleShare?: () => void;
+  forkDisabled?: boolean;
+  onForkSession?: () => void;
   showAutoLoopControl?: boolean;
   displayFilters?: ChatDisplayFilters;
   onToggleDisplayFilter?: (key: keyof ChatDisplayFilters) => void;
@@ -92,6 +94,8 @@ export function ChatInput({
   shareActive = false,
   shareDisabled = false,
   onToggleShare,
+  forkDisabled = false,
+  onForkSession,
   showAutoLoopControl = true,
   displayFilters,
   onToggleDisplayFilter,
@@ -486,6 +490,8 @@ export function ChatInput({
                   shareActive={shareActive}
                   shareDisabled={shareDisabled}
                   onToggleShare={onToggleShare}
+                  forkDisabled={forkDisabled}
+                  onForkSession={onForkSession}
                 />
               </div>
             )}

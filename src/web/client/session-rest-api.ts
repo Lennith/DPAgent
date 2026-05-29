@@ -83,6 +83,15 @@ export async function createSessionShare(sessionId: string): Promise<{ url: stri
   return readStrictJsonResponse<{ url: string; share: { active: boolean; expiresAt?: string } }>(response);
 }
 
+export async function forkSession(sessionId: string): Promise<{ session: SessionInfo }> {
+  const response = await fetch(`/api/sessions/${sessionId}/fork`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  return readStrictJsonResponse<{ session: SessionInfo }>(response);
+}
+
 export async function revokeSessionShare(sessionId: string): Promise<{ active: boolean }> {
   const response = await fetch(`/api/sessions/${sessionId}/share`, { method: 'DELETE' });
   return readStrictJsonResponse<{ active: boolean }>(response);

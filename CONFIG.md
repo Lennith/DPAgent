@@ -14,9 +14,13 @@ Copy-Item config.example.yaml config.yaml
 
 ## Safe Default
 
-The example and runtime defaults use a conservative posture:
+The example and runtime defaults use a conservative setup-first posture:
 
 ```yaml
+llmProfiles:
+  defaultProfileId: ''
+  profiles: []
+
 agent:
   workspaceDir: ./workspace
   contextDir: ./contexts
@@ -39,13 +43,19 @@ remoteAccessAuth:
 
 `windows-safe` is read-heavy. It allows file read/glob/grep, tool result read, context, memory, session search, Todo, skill catalog, and plan input/finalization. It does not expose shell, write/edit, web, MCP unknown tools, file download, skill writes, automation scheduling, or subagent delegation.
 
+## LLM Profiles
+
+Create a provider profile from Web Settings before running chat, automation, or subagents. The package no longer ships a runnable default provider/model profile.
+
+Do not commit real API keys. Prefer environment-specific local config files or secret managers for shared machines.
+
 ## Opt-In Toolsets
 
 Use explicit toolsets when the workspace and prompt are trusted:
 
 - `windows-safe`: default read-heavy mode.
 - `windows-dev`: adds file write/edit, shell, skill writes, subagents, automation, and file download.
-- `research`: adds web search/fetch to the development toolset.
+- `research`: adds web fetch to the development toolset.
 - `full-access`: hidden escape hatch for trusted maintainers; disables workspace sandbox checks and allows unknown MCP tools.
 
 To opt in for local development:
@@ -60,24 +70,11 @@ tools:
 
 Do not enable `full-access` in shared examples or default project configs.
 
-## LLM Profiles
+## Web Access
 
-Configure at least one profile:
+`enableWeb` registers the built-in `web_fetch` tool for known URL retrieval. It does not register a default search tool.
 
-```yaml
-llmProfiles:
-  defaultProfileId: default
-  profiles:
-    - id: default
-      name: Default Profile
-      provider: anthropic
-      apiKey: YOUR_API_KEY
-      apiBase: https://api.minimaxi.com
-      defaultModel: MiniMax-M2.7-highspeed
-      maxOutputTokens: 32768
-```
-
-Do not commit real API keys. Prefer environment-specific local config files or secret managers for shared machines.
+The package includes the read-only native `web-access` skill as a strategy guide for search and webpage retrieval tasks.
 
 ## MCP
 
@@ -85,13 +82,15 @@ MCP is disabled unless both `mcp.enabled: true` and at least one server are conf
 
 ```yaml
 mcp:
-  enabled: true
-  servers:
-    - name: example-mcp
-      type: stdio
-      command: npx
-      args: ["example-mcp-server"]
+  enabled: false
+  connectTimeout: 10
+  executeTimeout: 60
+  servers: []
 ```
+
+When `enabled: false` or `servers: []`, MCP tools are not registered. DPAgent does not inject a default Web MCP server; any MCP server must be explicitly configured.
+
+Removed legacy settings such as `session_note`, `enableNote`, `memoryWriteMode`, `skillWriteMode`, old `dpagent.yaml`, and old `history_message_*.jsonl` semantics are not current configuration contracts.
 
 ## Remote Access
 

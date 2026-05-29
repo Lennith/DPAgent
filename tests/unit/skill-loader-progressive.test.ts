@@ -130,6 +130,8 @@ function runAll(): void {
     assert.match(prompt, /workspace skills are project-local/i);
     assert.match(prompt, /agent skills are bundled with the selected agent profile/i);
     assert.match(prompt, /global skills are shared/i);
+    assert.match(prompt, /native skills are package-bundled read-only baselines/i);
+    assert.match(prompt, /web-access/);
     assert.match(prompt, /skill_manage/);
     assert.equal(prompt.includes('Detailed PowerShell body.'), false);
     assert.equal(prompt.includes('Body with detailed release steps'), false);
@@ -147,6 +149,7 @@ function runAll(): void {
     assert.match(readOnlyPrompt, /Approved skills are available as on-demand references\./);
     assert.match(readOnlyPrompt, /workspace skills are project-local/i);
     assert.match(readOnlyPrompt, /agent skills are bundled with the selected agent profile/i);
+    assert.match(readOnlyPrompt, /native skills are package-bundled read-only baselines/i);
     assert.doesNotMatch(readOnlyPrompt, /\bskill_manage\b|create draft|\bapprove\b/i);
 
     const skill = loader.getSkillByName('release-helper', {
@@ -203,15 +206,16 @@ function runAll(): void {
     assert.equal(agentOnlyCatalog.some((entry) => entry.name === 'release-helper'), true);
     assert.equal(agentOnlyCatalog.some((entry) => entry.name === 'coding-only'), false);
 
-    const emptyLoader = new SkillLoader();
-    const emptyReadOnlyPrompt = emptyLoader.generateSkillCatalogPrompt({
+    const nativeOnlyLoader = new SkillLoader();
+    const nativeOnlyReadOnlyPrompt = nativeOnlyLoader.generateSkillCatalogPrompt({
       capabilities: {
         canListOrViewSkills: true,
         canManageSkills: false,
       },
     });
-    assert.match(emptyReadOnlyPrompt, /No approved skills are currently available\./);
-    assert.doesNotMatch(emptyReadOnlyPrompt, /skill_manage/i);
+    assert.match(nativeOnlyReadOnlyPrompt, /Approved skills are available as on-demand references\./);
+    assert.match(nativeOnlyReadOnlyPrompt, /web-access/);
+    assert.doesNotMatch(nativeOnlyReadOnlyPrompt, /skill_manage/i);
 
     console.log('skill-loader-progressive tests passed');
   } finally {
