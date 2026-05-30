@@ -99,6 +99,9 @@ promote a branch to a normal session. Promotion preserves transcript, workspace,
 LLM selection, and Arena provenance, but it does not select that branch as the
 winner and does not apply its changes to the source workspace.
 
+While hidden, branch transcripts remain readable only through the Arena branch
+detail surface. Normal session list/detail routes still hide unpromoted branches.
+
 ### Arena Submission
 A branch completes by calling the Arena submission tool. The submission includes
 the final answer or implementation summary, evidence, changed-file summary where
@@ -240,14 +243,16 @@ Arena is exposed beside Share and Fork. The button is disabled under the same
 entry-rule constraints that prevent Arena start.
 
 When the source session is Arena-locked, the main panel becomes the Arena panel.
-The normal composer is hidden. The panel shows status, source session, entry
-type, lock notice, and actions for Pause or Resume, Judge now, Close Arena, and
-Apply Proposal when available.
+The normal composer is hidden. The panel shows compact status, contestant
+monitoring, and actions for Pause or Resume, Judge now, Close Arena, and Apply
+Proposal when available. Source-session history stays available through a
+read-only source-history drawer or mobile sheet.
 
-Desktop layout prioritizes contestant cards:
+Desktop layout prioritizes contestant cards and the selected branch transcript:
 
 - top status and action bar
-- two-by-two contestant card grid
+- contestant card list
+- selected branch log, submission, and files
 - judge panel
 - proposal panel
 - audit timeline
@@ -255,6 +260,7 @@ Desktop layout prioritizes contestant cards:
 Mobile layout uses one-column cards and tabs:
 
 - Branches
+- Detail
 - Judge
 - Proposal
 - Timeline

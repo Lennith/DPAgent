@@ -45,14 +45,14 @@ export interface ArenaConfig {
 
 export interface ArenaWorkspaceSnapshot {
   sourceWorkspaceDir?: string;
-  strategy?: 'git_worktree' | 'directory_copy' | 'answer_only';
+  strategy?: 'git_worktree' | 'directory_copy' | 'answer_only' | 'session_only';
   dirtyCopied?: boolean;
   capturedAt: string;
 }
 
 export interface ArenaBranchWorkspaceSnapshot {
   workspaceDir: string;
-  strategy: 'git_worktree' | 'directory_copy' | 'answer_only';
+  strategy: 'git_worktree' | 'directory_copy' | 'answer_only' | 'session_only';
   dirtyCopied: boolean;
   capturedAt: string;
 }

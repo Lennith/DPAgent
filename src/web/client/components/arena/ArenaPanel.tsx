@@ -1,12 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type {
+  ArenaBranchDetailView,
   ArenaConfigView,
-  ArenaModeView,
   ArenaRunView,
+  ArenaBranchView,
   LlmProfilesConfigView,
+  SessionDetail,
   SessionLlmSelectionView,
 } from '../../app-shell-types.js';
+import type { Message } from '../../chat-types.js';
+import { projectSessionMessages } from '../../chat-message-projection.js';
+import { fetchArenaBranchDetail } from '../../session-rest-api.js';
 import { useI18n } from '../../i18n/index.js';
+import { MessageItem } from '../chat/MessageItem.js';
+import type { ChatDisplayFilters } from '../chat/chat-display-filters.js';
 import type { RequestConfirm } from '../common/ConfirmDialog.js';
 import { useThemeConfig } from '../providers/ThemeProvider.js';
 
@@ -24,6 +31,7 @@ interface ArenaPanelProps {
   onSelectWinner: (branchId: string) => void | Promise<void>;
   onPromoteBranch: (branchId: string) => void | Promise<void>;
   requestConfirm?: RequestConfirm;
+  sourceMessages?: Message[];
 }
 
 interface ArenaConfigDialogProps {
@@ -32,10 +40,11 @@ interface ArenaConfigDialogProps {
   currentSelection?: SessionLlmSelectionView;
   inheritedConfig?: ArenaConfigView | null;
   onCancel: () => void;
-  onCreate: (input: { mode: ArenaModeView; prompt: string; config: ArenaConfigView }) => void | Promise<void>;
+  onCreate: (input: { prompt: string; config: ArenaConfigView }) => void | Promise<void>;
 }
 
-type MobileArenaTab = 'branches' | 'judge' | 'proposal' | 'timeline';
+type MobileArenaTab = 'branches' | 'detail' | 'judge' | 'proposal' | 'timeline';
+type BranchDetailTab = 'log' | 'submission' | 'files';
 
 const REASONING_PRESETS: Array<SessionLlmSelectionView['reasoningPreset']> = [
   'off',
@@ -45,6 +54,12 @@ const REASONING_PRESETS: Array<SessionLlmSelectionView['reasoningPreset']> = [
   'xhigh',
   'max',
 ];
+
+const ARENA_TRANSCRIPT_FILTERS: ChatDisplayFilters = {
+  showThinking: false,
+  showToolCall: false,
+  showToolResult: false,
+};
 
 function cloneSelection(selection: SessionLlmSelectionView): SessionLlmSelectionView {
   return { ...selection, updatedAt: new Date().toISOString() };
@@ -88,7 +103,6 @@ export function ArenaConfigDialog({
   const theme = useThemeConfig();
   const { t } = useI18n();
   const initialSelection = useMemo(() => defaultSelection(llmProfiles, currentSelection), [currentSelection, llmProfiles]);
-  const [mode, setMode] = useState<ArenaModeView>('answer');
   const [prompt, setPrompt] = useState('');
   const [contestants, setContestants] = useState<ArenaConfigView['contestants']>([]);
   const [judge, setJudge] = useState<ArenaConfigView['judge'] | null>(null);
@@ -108,7 +122,6 @@ export function ArenaConfigDialog({
         : { llmSelection: cloneSelection(initialSelection) }
     );
     setPrompt('');
-    setMode('answer');
   }, [inheritedConfig, initialSelection, open]);
 
   if (!open || !initialSelection) {
@@ -156,22 +169,6 @@ export function ArenaConfigDialog({
           <button className="rounded-full border px-3 py-1 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }} onClick={onCancel}>
             {t('common.cancel')}
           </button>
-        </div>
-        <div className="mb-4 flex flex-wrap gap-2">
-          {(['answer', 'implementation'] as ArenaModeView[]).map((item) => (
-            <button
-              key={item}
-              type="button"
-              className="rounded-full border px-3 py-1.5 text-xs font-semibold"
-              style={{
-                borderColor: mode === item ? theme.colors.primary.DEFAULT : theme.colors.border.DEFAULT,
-                color: mode === item ? theme.colors.primary.DEFAULT : theme.colors.text.secondary,
-              }}
-              onClick={() => setMode(item)}
-            >
-              {t(`app.arena.mode.${item}` as never)}
-            </button>
-          ))}
         </div>
         <textarea
           className="mb-4 min-h-[92px] w-full rounded-xl border bg-transparent p-3 text-sm outline-none"
@@ -300,12 +297,76 @@ export function ArenaConfigDialog({
           <button
             className="rounded-full px-4 py-2 text-sm font-semibold text-white"
             style={{ backgroundColor: theme.colors.primary.DEFAULT }}
-            onClick={() => onCreate({ mode, prompt, config: { contestants: effectiveContestants, judge: effectiveJudge } })}
+            onClick={() => onCreate({ prompt, config: { contestants: effectiveContestants, judge: effectiveJudge } })}
           >
             {t('app.arena.create')}
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function branchStatusTone(
+  theme: ReturnType<typeof useThemeConfig>,
+  status: ArenaBranchView['status']
+): { bg: string; color: string; border: string } {
+  if (status === 'submitted' || status === 'promoted') {
+    return {
+      bg: `${theme.colors.toolResult.success.bg}`,
+      color: theme.colors.toolResult.success.text,
+      border: theme.colors.toolResult.success.border,
+    };
+  }
+  if (status === 'failed' || status === 'blocked' || status === 'cancelled') {
+    return {
+      bg: theme.colors.toolResult.error.bg,
+      color: theme.colors.toolResult.error.text,
+      border: theme.colors.toolResult.error.border,
+    };
+  }
+  return {
+    bg: `${theme.colors.primary.DEFAULT}18`,
+    color: theme.colors.primary.DEFAULT,
+    border: theme.colors.border.DEFAULT,
+  };
+}
+
+function formatShortTimestamp(value: string | undefined): string {
+  if (!value) {
+    return '';
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    return value;
+  }
+  return new Date(parsed).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function projectArenaBranchMessages(detail: ArenaBranchDetailView | undefined): Message[] {
+  if (!detail?.messages?.length) {
+    return [];
+  }
+  return projectSessionMessages(detail.branch.sessionId ?? detail.branch.id, {
+    messages: detail.messages,
+    runtimeErrors: detail.runtimeErrors ?? [],
+  } as SessionDetail);
+}
+
+function ReadOnlyTranscript({ messages, emptyLabel }: { messages: Message[]; emptyLabel: string }) {
+  const theme = useThemeConfig();
+  if (!messages.length) {
+    return (
+      <div className="rounded-lg border p-3 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }}>
+        {emptyLabel}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {messages.map((message) => (
+        <MessageItem key={message.id} message={message} displayFilters={ARENA_TRANSCRIPT_FILTERS} />
+      ))}
     </div>
   );
 }
@@ -324,18 +385,98 @@ export function ArenaPanel({
   onSelectWinner,
   onPromoteBranch,
   requestConfirm,
+  sourceMessages = [],
 }: ArenaPanelProps) {
   const theme = useThemeConfig();
   const { t } = useI18n();
   const [mobileTab, setMobileTab] = useState<MobileArenaTab>('branches');
+  const [branchDetailTab, setBranchDetailTab] = useState<BranchDetailTab>('log');
+  const [selectedByArena, setSelectedByArena] = useState<Record<string, string>>({});
+  const [sourceHistoryOpen, setSourceHistoryOpen] = useState(false);
+  const [branchDetails, setBranchDetails] = useState<Record<string, ArenaBranchDetailView>>({});
+  const [branchDetailLoadingKey, setBranchDetailLoadingKey] = useState<string | null>(null);
+  const [branchDetailErrorByKey, setBranchDetailErrorByKey] = useState<Record<string, string>>({});
+  const selectedBranchId = arena ? selectedByArena[arena.id] : undefined;
+  const fallbackBranch =
+    arena?.branches.find((branch) => branch.id === arena.winner?.branchId) ??
+    arena?.branches.find((branch) => branch.status === 'running' || branch.status === 'preparing') ??
+    arena?.branches[0] ??
+    null;
+  const selectedBranch = arena?.branches.find((branch) => branch.id === selectedBranchId) ?? fallbackBranch;
+  const selectedBranchTimeline = arena && selectedBranch
+    ? arena.timeline.filter((item) => item.branchId === selectedBranch.id)
+    : [];
+  const selectedBranchDetailKey = arena && selectedBranch ? `${arena.id}:${selectedBranch.id}` : '';
+  const selectedBranchDetail = selectedBranchDetailKey ? branchDetails[selectedBranchDetailKey] : undefined;
+  const selectedBranchMessages = useMemo(() => projectArenaBranchMessages(selectedBranchDetail), [selectedBranchDetail]);
+
+  useEffect(() => {
+    if (!arena || !fallbackBranch) {
+      return;
+    }
+    if (arena.branches.some((branch) => branch.id === selectedBranchId)) {
+      return;
+    }
+    setSelectedByArena((prev) => ({ ...prev, [arena.id]: fallbackBranch.id }));
+  }, [arena, fallbackBranch, selectedBranchId]);
+
+  useEffect(() => {
+    if (!arena || !selectedBranch) {
+      return;
+    }
+    const detailKey = `${arena.id}:${selectedBranch.id}`;
+    let cancelled = false;
+    setBranchDetailLoadingKey(detailKey);
+    setBranchDetailErrorByKey((prev) => {
+      const next = { ...prev };
+      delete next[detailKey];
+      return next;
+    });
+    void fetchArenaBranchDetail(arena.id, selectedBranch.id)
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setBranchDetails((prev) => ({ ...prev, [detailKey]: result.detail }));
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setBranchDetailErrorByKey((prev) => ({
+          ...prev,
+          [detailKey]: error instanceof Error ? error.message : String(error),
+        }));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBranchDetailLoadingKey((current) => (current === detailKey ? null : current));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [arena, selectedBranch]);
+
+  const selectBranch = (branchId: string): void => {
+    if (!arena) {
+      return;
+    }
+    setSelectedByArena((prev) => ({ ...prev, [arena.id]: branchId }));
+    setMobileTab('detail');
+  };
+
+  const arenaTerminal = !arena || arena.status === 'applied' || arena.status === 'closed';
   const canStart = arena?.status === 'draft';
   const canPause = arena?.status === 'running';
   const canResume = arena?.status === 'paused';
   const canJudge = Boolean(arena && (arena.status === 'running' || arena.status === 'paused') && arena.branches.every((branch) =>
     ['submitted', 'blocked', 'failed', 'cancelled', 'frozen', 'promoted'].includes(branch.status)
   ));
-  const canProposal = arena?.mode === 'implementation' && Boolean(arena.winner) && !arena.proposal && ['running', 'paused', 'judging'].includes(arena.status);
-  const canApply = Boolean(arena?.winner && (arena.mode === 'answer' || arena.proposal?.status === 'ready'));
+  const winnerBranch = arena?.branches.find((branch) => branch.id === arena.winner?.branchId);
+  const winnerHasWorkspace = Boolean(winnerBranch?.workspaceDir);
+  const canProposal = Boolean(arena?.winner && winnerHasWorkspace) && !arena?.proposal && Boolean(arena && ['running', 'paused', 'judging'].includes(arena.status));
+  const canApply = Boolean(!arenaTerminal && arena?.winner && (!winnerHasWorkspace || arena.proposal?.status === 'ready'));
 
   const confirmAndRun = async (title: string, body: string, action: () => void | Promise<void>): Promise<void> => {
     if (requestConfirm) {
@@ -363,37 +504,180 @@ export function ArenaPanel({
     </>
   );
 
-  const branchGrid = arena ? (
-    <div className="grid gap-3 md:grid-cols-2" data-testid="arena-branches">
+  const branchList = arena ? (
+    <div className="grid gap-2" data-testid="arena-branches">
       {arena.branches.map((branch) => (
-        <div key={branch.id} className="rounded-xl border p-3" style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.tertiary }}>
+        <button
+          key={branch.id}
+          type="button"
+          className="w-full rounded-xl border p-3 text-left transition"
+          style={{
+            borderColor: selectedBranch?.id === branch.id ? theme.colors.primary.DEFAULT : theme.colors.border.DEFAULT,
+            backgroundColor: selectedBranch?.id === branch.id ? `${theme.colors.primary.DEFAULT}10` : theme.colors.bg.tertiary,
+          }}
+          onClick={() => selectBranch(branch.id)}
+        >
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <div className="truncate text-sm font-semibold">{branch.contestant.label}</div>
+              <div className="truncate text-sm font-semibold">#{branch.index + 1} {branch.contestant.label}</div>
               <div className="truncate text-xs" style={{ color: theme.colors.text.muted }}>{branch.contestant.llmSelection.model}</div>
             </div>
-            <span className="rounded-full px-2 py-1 text-[11px]" style={{ backgroundColor: `${theme.colors.primary.DEFAULT}18`, color: theme.colors.primary.DEFAULT }}>
+            <span
+              className="rounded-full border px-2 py-1 text-[11px]"
+              style={{
+                background: branchStatusTone(theme, branch.status).bg,
+                color: branchStatusTone(theme, branch.status).color,
+                borderColor: branchStatusTone(theme, branch.status).border,
+              }}
+            >
               {branch.status}
             </span>
           </div>
-          {branch.submission && (
-            <p className="mb-2 line-clamp-3 text-xs" style={{ color: theme.colors.text.secondary }}>{branch.submission.summary}</p>
-          )}
-          <div className="flex flex-wrap gap-2">
-            {['submitted', 'blocked', 'frozen', 'promoted'].includes(branch.status) && (
-              <button className="rounded-full border px-2 py-1 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }} onClick={() => void confirmAndRun(t('app.arena.winnerConfirmTitle'), t('app.arena.winnerConfirmBody'), () => onSelectWinner(branch.id))}>
-                {arena.winner?.branchId === branch.id ? t('app.arena.winner') : t('app.arena.selectWinner')}
-              </button>
-            )}
-            {branch.sessionId && !branch.promoted && (
-              <button className="rounded-full border px-2 py-1 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }} onClick={() => void confirmAndRun(t('app.arena.promoteConfirmTitle'), t('app.arena.promoteConfirmBody'), () => onPromoteBranch(branch.id))}>
-                {t('app.arena.promote')}
-              </button>
-            )}
+          <div className="mb-2 flex flex-wrap gap-2 text-[11px]" style={{ color: theme.colors.text.muted }}>
+            <span>{branch.contestant.agentName || t('app.arena.defaultAgent')}</span>
+            {arena.winner?.branchId === branch.id && <span>{t('app.arena.winner')}</span>}
+            {branch.submission?.changedFiles?.length ? <span>{branch.submission.changedFiles.length} files</span> : null}
+            {branch.submission?.submittedAt ? <span>{formatShortTimestamp(branch.submission.submittedAt)}</span> : null}
           </div>
-        </div>
+          {branch.submission && (
+            <p className="line-clamp-2 text-xs leading-relaxed" style={{ color: theme.colors.text.secondary }}>{branch.submission.summary}</p>
+          )}
+        </button>
       ))}
     </div>
+  ) : null;
+
+  const selectedBranchActions = arena && selectedBranch ? (
+    <div className="flex flex-wrap gap-2">
+      {['submitted', 'blocked', 'frozen', 'promoted'].includes(selectedBranch.status) && (
+        <button className="rounded-full border px-3 py-1.5 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }} onClick={() => void confirmAndRun(t('app.arena.winnerConfirmTitle'), t('app.arena.winnerConfirmBody'), () => onSelectWinner(selectedBranch.id))}>
+          {arena.winner?.branchId === selectedBranch.id ? t('app.arena.winner') : t('app.arena.selectWinner')}
+        </button>
+      )}
+      {selectedBranch.sessionId && !selectedBranch.promoted && (
+        <button className="rounded-full border px-3 py-1.5 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }} onClick={() => void confirmAndRun(t('app.arena.promoteConfirmTitle'), t('app.arena.promoteConfirmBody'), () => onPromoteBranch(selectedBranch.id))}>
+          {t('app.arena.promote')}
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  const branchDetailPanel = arena && selectedBranch ? (
+    <section
+      key={`${arena.id}-${selectedBranch.id}`}
+      className="flex min-h-[360px] flex-col rounded-xl border"
+      style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.secondary }}
+      data-testid="arena-branch-detail"
+    >
+      <div className="border-b p-4" style={{ borderColor: theme.colors.border.DEFAULT }}>
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="truncate text-base font-semibold">#{selectedBranch.index + 1} {selectedBranch.contestant.label}</h3>
+            <div className="mt-1 truncate text-xs" style={{ color: theme.colors.text.muted }}>
+              {selectedBranch.contestant.llmSelection.profileId} / {selectedBranch.contestant.llmSelection.model}
+            </div>
+          </div>
+          <span
+            className="rounded-full border px-2 py-1 text-[11px]"
+            style={{
+              background: branchStatusTone(theme, selectedBranch.status).bg,
+              color: branchStatusTone(theme, selectedBranch.status).color,
+              borderColor: branchStatusTone(theme, selectedBranch.status).border,
+            }}
+          >
+            {selectedBranch.status}
+          </span>
+        </div>
+        <div className="mb-3 flex gap-2 overflow-x-auto">
+          {(['log', 'submission', 'files'] as const).map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              className="rounded-full border px-3 py-1.5 text-xs"
+              style={{
+                borderColor: branchDetailTab === tab ? theme.colors.primary.DEFAULT : theme.colors.border.DEFAULT,
+                color: branchDetailTab === tab ? theme.colors.primary.DEFAULT : theme.colors.text.secondary,
+              }}
+              onClick={() => setBranchDetailTab(tab)}
+            >
+              {t(`app.arena.branchTab.${tab}` as never)}
+            </button>
+          ))}
+        </div>
+        {selectedBranchActions}
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        {branchDetailTab === 'log' && (
+          <div className="grid gap-3 text-xs" style={{ color: theme.colors.text.secondary }}>
+            <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.tertiary }}>
+              <div>{selectedBranch.sessionId ? `${t('app.arena.session')}: ${selectedBranch.sessionId}` : t('app.arena.sessionPending')}</div>
+              {selectedBranch.workspaceDir && <div className="mt-1 truncate">{selectedBranch.workspaceDir}</div>}
+            </div>
+            {branchDetailLoadingKey === selectedBranchDetailKey && (
+              <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT }}>{t('common.loading')}</div>
+            )}
+            {branchDetailErrorByKey[selectedBranchDetailKey] && (
+              <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.toolResult.error.border }}>
+                {branchDetailErrorByKey[selectedBranchDetailKey]}
+              </div>
+            )}
+            {selectedBranchMessages.length ? (
+              <ReadOnlyTranscript messages={selectedBranchMessages} emptyLabel={t('app.arena.noBranchLog')} />
+            ) : selectedBranchTimeline.length ? (
+              selectedBranchTimeline.slice(-8).reverse().map((item) => (
+                <div key={item.id} className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT }}>
+                  <div className="mb-1 text-[11px]" style={{ color: theme.colors.text.muted }}>{formatShortTimestamp(item.createdAt)} / {item.type}</div>
+                  <div>{item.message}</div>
+                </div>
+              ))
+            ) : (
+              <ReadOnlyTranscript messages={[]} emptyLabel={t('app.arena.noBranchLog')} />
+            )}
+          </div>
+        )}
+        {branchDetailTab === 'submission' && (
+          <div className="grid gap-3 text-xs" style={{ color: theme.colors.text.secondary }}>
+            {selectedBranch.submission ? (
+              <>
+                <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT }}>
+                  <div className="mb-1 font-semibold" style={{ color: theme.colors.text.primary }}>{selectedBranch.submission.status}</div>
+                  <div className="whitespace-pre-wrap">{selectedBranch.submission.finalAnswer || selectedBranch.submission.summary}</div>
+                </div>
+                {selectedBranch.submission.evidence.length ? (
+                  <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT }}>
+                    <div className="mb-2 font-semibold" style={{ color: theme.colors.text.primary }}>{t('app.arena.evidence')}</div>
+                    <ul className="grid gap-1">
+                      {selectedBranch.submission.evidence.map((item) => <li key={item}>- {item}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
+                {selectedBranch.submission.risks?.length ? (
+                  <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT }}>
+                    <div className="mb-2 font-semibold" style={{ color: theme.colors.text.primary }}>{t('app.arena.risks')}</div>
+                    <ul className="grid gap-1">
+                      {selectedBranch.submission.risks.map((item) => <li key={item}>- {item}</li>)}
+                    </ul>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT }}>{t('app.arena.noSubmission')}</div>
+            )}
+          </div>
+        )}
+        {branchDetailTab === 'files' && (
+          <div className="grid gap-2 text-xs" style={{ color: theme.colors.text.secondary }}>
+            {selectedBranch.submission?.changedFiles?.length ? selectedBranch.submission.changedFiles.map((file) => (
+              <div key={file} className="truncate rounded-lg border px-3 py-2" style={{ borderColor: theme.colors.border.DEFAULT }}>
+                {file}
+              </div>
+            )) : (
+              <div className="rounded-lg border p-3" style={{ borderColor: theme.colors.border.DEFAULT }}>{t('app.arena.noChangedFiles')}</div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
   ) : null;
 
   const judgePanel = arena ? (
@@ -444,6 +728,16 @@ export function ArenaPanel({
             {arena ? `${arena.sourceSessionName} - ${arena.status}` : t('app.arena.noActive')}
           </div>
         </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="rounded-full border px-3 py-1.5 text-xs"
+            style={{ borderColor: theme.colors.border.DEFAULT }}
+            onClick={() => setSourceHistoryOpen(true)}
+            aria-label={t('app.arena.sourceHistory')}
+          >
+            {t('app.arena.sourceHistory')}
+          </button>
+        </div>
         <div className="hidden flex-wrap gap-2 sm:flex">
           <button className="rounded-full border px-3 py-1.5 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }} onClick={() => void onRefresh()}>
             {t('common.refresh')}
@@ -452,7 +746,7 @@ export function ArenaPanel({
         </div>
       </div>
       <div className="flex gap-2 overflow-x-auto border-b px-4 py-2 lg:hidden" style={{ borderColor: theme.colors.border.DEFAULT }}>
-        {(['branches', 'judge', 'proposal', 'timeline'] as const).map((tab) => (
+        {(['branches', 'detail', 'judge', 'proposal', 'timeline'] as const).map((tab) => (
           <button
             key={tab}
             className="rounded-full border px-3 py-1.5 text-xs"
@@ -469,11 +763,14 @@ export function ArenaPanel({
       <div className="min-h-0 flex-1 overflow-auto p-4 pb-24 sm:pb-4">
         {loading && <div className="text-sm" style={{ color: theme.colors.text.secondary }}>{t('common.loading')}</div>}
         {arena && (
-          <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+          <div className="grid min-h-0 gap-4 lg:grid-cols-[300px_minmax(360px,1fr)] 2xl:grid-cols-[300px_minmax(0,1fr)_340px]">
             <div className={mobileTab === 'branches' ? 'block' : 'hidden lg:block'}>
-              {branchGrid}
+              {branchList}
             </div>
-            <div className="grid gap-3">
+            <div className={mobileTab === 'detail' ? 'block' : 'hidden lg:block'}>
+              {branchDetailPanel}
+            </div>
+            <div className="grid gap-3 lg:col-span-2 2xl:col-span-1">
               <div className={mobileTab === 'judge' ? 'block' : 'hidden lg:block'}>{judgePanel}</div>
               <div className={mobileTab === 'proposal' ? 'block' : 'hidden lg:block'}>{proposalPanel}</div>
               <div className={mobileTab === 'timeline' ? 'block' : 'hidden lg:block'}>{timelinePanel}</div>
@@ -481,6 +778,34 @@ export function ArenaPanel({
           </div>
         )}
       </div>
+      {sourceHistoryOpen && (
+        <div className="fixed inset-0 z-[95]" data-testid="arena-source-history">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/45"
+            aria-label={t('common.close')}
+            onClick={() => setSourceHistoryOpen(false)}
+          />
+          <section
+            className="absolute inset-y-2 right-2 left-2 flex flex-col overflow-hidden rounded-2xl border shadow-xl sm:inset-y-3 sm:left-auto sm:w-[560px]"
+            style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.secondary }}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-3" style={{ borderColor: theme.colors.border.DEFAULT }}>
+              <h3 className="text-sm font-semibold" style={{ color: theme.colors.text.primary }}>{t('app.arena.sourceHistory')}</h3>
+              <button
+                className="rounded-full border px-3 py-1.5 text-xs"
+                style={{ borderColor: theme.colors.border.DEFAULT }}
+                onClick={() => setSourceHistoryOpen(false)}
+              >
+                {t('common.close')}
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              <ReadOnlyTranscript messages={sourceMessages} emptyLabel={t('app.arena.noSourceHistory')} />
+            </div>
+          </section>
+        </div>
+      )}
       <div className="flex gap-2 overflow-x-auto border-t px-4 py-3 sm:hidden" style={{ borderColor: theme.colors.border.DEFAULT, backgroundColor: theme.colors.bg.secondary }}>
         <button className="rounded-full border px-3 py-1.5 text-xs" style={{ borderColor: theme.colors.border.DEFAULT }} onClick={() => void onRefresh()}>
           {t('common.refresh')}

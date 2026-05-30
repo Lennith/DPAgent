@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import type { ArenaConfig, ArenaMode } from '../../arena/types.js';
+import type { ArenaConfig } from '../../arena/types.js';
 import { ArenaCoordinator, ArenaRouteError } from './ArenaCoordinator.js';
 import { toSessionContext, type WebServerRouteRegistrationDependencies } from './web-server-route-contracts.js';
 import { rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
@@ -35,20 +35,26 @@ function requireSessionAccess(
   return false;
 }
 
-function normalizeArenaMode(value: unknown): ArenaMode | undefined {
-  const normalized = String(value ?? '').trim().toLowerCase();
-  if (normalized === 'answer' || normalized === 'implementation') {
-    return normalized;
-  }
-  return undefined;
-}
-
 function readConfigBody(body: unknown): Partial<ArenaConfig> {
   const input = (body ?? {}) as { config?: Partial<ArenaConfig>; contestants?: ArenaConfig['contestants']; judge?: ArenaConfig['judge'] };
   return input.config ?? {
     ...(input.contestants ? { contestants: input.contestants } : {}),
     ...(input.judge ? { judge: input.judge } : {}),
   };
+}
+
+function sanitizeArenaTranscriptMessages(messages: unknown[]): unknown[] {
+  return messages
+    .filter((message): message is Record<string, unknown> => {
+      const role = String((message as { role?: unknown })?.role ?? '');
+      return role === 'user' || role === 'assistant';
+    })
+    .map((message) => ({
+      role: message.role,
+      content: String(message.content ?? ''),
+      ...(message.createdAt ? { createdAt: message.createdAt } : {}),
+      ...(message.metadata ? { metadata: message.metadata } : {}),
+    }));
 }
 
 export function registerArenaRoutes(deps: WebServerRouteRegistrationDependencies): void {
@@ -63,10 +69,9 @@ export function registerArenaRoutes(deps: WebServerRouteRegistrationDependencies
       return;
     }
     try {
-      const body = (req.body ?? {}) as { mode?: unknown; prompt?: unknown };
+      const body = (req.body ?? {}) as { prompt?: unknown };
       const run = coordinator.createArena({
         sessionId: req.params.id,
-        mode: normalizeArenaMode(body.mode),
         prompt: String(body.prompt ?? ''),
         config: readConfigBody(req.body),
       });
@@ -83,6 +88,47 @@ export function registerArenaRoutes(deps: WebServerRouteRegistrationDependencies
     try {
       const arena = coordinator.getRunForSource(req.params.id);
       res.json({ success: true, arena, lastConfig: coordinator.store.getLastConfig() });
+    } catch (error) {
+      sendArenaError(res, error);
+    }
+  });
+
+  deps.app.get('/api/arena/:arenaId/branches/:branchId/detail', (req: Request, res: Response) => {
+    try {
+      const arena = coordinator.getRun(req.params.arenaId);
+      if (!requireSessionAccess(deps, req, res, arena.sourceSessionId)) {
+        return;
+      }
+      const branch = arena.branches.find((item) => item.id === req.params.branchId);
+      if (!branch) {
+        res.status(404).json({ success: false, error: 'branch_not_found' });
+        return;
+      }
+      const branchRef = branch.sessionId ? toSessionContext(branch.sessionId) : null;
+      const branchMeta = branchRef ? deps.contextServices.getContextNamespaceMetaSafe(branchRef) : undefined;
+      if (branch.sessionId && branchMeta?.arenaBranch?.arenaId !== arena.id) {
+        res.status(404).json({ success: false, error: 'branch_not_found' });
+        return;
+      }
+      const preserveAgentProfileRefs =
+        String(req.query.preserveAgentProfileRefs ?? '').trim().toLowerCase() === 'true';
+      const messages = branchRef
+        ? deps.agent.getContextWebMessages(branchRef, {
+            preserveAgentProfileRefs,
+            includeInterruptedCheckpoints: true,
+          })
+        : [];
+      res.json({
+        success: true,
+        detail: {
+          branch,
+          workspaceDir: branch.workspaceDir,
+          activeRun: branchRef ? deps.contextServices.getActiveRunState(branchRef) : null,
+          runtimeErrors: branchMeta?.runtimeErrors ?? [],
+          timeline: arena.timeline.filter((item) => item.branchId === branch.id),
+          messages: sanitizeArenaTranscriptMessages(messages),
+        },
+      });
     } catch (error) {
       sendArenaError(res, error);
     }

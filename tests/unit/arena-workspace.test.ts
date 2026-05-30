@@ -150,15 +150,13 @@ function testGitWorkspaceUsesArenaNamingAndCopiesDirtyChanges(): void {
   }
 }
 
-function testImplementationWorkspaceRejectsMissingSourceWorkspace(): void {
+function testImplementationWorkspaceWithoutSourceFallsBackToSessionOnly(): void {
   const root = tempRoot();
   try {
     const { run, branch } = seedRun(root);
     const service = new ArenaWorkspaceService({});
-    assert.throws(
-      () => service.prepareBranchWorkspace(run, branch),
-      /source workspace is required/i
-    );
+    const result = service.prepareBranchWorkspace(run, branch);
+    assert.deepEqual(result, { workspaceDir: '', strategy: 'session_only', dirtyCopied: false });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -329,7 +327,7 @@ function run(): void {
   testAnswerArenaDoesNotCreateWorkspace();
   testNoGitWorkspaceCopiesDirtySource();
   testGitWorkspaceUsesArenaNamingAndCopiesDirtyChanges();
-  testImplementationWorkspaceRejectsMissingSourceWorkspace();
+  testImplementationWorkspaceWithoutSourceFallsBackToSessionOnly();
   testArenaBranchSessionForkCopiesContextAndWritesBranchMeta();
   testWorkspaceProposalDiffAndApplyRejectsStaleSource();
   testWorkspaceProposalDiffAndApplyCopiesWinnerFiles();

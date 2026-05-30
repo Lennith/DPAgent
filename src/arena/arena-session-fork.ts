@@ -41,7 +41,7 @@ export function forkArenaBranchSession(input: {
       name,
       arenaLock: undefined,
       workspaceDir: trimString(input.workspaceDir) || undefined,
-      toolsetName: input.run.mode === 'implementation' ? 'arena-implementation' : 'windows-safe',
+      toolsetName: trimString(input.workspaceDir) ? 'arena-implementation' : 'windows-safe',
       llmSelection: input.branch.contestant.llmSelection,
       agentInjectionState: input.branch.contestant.agentName
         ? {

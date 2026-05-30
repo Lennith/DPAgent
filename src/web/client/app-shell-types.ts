@@ -198,6 +198,15 @@ export interface ArenaBranchView {
   };
 }
 
+export interface ArenaBranchDetailView {
+  branch: ArenaBranchView;
+  workspaceDir?: string;
+  activeRun?: ActiveRunView | null;
+  runtimeErrors?: RuntimeErrorMessageView[];
+  timeline: ArenaRunView['timeline'];
+  messages: SessionDetail['messages'];
+}
+
 export interface ArenaRunView {
   id: string;
   sourceSessionId: string;

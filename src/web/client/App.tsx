@@ -35,7 +35,7 @@ import {
   postArenaBranchAction,
   revokeSessionShare,
 } from './session-rest-api.js';
-import type { ArenaConfigView, ArenaModeView, ArenaRunView } from './app-shell-types.js';
+import type { ArenaConfigView, ArenaRunView } from './app-shell-types.js';
 
 const NARROW_TOOLBAR_MEDIA = '(max-width: 1279px), (max-aspect-ratio: 11/10)';
 
@@ -504,7 +504,6 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
   }, [addToast, currentSessionId]);
 
   const handleCreateArena = useCallback(async (input: {
-    mode: ArenaModeView;
     prompt: string;
     config: ArenaConfigView;
   }) => {
@@ -753,6 +752,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                       onSelectWinner={(branchId) => runArenaAction('winner', { branchId })}
                       onPromoteBranch={(branchId) => runArenaBranchAction(branchId, 'promote')}
                       requestConfirm={confirmDialog.requestConfirmation}
+                      sourceMessages={sessionController.currentMessages}
                     />
                   ) : (
                   <ChatContainer
@@ -827,7 +827,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                   )}
                 </div>
 
-                {!isSharedMode && showSubAgentPanel && (
+                {!isSharedMode && showSubAgentPanel && !currentSessionArenaLocked && (
                   <div
                     className="right-toolbar-shell min-w-0 flex flex-col overflow-hidden rounded-[1.65rem] border"
                     style={{
@@ -859,7 +859,7 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                 )}
               </div>
 
-              {!isSharedMode && !showSubAgentPanel && (
+              {!isSharedMode && !showSubAgentPanel && !currentSessionArenaLocked && (
                 <div className="toolbar-reopen-button">
                   <button
                     type="button"

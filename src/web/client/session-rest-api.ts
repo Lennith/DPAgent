@@ -2,7 +2,7 @@ import type {
   SessionDetail,
   SessionInfo,
   ArenaConfigView,
-  ArenaModeView,
+  ArenaBranchDetailView,
   ArenaRunView,
   SessionLlmSelectionPatch,
   SessionLlmSelectionView,
@@ -97,7 +97,7 @@ export async function forkSession(sessionId: string): Promise<{ session: Session
 
 export async function createSessionArena(
   sessionId: string,
-  input: { mode: ArenaModeView; prompt: string; config?: Partial<ArenaConfigView> }
+  input: { prompt: string; config?: Partial<ArenaConfigView> }
 ): Promise<{ arena: ArenaRunView; lastConfig?: ArenaConfigView }> {
   const response = await fetch(`/api/sessions/${sessionId}/arena`, {
     method: 'POST',
@@ -110,6 +110,14 @@ export async function createSessionArena(
 export async function fetchSessionArena(sessionId: string): Promise<{ arena: ArenaRunView | null; lastConfig?: ArenaConfigView }> {
   const response = await fetch(`/api/sessions/${sessionId}/arena`);
   return readStrictJsonResponse<{ arena: ArenaRunView | null; lastConfig?: ArenaConfigView }>(response);
+}
+
+export async function fetchArenaBranchDetail(
+  arenaId: string,
+  branchId: string
+): Promise<{ detail: ArenaBranchDetailView }> {
+  const response = await fetch(`/api/arena/${arenaId}/branches/${branchId}/detail`);
+  return readStrictJsonResponse<{ detail: ArenaBranchDetailView }>(response);
 }
 
 export async function postArenaAction(arenaId: string, action: string, body: Record<string, unknown> = {}): Promise<{ arena: ArenaRunView }> {

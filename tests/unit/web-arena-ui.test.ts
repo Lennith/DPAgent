@@ -151,11 +151,43 @@ function testArenaPanelShowsLockedBranchBoardAndActions(): void {
 
   assert.match(html, /data-testid="arena-panel"/);
   assert.match(html, /data-testid="arena-branches"/);
+  assert.match(html, /data-testid="arena-branch-detail"/);
   assert.match(html, /Contestant 4/);
   assert.match(html, /Branches/);
+  assert.match(html, /Detail/);
+  assert.match(html, /Source/);
+  assert.match(html, /No log/);
   assert.match(html, /Proposal/);
   assert.match(html, /Interrupt Arena/);
   assert.doesNotMatch(html, /chat-composer-card/);
+}
+
+function testArenaPanelRequiresProposalForWorkspaceWinner(): void {
+  const html = renderWithProviders(
+    React.createElement(ArenaPanel, {
+      arena: {
+        ...arena,
+        winner: {
+          branchId: 'branch-1',
+          mode: 'manual_winner',
+          selectedAt: '2026-05-30T00:00:00.000Z',
+        },
+      },
+      onRefresh: () => undefined,
+      onStart: () => undefined,
+      onPause: () => undefined,
+      onResume: () => undefined,
+      onClose: () => undefined,
+      onJudge: () => undefined,
+      onCreateProposal: () => undefined,
+      onApply: () => undefined,
+      onSelectWinner: () => undefined,
+      onPromoteBranch: () => undefined,
+    })
+  );
+
+  assert.match(html, />Proposal</);
+  assert.doesNotMatch(html, />Apply winner</);
 }
 
 function testArenaConfigDialogHasContestantsJudgeAndNoToolset(): void {
@@ -187,6 +219,8 @@ function testArenaConfigDialogHasContestantsJudgeAndNoToolset(): void {
   assert.match(html, />Extra high</);
   assert.match(html, /Add contestant/);
   assert.doesNotMatch(html, />Toolset</);
+  assert.doesNotMatch(html, />Answer</);
+  assert.doesNotMatch(html, />Implementation</);
 }
 
 function testArenaDangerActionsUseConfirmDialog(): void {
@@ -198,9 +232,23 @@ function testArenaDangerActionsUseConfirmDialog(): void {
   assert.match(source, /closeConfirmTitle/);
 }
 
+function testArenaPanelHasReadOnlyHistoryAndBranchDetailApi(): void {
+  const panelSource = fs.readFileSync('src/web/client/components/arena/ArenaPanel.tsx', 'utf-8');
+  const apiSource = fs.readFileSync('src/web/client/session-rest-api.ts', 'utf-8');
+  assert.match(panelSource, /data-testid="arena-source-history"/);
+  assert.match(panelSource, /sourceMessages/);
+  assert.match(panelSource, /fetchArenaBranchDetail/);
+  assert.match(panelSource, /MessageItem/);
+  assert.match(panelSource, /ARENA_TRANSCRIPT_FILTERS/);
+  assert.match(panelSource, /showToolResult: false/);
+  assert.equal(apiSource.includes('branches/${branchId}/detail'), true);
+}
+
 testSessionBarPlacesArenaAfterFork();
 testSessionBarShowsDisabledArenaInShareMode();
 testArenaPanelShowsLockedBranchBoardAndActions();
+testArenaPanelRequiresProposalForWorkspaceWinner();
 testArenaConfigDialogHasContestantsJudgeAndNoToolset();
 testArenaDangerActionsUseConfirmDialog();
+testArenaPanelHasReadOnlyHistoryAndBranchDetailApi();
 console.log('web-arena-ui tests passed');

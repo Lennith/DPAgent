@@ -140,10 +140,8 @@ export class ArenaCoordinator {
       throw new ArenaRouteError(409, 'unfinished_todos', 'Session has unfinished Todo items and cannot enter Arena.');
     }
 
-    const mode = input.mode ?? 'answer';
-    if (mode === 'implementation' && !trimString(meta.workspaceDir)) {
-      throw new ArenaRouteError(409, 'workspace_required', 'Implementation Arena requires a source workspace.');
-    }
+    const mode = input.mode ?? 'implementation';
+    const sourceWorkspaceDir = trimString(meta.workspaceDir);
     const run = this.store.createDraft({
       sourceSessionId: input.sessionId,
       sourceSessionName: meta.name,
@@ -155,8 +153,8 @@ export class ArenaCoordinator {
       currentLlmSelection: getCurrentLlmSelection(this.deps, meta),
       config: input.config,
       workspaceSnapshot: {
-        sourceWorkspaceDir: meta.workspaceDir,
-        strategy: mode === 'answer' ? 'answer_only' : undefined,
+        sourceWorkspaceDir: sourceWorkspaceDir || undefined,
+        strategy: mode === 'answer' ? 'answer_only' : sourceWorkspaceDir ? undefined : 'session_only',
       },
     });
     this.lockSource(run);
@@ -289,21 +287,16 @@ export class ArenaCoordinator {
     if (isTerminalArenaStatus(run.status)) {
       throw new ArenaRouteError(409, 'arena_terminal', 'Terminal Arena state cannot be changed.');
     }
-    if (run.mode !== 'implementation') {
-      throw new ArenaRouteError(409, 'implementation_required', 'Only implementation Arena can create an apply proposal.');
-    }
     if (!run.winner) {
       throw new ArenaRouteError(409, 'winner_required', 'Select a winner before creating a proposal.');
     }
     if (run.status !== 'running' && run.status !== 'paused' && run.status !== 'judging') {
       throw new ArenaRouteError(409, 'invalid_arena_state', 'Arena cannot create a proposal in its current state.');
     }
-    const sourceWorkspaceDir = trimString(run.workspaceSnapshot?.sourceWorkspaceDir);
-    const winnerBranch = run.branches.find((branch) => branch.id === run.winner?.branchId);
-    if (!sourceWorkspaceDir || !winnerBranch?.workspaceDir) {
-      throw new ArenaRouteError(409, 'workspace_required', 'Arena proposal requires source and winner workspaces.');
+    const diff = this.resolveWinnerWorkspaceDiff(run);
+    if (!diff.sourceHash || !diff.branchHash) {
+      throw new ArenaRouteError(409, 'proposal_not_required', 'Arena proposal is not required without source and branch workspaces.');
     }
-    const diff = diffArenaWorkspaces(sourceWorkspaceDir, winnerBranch.workspaceDir);
     const proposal = {
       id: `proposal-${run.id}`,
       branchId: run.winner.branchId,
@@ -327,13 +320,17 @@ export class ArenaCoordinator {
     if (!current.winner) {
       throw new ArenaRouteError(409, 'winner_required', 'Select a winner before applying Arena result.');
     }
-    if (!current.proposal && current.mode === 'implementation') {
-      throw new ArenaRouteError(409, 'proposal_required', 'Create a proposal before applying an implementation Arena.');
+    const diff = this.resolveWinnerWorkspaceDiff(current);
+    if (!current.proposal && diff.changedFiles.length > 0) {
+      throw new ArenaRouteError(409, 'proposal_required', 'Create a proposal before applying Arena workspace changes.');
     }
     if (current.proposal && current.proposal.status !== 'ready') {
       throw new ArenaRouteError(409, 'proposal_not_ready', 'Arena proposal is not ready to apply.');
     }
-    if (current.mode === 'implementation') {
+    if (current.proposal) {
+      if (!current.proposal.sourceHash || !current.proposal.branchHash) {
+        throw new ArenaRouteError(409, 'proposal_incomplete', 'Arena proposal is missing workspace safety data.');
+      }
       this.applyImplementationWinner(current);
     }
     const run = this.store.setRunStatus(arenaId, 'applied');
@@ -398,6 +395,15 @@ export class ArenaCoordinator {
     );
   }
 
+  private resolveWinnerWorkspaceDiff(run: ArenaRun): { sourceHash?: string; branchHash?: string; changedFiles: string[] } {
+    const sourceWorkspaceDir = trimString(run.workspaceSnapshot?.sourceWorkspaceDir);
+    const winnerBranch = run.branches.find((branch) => branch.id === run.winner?.branchId);
+    if (!sourceWorkspaceDir || !winnerBranch?.workspaceDir) {
+      return { changedFiles: [] };
+    }
+    return diffArenaWorkspaces(sourceWorkspaceDir, winnerBranch.workspaceDir);
+  }
+
   private applyImplementationWinner(run: ArenaRun): void {
     const proposal = run.proposal;
     const branch = run.branches.find((item) => item.id === proposal?.branchId);
@@ -431,19 +437,20 @@ export class ArenaCoordinator {
     const workspaceDir = trimString(sourceMeta?.workspaceDir);
     const winnerBranch = run.winner?.branchId ?? 'none';
     const winner = run.branches.find((branch) => branch.id === run.winner?.branchId);
-    const summary = run.mode === 'answer'
+    const changedFiles = run.proposal?.changedFiles ?? [];
+    const summary = changedFiles.length === 0
       ? [
-          `Arena ${run.id} applied answer winner ${winnerBranch}.`,
+          `Arena ${run.id} applied winner ${winnerBranch}.`,
           winner?.submission?.finalAnswer ? `Winning answer:\n${winner.submission.finalAnswer}` : undefined,
           winner?.submission?.summary ? `Winner summary:\n${winner.submission.summary}` : undefined,
           run.winner?.reason ? `Manual selection reason:\n${run.winner.reason}` : undefined,
           run.judgeResult?.rationale ? `Judge rationale:\n${run.judgeResult.rationale}` : undefined,
         ].filter(Boolean).join('\n\n')
       : [
-          `Arena ${run.id} applied implementation winner ${winnerBranch}.`,
+          `Arena ${run.id} applied workspace changes from winner ${winnerBranch}.`,
           run.proposal?.summary,
-          run.proposal?.changedFiles?.length
-            ? `Changed files:\n${run.proposal.changedFiles.map((item) => `- ${item}`).join('\n')}`
+          changedFiles.length
+            ? `Changed files:\n${changedFiles.map((item) => `- ${item}`).join('\n')}`
             : undefined,
           run.winner?.reason ? `Manual selection reason:\n${run.winner.reason}` : undefined,
           run.judgeResult?.rationale ? `Judge rationale:\n${run.judgeResult.rationale}` : undefined,
@@ -631,7 +638,7 @@ export class ArenaCoordinator {
         llmProfileId: branch.contestant.llmSelection.profileId,
         llmModel: branch.contestant.llmSelection.model,
         reasoningPreset: branch.contestant.llmSelection.reasoningPreset,
-        toolsetName: run.mode === 'answer' ? 'windows-safe' : 'arena-implementation',
+        toolsetName: trimString(branch.workspaceDir) ? 'arena-implementation' : 'windows-safe',
       },
     }).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -658,16 +665,16 @@ export class ArenaCoordinator {
 
   private buildBranchSystemPrompt(run: ArenaRun, branch: ArenaBranch): string {
     const sourceWorkspace = trimString(run.workspaceSnapshot?.sourceWorkspaceDir) || '(none)';
-    const branchWorkspace = trimString(branch.workspaceDir) || '(answer-only)';
+    const branchWorkspace = trimString(branch.workspaceDir) || '(session-only)';
     return [
       '[ARENA_BRANCH]',
       `Arena id: ${run.id}`,
       `Branch id: ${branch.id}`,
-      `Mode: ${run.mode}`,
       `Source session: ${run.sourceSessionId}`,
       `Source workspace is read-only: ${sourceWorkspace}`,
       `Branch workspace: ${branchWorkspace}`,
-      'Do not modify the source workspace. Make any implementation changes only inside the branch workspace.',
+      'Do not modify the source workspace. If the task needs file changes, make them only inside the branch workspace.',
+      'If the task only needs an answer, leave files unchanged and submit the answer.',
       'When your loop is complete, call arena_submit_result with status complete or blocked.',
       'Do not claim the Arena is complete without calling arena_submit_result.',
       '[/ARENA_BRANCH]',

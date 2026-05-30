@@ -180,7 +180,7 @@ html, body, #root {
 }
 
 .message-width-user {
-  max-width: 33.333%;
+  max-width: 46%;
   overflow-wrap: anywhere;
 }
 

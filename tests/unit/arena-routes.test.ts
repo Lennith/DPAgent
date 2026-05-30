@@ -22,7 +22,7 @@ function createMeta(id: string, patch: Partial<ContextNamespaceMeta> = {}) {
   };
 }
 
-function createSessionRouteHarness(options: { fullAccess?: boolean } = {}) {
+function createSessionRouteHarness(options: { fullAccess?: boolean; canAccessSession?: boolean } = {}) {
   const routeHarness = createRouteAppHarness();
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dpagent-arena-routes-'));
   const sourceWorkspaceDir = path.join(tempDir, 'source-workspace');
@@ -165,7 +165,26 @@ function createSessionRouteHarness(options: { fullAccess?: boolean } = {}) {
       },
       resolveToolsetName: () => 'full-access',
       getContextMessages: () => [],
-      getContextWebMessages: () => [],
+      getContextWebMessages: (ref: ContextRef) => [
+        {
+          role: 'user',
+          content: `message for ${ref.namespace}`,
+          createdAt: '2026-05-29T00:00:03.000Z',
+        },
+        {
+          role: 'assistant',
+          content: 'visible answer',
+          createdAt: '2026-05-29T00:00:04.000Z',
+          thinking: 'hidden thinking',
+          toolCalls: [{ id: 'call-1', function: { name: 'secret_tool', arguments: { secret: true } } }],
+        },
+        {
+          role: 'tool',
+          name: 'secret_tool',
+          content: 'secret tool result',
+          createdAt: '2026-05-29T00:00:05.000Z',
+        },
+      ],
       getToolsetRegistry: () => ({ get: () => ({ name: 'windows-dev' }), list: () => [] }),
       getGovernanceAuditStore: () => ({ append: () => undefined }),
       getTodoStore: () => ({
@@ -273,7 +292,7 @@ function createSessionRouteHarness(options: { fullAccess?: boolean } = {}) {
     },
     accessServices: {
       getSharedAccessSessionId: () => null,
-      canAccessSession: () => true,
+      canAccessSession: () => options.canAccessSession ?? true,
       hasFullAccess: () => options.fullAccess ?? true,
     },
     shareServices: {
@@ -464,7 +483,7 @@ async function testArenaCreateAndStateRoutes(): Promise<void> {
     assert.equal(createRes.statusCode, 200);
     const created = (createRes.payload as any).arena;
     assert.equal(created.status, 'draft');
-    assert.equal(created.mode, 'answer');
+    assert.equal(created.mode, 'implementation');
     assert.equal(metaBySession.get('sess-open')?.arenaLock?.arenaId, created.id);
 
     const get = routeHarness.getRoutes.get('/api/sessions/:id/arena');
@@ -524,7 +543,7 @@ async function testArenaCreateAndStateRoutes(): Promise<void> {
     const proposalRes = createResponseRecorder();
     await proposal({ params: { arenaId: created.id }, body: {} }, proposalRes);
     assert.equal(proposalRes.statusCode, 409);
-    assert.equal((proposalRes.payload as any).error, 'implementation_required');
+    assert.equal((proposalRes.payload as any).error, 'winner_required');
 
     const reopen = routeHarness.postRoutes.get('/api/arena/:arenaId/branches/:branchId/reopen');
     assert.ok(reopen);
@@ -548,6 +567,69 @@ async function testArenaCreateAndStateRoutes(): Promise<void> {
     await proposal({ params: { arenaId: created.id }, body: {} }, terminalProposalRes);
     assert.equal(terminalProposalRes.statusCode, 409);
     assert.equal((terminalProposalRes.payload as any).error, 'arena_terminal');
+  } finally {
+    cleanup();
+  }
+}
+
+async function testArenaBranchDetailReadsHiddenBranchTranscript(): Promise<void> {
+  const { routeHarness, cleanup } = createSessionRouteHarness();
+  try {
+    const create = routeHarness.postRoutes.get('/api/sessions/:id/arena');
+    const start = routeHarness.postRoutes.get('/api/arena/:arenaId/start');
+    const branchDetail = routeHarness.getRoutes.get('/api/arena/:arenaId/branches/:branchId/detail');
+    const sessionDetail = routeHarness.getRoutes.get('/api/sessions/:id');
+    assert.ok(create && start && branchDetail && sessionDetail);
+
+    const createRes = createResponseRecorder();
+    await create({ params: { id: 'sess-open' }, body: { prompt: 'inspect branch log' } }, createRes);
+    const arenaId = (createRes.payload as any).arena.id;
+    const startRes = createResponseRecorder();
+    await start({ params: { arenaId }, body: {} }, startRes);
+    const branch = (startRes.payload as any).arena.branches[0];
+
+    const hiddenSessionRes = createResponseRecorder();
+    await sessionDetail({ params: { id: branch.sessionId }, query: {} }, hiddenSessionRes);
+    assert.equal(hiddenSessionRes.statusCode, 404);
+
+    const detailRes = createResponseRecorder();
+    await branchDetail({ params: { arenaId, branchId: branch.id }, query: {} }, detailRes);
+    assert.equal(detailRes.statusCode, 200);
+    const detail = (detailRes.payload as any).detail;
+    assert.equal(detail.branch.id, branch.id);
+    assert.equal(detail.messages[0].content, `message for ${branch.sessionId}`);
+    assert.equal(detail.messages[1].content, 'visible answer');
+    assert.equal(detail.messages.some((message: any) => message.role === 'tool'), false);
+    assert.equal(detail.messages.some((message: any) => message.thinking || message.toolCalls || message.toolCallId || message.name), false);
+    assert.equal(JSON.stringify(detail.messages).includes('secret tool result'), false);
+  } finally {
+    cleanup();
+  }
+}
+
+async function testArenaBranchDetailRequiresSourceAccess(): Promise<void> {
+  const { routeHarness, arenaStore, cleanup } = createSessionRouteHarness({ canAccessSession: false });
+  try {
+    const branchDetail = routeHarness.getRoutes.get('/api/arena/:arenaId/branches/:branchId/detail');
+    assert.ok(branchDetail);
+    const run = arenaStore.createDraft({
+      sourceSessionId: 'sess-open',
+      sourceSessionName: 'open',
+      sourceEventCount: 1,
+      mode: 'implementation',
+      entryType: 'normal',
+      prompt: 'inspect',
+      currentLlmSelection: {
+        profileId: 'default',
+        model: 'MiniMax-M2.5',
+        reasoningPreset: 'off',
+        updatedAt: '2026-05-29T00:00:00.000Z',
+      },
+    });
+    const res = createResponseRecorder();
+    await branchDetail({ params: { arenaId: run.id, branchId: run.branches[0].id }, query: {} }, res);
+    assert.equal(res.statusCode, 403);
+    assert.equal((res.payload as any).code, 'SHARE_SCOPE_FORBIDDEN');
   } finally {
     cleanup();
   }
@@ -639,15 +721,22 @@ async function testArenaRejectsNestedBranchSource(): Promise<void> {
   }
 }
 
-async function testImplementationArenaRequiresWorkspace(): Promise<void> {
+async function testImplementationArenaWithoutWorkspaceUsesSessionOnlyBranches(): Promise<void> {
   const { routeHarness, cleanup } = createSessionRouteHarness();
   try {
     const create = routeHarness.postRoutes.get('/api/sessions/:id/arena');
+    const start = routeHarness.postRoutes.get('/api/arena/:arenaId/start');
     assert.ok(create);
+    assert.ok(start);
     const res = createResponseRecorder();
     await create({ params: { id: 'sess-no-workspace' }, body: { mode: 'implementation' } }, res);
-    assert.equal(res.statusCode, 409);
-    assert.equal((res.payload as any).error, 'workspace_required');
+    assert.equal(res.statusCode, 200);
+    const created = (res.payload as any).arena;
+    assert.equal(created.workspaceSnapshot.strategy, 'session_only');
+    const startRes = createResponseRecorder();
+    await start({ params: { arenaId: created.id }, body: {} }, startRes);
+    assert.equal(startRes.statusCode, 200);
+    assert.equal((startRes.payload as any).arena.branches[0].workspaceSnapshot.strategy, 'session_only');
   } finally {
     cleanup();
   }
@@ -664,12 +753,13 @@ async function testImplementationProposalAndApply(): Promise<void> {
     assert.ok(create && start && winner && proposal && apply);
 
     const createRes = createResponseRecorder();
-    await create({ params: { id: 'sess-open' }, body: { mode: 'implementation', prompt: 'change readme' } }, createRes);
+    await create({ params: { id: 'sess-open' }, body: { prompt: 'change readme' } }, createRes);
     const created = (createRes.payload as any).arena;
     const startRes = createResponseRecorder();
     await start({ params: { arenaId: created.id }, body: {} }, startRes);
     const started = (startRes.payload as any).arena;
     const branch = started.branches[0];
+    assert.equal(branch.workspaceSnapshot.strategy, 'directory_copy');
     assert.equal(runCalls[0]?.agentRuntimeOverrides?.toolsetName, 'arena-implementation');
     assert.equal(metaBySession.get(branch.sessionId)?.toolsetName, 'arena-implementation');
     fs.writeFileSync(path.join(branch.workspaceDir, 'README.md'), 'winner', 'utf-8');
@@ -706,6 +796,49 @@ async function testImplementationProposalAndApply(): Promise<void> {
   }
 }
 
+async function testSessionOnlyArenaAppliesWithoutProposal(): Promise<void> {
+  const { routeHarness, arenaStore, metaBySession, cleanup } = createSessionRouteHarness();
+  try {
+    const create = routeHarness.postRoutes.get('/api/sessions/:id/arena');
+    const start = routeHarness.postRoutes.get('/api/arena/:arenaId/start');
+    const winner = routeHarness.postRoutes.get('/api/arena/:arenaId/winner');
+    const apply = routeHarness.postRoutes.get('/api/arena/:arenaId/apply');
+    assert.ok(create && start && winner && apply);
+
+    const createRes = createResponseRecorder();
+    await create({ params: { id: 'sess-no-workspace' }, body: { prompt: 'answer only' } }, createRes);
+    const created = (createRes.payload as any).arena;
+    assert.equal(created.mode, 'implementation');
+    assert.equal(created.workspaceSnapshot.strategy, 'session_only');
+
+    const startRes = createResponseRecorder();
+    await start({ params: { arenaId: created.id }, body: {} }, startRes);
+    const branch = (startRes.payload as any).arena.branches[0];
+    assert.equal(branch.workspaceSnapshot.strategy, 'session_only');
+    assert.equal(metaBySession.get(branch.sessionId)?.toolsetName, 'windows-safe');
+    arenaStore.submitBranchResult({
+      arenaId: created.id,
+      branchId: branch.id,
+      submission: {
+        status: 'complete',
+        summary: 'answer summary',
+        finalAnswer: 'answer body',
+        evidence: ['reasoned from context'],
+      },
+    });
+
+    await winner({ params: { arenaId: created.id }, body: { branchId: branch.id } }, createResponseRecorder());
+    const applyRes = createResponseRecorder();
+    await apply({ params: { arenaId: created.id }, body: {} }, applyRes);
+    assert.equal(applyRes.statusCode, 200);
+    assert.equal((applyRes.payload as any).arena.status, 'applied');
+    assert.equal((applyRes.payload as any).arena.proposal, undefined);
+    assert.equal(metaBySession.get('sess-no-workspace')?.arenaLock, undefined);
+  } finally {
+    cleanup();
+  }
+}
+
 async function testImplementationApplyRejectsStaleSource(): Promise<void> {
   const { routeHarness, arenaStore, sourceWorkspaceDir, cleanup } = createSessionRouteHarness();
   try {
@@ -733,6 +866,49 @@ async function testImplementationApplyRejectsStaleSource(): Promise<void> {
     await apply({ params: { arenaId: created.id }, body: {} }, applyRes);
     assert.equal(applyRes.statusCode, 409);
     assert.match((applyRes.payload as any).message, /changed since proposal/i);
+  } finally {
+    cleanup();
+  }
+}
+
+async function testZeroDiffProposalRejectsLateBranchChange(): Promise<void> {
+  const { routeHarness, arenaStore, cleanup } = createSessionRouteHarness();
+  try {
+    const create = routeHarness.postRoutes.get('/api/sessions/:id/arena');
+    const start = routeHarness.postRoutes.get('/api/arena/:arenaId/start');
+    const winner = routeHarness.postRoutes.get('/api/arena/:arenaId/winner');
+    const proposal = routeHarness.postRoutes.get('/api/arena/:arenaId/proposal');
+    const apply = routeHarness.postRoutes.get('/api/arena/:arenaId/apply');
+    assert.ok(create && start && winner && proposal && apply);
+
+    const createRes = createResponseRecorder();
+    await create({ params: { id: 'sess-open' }, body: { prompt: 'answer without edits' } }, createRes);
+    const created = (createRes.payload as any).arena;
+    const startRes = createResponseRecorder();
+    await start({ params: { arenaId: created.id }, body: {} }, startRes);
+    const branch = (startRes.payload as any).arena.branches[0];
+    arenaStore.submitBranchResult({
+      arenaId: created.id,
+      branchId: branch.id,
+      submission: {
+        status: 'complete',
+        summary: 'no file edits',
+        finalAnswer: 'answer',
+        evidence: ['no changed files'],
+      },
+    });
+
+    await winner({ params: { arenaId: created.id }, body: { branchId: branch.id } }, createResponseRecorder());
+    const proposalRes = createResponseRecorder();
+    await proposal({ params: { arenaId: created.id }, body: {} }, proposalRes);
+    assert.equal(proposalRes.statusCode, 200);
+    assert.deepEqual((proposalRes.payload as any).arena.proposal.changedFiles, []);
+    fs.writeFileSync(path.join(branch.workspaceDir, 'late.txt'), 'late branch change', 'utf-8');
+
+    const applyRes = createResponseRecorder();
+    await apply({ params: { arenaId: created.id }, body: {} }, applyRes);
+    assert.equal(applyRes.statusCode, 409);
+    assert.equal((applyRes.payload as any).error, 'stale_branch');
   } finally {
     cleanup();
   }
@@ -812,11 +988,15 @@ async function run(): Promise<void> {
   await testSessionProjectionAndHiddenBranches();
   await testArenaLockRejectsSessionMutations();
   await testArenaCreateAndStateRoutes();
+  await testArenaBranchDetailReadsHiddenBranchTranscript();
+  await testArenaBranchDetailRequiresSourceAccess();
   await testArenaJudgeStartsHiddenJudgeRunWithoutWinner();
   await testArenaRejectsNestedBranchSource();
-  await testImplementationArenaRequiresWorkspace();
+  await testImplementationArenaWithoutWorkspaceUsesSessionOnlyBranches();
   await testImplementationProposalAndApply();
+  await testSessionOnlyArenaAppliesWithoutProposal();
   await testImplementationApplyRejectsStaleSource();
+  await testZeroDiffProposalRejectsLateBranchChange();
   await testImplementationApplyRejectsStaleBranch();
   await testArenaMutationsRequireFullAccess();
   console.log('arena-routes tests passed');

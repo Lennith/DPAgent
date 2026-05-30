@@ -6,7 +6,7 @@ import type { ArenaBranch, ArenaRun } from './types.js';
 
 export interface ArenaBranchWorkspaceResult {
   workspaceDir: string;
-  strategy: 'git_worktree' | 'directory_copy' | 'answer_only';
+  strategy: 'git_worktree' | 'directory_copy' | 'answer_only' | 'session_only';
   dirtyCopied: boolean;
 }
 
@@ -264,11 +264,19 @@ export class ArenaWorkspaceService {
     }
     const rawSourceWorkspaceDir = trimString(this.options.sourceWorkspaceDir);
     if (!rawSourceWorkspaceDir) {
-      throw new Error('Arena source workspace is required');
+      return {
+        workspaceDir: '',
+        strategy: 'session_only',
+        dirtyCopied: false,
+      };
     }
     const sourceWorkspaceDir = path.resolve(rawSourceWorkspaceDir);
     if (!fs.existsSync(sourceWorkspaceDir)) {
-      throw new Error('Arena source workspace does not exist');
+      return {
+        workspaceDir: '',
+        strategy: 'session_only',
+        dirtyCopied: false,
+      };
     }
     const rootDir = this.resolveArenaRoot(sourceWorkspaceDir, run);
     const branchDir = path.join(
