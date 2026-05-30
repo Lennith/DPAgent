@@ -17,7 +17,8 @@ import {
   type WebServerRouteRegistrationDependencies,
 } from './web-server-route-contracts.js';
 import { createSessionNamespace } from './web-server-shared.js';
-import { rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
+import { rejectArenaLockedIfNeeded, rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
+import { buildSessionArenaRouteView, shouldHideArenaBranchSession } from './web-server-arena-view.js';
 import { webServerLogger } from '../../utils/logger.js';
 
 const DROPPED_FILE_UPLOAD_LIMIT = '64mb';
@@ -163,6 +164,11 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
     if (!resolved) {
       return;
     }
+    const meta = contextServices.getContextNamespaceMetaSafe(toSessionContext(resolved.sessionId));
+    if (meta && shouldHideArenaBranchSession(meta)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
     const turns = normalizeShareTextTurns(req.query.turns, 3);
     const messages = deps.agent.getContextMessages(toSessionContext(resolved.sessionId), {
       includeInterruptedCheckpoints: false,
@@ -184,11 +190,14 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
           .listActiveSessionRunStates()
           .map((activeRun) => [activeRun.context.namespace, activeRun])
       );
-      const persistedSessions = deps.agent
+      const persistedSessionMetas = deps.agent
         .getContextManager()
         .listNamespaces('session')
         .filter((item) => accessServices.canAccessSession(req, item.namespace))
-        .filter((item) => includeAutomation || !item.automationRun?.jobId)
+        .filter((item) => includeAutomation || !item.automationRun?.jobId);
+      const persistedIds = new Set(persistedSessionMetas.map((session) => session.namespace));
+      const persistedSessions = persistedSessionMetas
+        .filter((item) => !shouldHideArenaBranchSession(item))
         .map((item) => ({
           id: item.namespace,
           name: item.name || item.namespace,
@@ -205,13 +214,13 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
           origin: resolveSessionOrigin(item),
           llmSelection: resolveSessionLlmSelection(config, item.llmSelection),
           planningState: item.planningState ?? null,
+          arena: buildSessionArenaRouteView(item),
           activeRun: activeRunsBySession.get(item.namespace) ?? null,
           interactionState: deps.contextServices.getInteractionStateForContext({
             scope: 'session',
             namespace: item.namespace,
           }),
         }));
-      const persistedIds = new Set(persistedSessions.map((session) => session.id));
       const activeOnlySessions = [...activeRunsBySession.values()]
         .filter((activeRun) => !persistedIds.has(activeRun.context.namespace))
         .filter((activeRun) => accessServices.canAccessSession(req, activeRun.context.namespace))
@@ -251,6 +260,10 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       res.status(404).json({ error: 'Session not found' });
       return;
     }
+    if (meta && shouldHideArenaBranchSession(meta)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
     const preserveAgentProfileRefs =
       String(req.query.preserveAgentProfileRefs ?? '').trim().toLowerCase() === 'true';
     const messages = deps.agent.getContextWebMessages(ref, {
@@ -274,6 +287,7 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       }),
       llmSelection: resolveSessionLlmSelection(config, meta?.llmSelection),
       planningState: meta?.planningState ?? null,
+      arena: buildSessionArenaRouteView(meta),
       interactionState: contextServices.getInteractionStateForContext(ref),
       contextUtilization: meta?.latestContextUtilization ?? null,
       activeRun,
@@ -294,6 +308,10 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       }
       if (!accessServices.canAccessSession(req, req.params.id)) {
         res.status(403).json({ error: 'Share link cannot access this session', code: 'SHARE_SCOPE_FORBIDDEN' });
+        return;
+      }
+      const ref = toSessionContext(req.params.id);
+      if (rejectArenaLockedIfNeeded(deps, ref, res)) {
         return;
       }
       try {
@@ -330,6 +348,9 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       return;
     }
     if (rejectObserveOnlyIfNeeded(deps, ref, res)) {
+      return;
+    }
+    if (rejectArenaLockedIfNeeded(deps, ref, res)) {
       return;
     }
     if (contextServices.getActiveRunState(ref)) {
@@ -397,6 +418,10 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       res.status(404).json({ error: 'Session not found' });
       return;
     }
+    if (shouldHideArenaBranchSession(meta)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
 
     const config = deps.agent.getConfig();
     const llmSelection = resolveSessionLlmSelection(config, meta.llmSelection);
@@ -421,6 +446,9 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
     if (rejectObserveOnlyIfNeeded(deps, ref, res)) {
       return;
     }
+    if (rejectArenaLockedIfNeeded(deps, ref, res)) {
+      return;
+    }
     const nextMeta = deps.agent.updateContextNamespaceMeta(ref, {
       name: typeof name === 'string' ? name.trim() : meta.name,
     });
@@ -438,6 +466,9 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       return;
     }
     if (rejectObserveOnlyIfNeeded(deps, ref, res)) {
+      return;
+    }
+    if (rejectArenaLockedIfNeeded(deps, ref, res)) {
       return;
     }
 
@@ -492,6 +523,9 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
     if (rejectObserveOnlyIfNeeded(deps, ref, res)) {
       return;
     }
+    if (rejectArenaLockedIfNeeded(deps, ref, res)) {
+      return;
+    }
     if (!meta?.planningState || meta.planningState.state !== 'plan_drafting') {
       res.status(409).json({ success: false, error: 'Session is not in plan drafting.' });
       return;
@@ -534,6 +568,9 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
     const ref = toSessionContext(req.params.id);
     const meta = contextServices.getContextNamespaceMetaSafe(ref);
     if (rejectObserveOnlyIfNeeded(deps, ref, res)) {
+      return;
+    }
+    if (rejectArenaLockedIfNeeded(deps, ref, res)) {
       return;
     }
     if (!meta?.planningState || meta.planningState.state !== 'plan_executing') {
@@ -604,6 +641,9 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
       if (rejectObserveOnlyIfNeeded(deps, ref, res)) {
         return;
       }
+      if (rejectArenaLockedIfNeeded(deps, ref, res)) {
+        return;
+      }
       await contextServices.cleanupSessionRuntime(req.params.id);
       const success = deps.agent.deleteSessionContext(req.params.id);
       res.json({ success });
@@ -616,6 +656,11 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
     if (rejectFullAccessIfNeeded(accessServices, req, res, 'Share link cannot manage shares')) {
       return;
     }
+    const meta = contextServices.getContextNamespaceMetaSafe(toSessionContext(req.params.id));
+    if (meta && shouldHideArenaBranchSession(meta)) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
     res.json(deps.shareServices?.getSessionShareStatus(req.params.id) ?? { active: false });
   });
 
@@ -626,6 +671,11 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
     try {
       if (!deps.shareServices) {
         res.status(500).json({ error: 'Share service is unavailable' });
+        return;
+      }
+      const meta = contextServices.getContextNamespaceMetaSafe(toSessionContext(req.params.id));
+      if (meta && shouldHideArenaBranchSession(meta)) {
+        res.status(404).json({ error: 'Session not found' });
         return;
       }
       const created = deps.shareServices.createSessionShare(req.params.id);
@@ -641,6 +691,11 @@ export function registerSessionRoutes(deps: WebServerRouteRegistrationDependenci
 
   deps.app.delete('/api/sessions/:id/share', (req: Request, res: Response) => {
     if (rejectFullAccessIfNeeded(accessServices, req, res, 'Share link cannot manage shares')) {
+      return;
+    }
+    const meta = contextServices.getContextNamespaceMetaSafe(toSessionContext(req.params.id));
+    if (meta && shouldHideArenaBranchSession(meta)) {
+      res.status(404).json({ error: 'Session not found' });
       return;
     }
     res.json(deps.shareServices?.revokeSessionShare(req.params.id) ?? { active: false });

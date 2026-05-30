@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'fs';
 import * as crypto from 'crypto';
 import {
+  LLMClient,
   type LLMRuntime,
   type PreparedMessagesSnapshot,
 } from './llm/index.js';
@@ -33,6 +34,7 @@ import { SkillPackStore } from './skills/SkillPackStore.js';
 import { SkillWriteStore } from './skills/SkillWriteStore.js';
 import { readSkillVersion } from './skills/skill-markdown.js';
 import { TodoStore } from './todo/TodoStore.js';
+import { ArenaStore } from './arena/index.js';
 import { agentLogger } from './utils/logger.js';
 import { createDPAgentCoreServices } from './runtime/dpagent-core-services.js';
 import { getRuntimePlatformCapabilities } from './runtime-platform.js';
@@ -130,6 +132,7 @@ export class DPAgent {
   private subAgentManager: SubAgentManager;
   private skillLoader: SkillLoader;
   private automationStore: AutomationStore;
+  private arenaStore: ArenaStore;
   private hookRegistry?: HookRegistry;
   private hookRunner?: HookRunner;
   private skillWriteStore: SkillWriteStore;
@@ -137,6 +140,10 @@ export class DPAgent {
 
   getAutomationStore(): AutomationStore {
     return this.automationStore;
+  }
+
+  getArenaStore(): ArenaStore {
+    return this.arenaStore;
   }
 
   initHooks(workspaceDir: string): void {
@@ -289,6 +296,7 @@ export class DPAgent {
     this.runtimeDataDir = cfg.agent.runtimeDataDir ?? path.join(cfg.agent.workspaceDir, '.dpagent', 'runtime');
     this.contextDir = cfg.agent.contextDir ?? path.join(cfg.agent.workspaceDir, '.dpagent', 'contexts');
     this.automationStore = new AutomationStore(path.join(this.runtimeDataDir, 'automations'));
+    this.arenaStore = new ArenaStore(path.join(this.runtimeDataDir, 'arena'));
     this.contextUsageCalibrationStore = new ContextUsageCalibrationStore(this.runtimeDataDir);
     const coreServices = createDPAgentCoreServices({
       contextDir: this.contextDir,
@@ -367,6 +375,7 @@ export class DPAgent {
       getSessionSearchIndex: () => this.sessionSearchIndex,
       getTodoStore: () => this.todoStore,
       getAutomationStore: () => this.automationStore,
+      getArenaStore: () => this.arenaStore,
       getDownloadLinkIssuer: () => this.downloadLinkIssuer,
     });
 
@@ -599,7 +608,21 @@ export class DPAgent {
       },
       turnAgentSkillContext
     );
-    const runtimeConfig = this.llmClient.getRuntimeConfig?.() ?? resolveLlmRuntimeConfig({ llmProfiles: this.config.get().llmProfiles });
+    const turnLlmRuntime = this.resolveTurnLlmRuntime(options.agentRuntimeOverrides);
+    const turnLlmClient = turnLlmRuntime
+      ? new LLMClient({
+          apiKey: turnLlmRuntime.apiKey,
+          apiBase: turnLlmRuntime.apiBase,
+          model: turnLlmRuntime.model,
+          maxTokens: turnLlmRuntime.maxOutputTokens ?? resolveConfiguredMaxOutputTokens(turnLlmRuntime),
+          provider: turnLlmRuntime.provider,
+          llmRuntime: turnLlmRuntime,
+          onPreparedMessages: (snapshot) => {
+            void this.persistPreparedMessagesSnapshot(snapshot);
+          },
+        })
+      : this.llmClient;
+    const runtimeConfig = turnLlmClient.getRuntimeConfig?.() ?? resolveLlmRuntimeConfig({ llmProfiles: this.config.get().llmProfiles });
     const resolvedBudget = resolveContextBudget({
       config: this.config.get(),
       profileId: runtimeConfig.profileId,
@@ -608,7 +631,7 @@ export class DPAgent {
       modelRuntimeOptions: resolveModelRuntimeBudgetOptions(runtimeConfig),
     });
     const turnAgent = new Agent({
-      llmClient: this.llmClient,
+      llmClient: turnLlmClient,
       toolRegistry: turnToolRegistry,
       systemPrompt: turnSystemPrompt,
       maxSteps: options.agentRuntimeOverrides?.maxSteps ?? this.config.get().agent.maxSteps,
@@ -1123,6 +1146,30 @@ export class DPAgent {
 
   getLLMClient(): LLMRuntime | null {
     return this.llmClient;
+  }
+
+  private resolveTurnLlmRuntime(
+    overrides?: DPAgentRunOptions['agentRuntimeOverrides']
+  ): ReturnType<typeof resolveLlmRuntimeConfig> | null {
+    const overrideProfileId = String(overrides?.llmProfileId ?? '').trim();
+    const overrideModel = String(overrides?.llmModel ?? '').trim();
+    const overrideReasoning = overrides?.reasoningPreset;
+    if (!overrideProfileId && !overrideModel && !overrideReasoning) {
+      return null;
+    }
+    const currentRuntime =
+      this.llmClient?.getRuntimeConfig?.() ??
+      resolveLlmRuntimeConfig({ llmProfiles: this.config.get().llmProfiles });
+    return resolveLlmRuntimeConfig(
+      { llmProfiles: this.config.get().llmProfiles },
+      {
+        profileId: overrideProfileId || currentRuntime.profileId,
+        model: overrideModel || currentRuntime.model,
+        reasoningPreset: overrideReasoning ?? currentRuntime.reasoningPreset,
+        providerOptions: currentRuntime.providerOptions,
+        updatedAt: new Date().toISOString(),
+      }
+    );
   }
 
   getToolsetRegistry(): ToolsetRegistry {

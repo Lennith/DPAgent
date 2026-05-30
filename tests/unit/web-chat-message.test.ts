@@ -789,6 +789,71 @@ async function testPrepareChatExecutionPromptFailureEmitsErrorAndRefreshes(): Pr
   assert.match((firstMessage.data as { runId: string }).runId, /^run-/);
 }
 
+async function testPrepareChatExecutionRejectsArenaLockedSession(): Promise<void> {
+  const harness = createHarness();
+
+  harness.server.agent = {
+    getConfig: () => createTestConfig(),
+    getContextNamespaceMeta: () => undefined,
+  };
+  harness.server.getContextNamespaceMetaSafe = () => ({
+    arenaLock: {
+      arenaId: 'arena-1',
+      lockedAt: '2026-05-29T00:00:00.000Z',
+      mode: 'implementation',
+    },
+  });
+  harness.server.persistSessionRunMetadata = () => {
+    throw new Error('persistSessionRunMetadata should not run for an arena locked session');
+  };
+  harness.server.resolveUserPrompt = () => {
+    throw new Error('resolveUserPrompt should not run for an arena locked session');
+  };
+
+  const prepared = await harness.server.prepareChatExecution(harness.openSocket, {
+    prompt: 'Hello',
+    sessionId: 'sess-locked',
+  });
+
+  assert.equal(prepared, null);
+  assert.equal(harness.server.currentSessionId, null);
+  assert.deepEqual(harness.lifecycle, ['emit:error']);
+  assert.equal(harness.server.activeRunContexts.size, 0);
+  assert.equal((harness.emitted[0].data as { error: string }).error, 'arena_locked');
+  assert.equal((harness.emitted[0].data as { context: ContextRef }).context.namespace, 'sess-locked');
+}
+
+async function testPrepareChatExecutionRejectsHiddenArenaSession(): Promise<void> {
+  const harness = createHarness();
+
+  harness.server.agent = {
+    getConfig: () => createTestConfig(),
+    getContextNamespaceMeta: () => undefined,
+  };
+  harness.server.getContextNamespaceMetaSafe = () => ({
+    arenaJudge: {
+      arenaId: 'arena-1',
+      sourceSessionId: 'sess-source',
+    },
+  });
+  harness.server.persistSessionRunMetadata = () => {
+    throw new Error('persistSessionRunMetadata should not run for a hidden arena session');
+  };
+  harness.server.resolveUserPrompt = () => {
+    throw new Error('resolveUserPrompt should not run for a hidden arena session');
+  };
+
+  const prepared = await harness.server.prepareChatExecution(harness.openSocket, {
+    prompt: 'Hello',
+    sessionId: 'sess-judge',
+  });
+
+  assert.equal(prepared, null);
+  assert.deepEqual(harness.lifecycle, ['emit:error']);
+  assert.equal((harness.emitted[0].data as { error: string }).error, 'arena_hidden_session');
+  assert.equal((harness.emitted[0].data as { context: ContextRef }).context.namespace, 'sess-judge');
+}
+
 async function testPrepareChatExecutionMissingApiKeyEmitsErrorAndRefreshes(): Promise<void> {
   const harness = createHarness();
 
@@ -2610,6 +2675,98 @@ async function testPlanInputApprovalActivatesPendingPlanExactly(): Promise<void>
   }
 }
 
+async function testArenaLockedPlanInputResponseDoesNotActivatePlan(): Promise<void> {
+  const harness = createHarness();
+  const context: ContextRef = { scope: 'session', namespace: 'sess-arena-plan-lock' };
+  let meta: Record<string, unknown> = {
+    workspaceDir: 'D:\\repo',
+    arenaLock: {
+      arenaId: 'arena-locked',
+      lockedAt: '2026-05-30T00:00:00.000Z',
+      mode: 'implementation',
+    },
+    planningState: {
+      state: 'plan_drafting',
+      updatedAt: '2026-05-30T00:00:00.000Z',
+    },
+    pendingPlanInput: {
+      runId: 'run-arena-plan-lock',
+      requestId: 'req-arena-plan-lock',
+      requestedAt: '2026-05-30T00:00:00.000Z',
+      source: 'finalize_plan_approval',
+      questions: [],
+    },
+  };
+  let resolved = false;
+  const setTodoPlanCalls: unknown[] = [];
+  harness.server.agent = {
+    getConfig: () => createTestConfig(),
+    getContextNamespaceMeta: () => meta,
+    updateContextNamespaceMeta: (_context: ContextRef, patch: Record<string, unknown>) => {
+      meta = {
+        ...meta,
+        ...patch,
+      };
+    },
+    getContextManager: () => ({
+      inspectKey: () => ({ found: true, value: 'plan-approved', sourceStatus: 'pending_override' }),
+      getProjection: () => ({ keyValues: {} }),
+    }),
+    getTodoStore: () => ({
+      setTodoPlan: (input: unknown) => {
+        setTodoPlanCalls.push(input);
+        return [];
+      },
+      getProtocolState: () => ({
+        items: [],
+        unfinishedItems: [],
+        activeItem: null,
+        blockedItem: null,
+        pendingItems: [],
+        completedItems: [],
+        hasUnfinished: false,
+        allCompleted: true,
+      }),
+    }),
+  };
+  const pending = {
+    runId: 'run-arena-plan-lock',
+    context,
+    ws: harness.openSocket,
+    request: {
+      requestId: 'req-arena-plan-lock',
+      source: 'finalize_plan_approval',
+      turnId: 'turn-finalize',
+      questions: [],
+    },
+    resolve: () => {
+      resolved = true;
+    },
+    reject: () => undefined,
+  };
+  replacePendingPlanInputs(harness.server, new Map<any, any>([['run-arena-plan-lock', pending]]));
+
+  harness.server.completePlanInputResponse(
+    {
+      runId: 'run-arena-plan-lock',
+      requestId: 'req-arena-plan-lock',
+      pending,
+    },
+    [
+      {
+        id: 'plan_execution_approval',
+        selectedLabel: 'Approve execution',
+        selectedIndex: 0,
+      },
+    ]
+  );
+
+  assert.equal(resolved, false);
+  assert.equal(((meta.planningState ?? {}) as Record<string, unknown>).state, 'plan_drafting');
+  assert.equal(setTodoPlanCalls.length, 0);
+  assert.equal(getPendingPlanInputs(harness.server).has('run-arena-plan-lock'), true);
+}
+
 async function testExecutePreparedChatRunSuccessRunsAgentAndCleansUp(): Promise<void> {
   const context: ContextRef = { scope: 'session', namespace: 'sess-1' };
   const harness = createHarness([['run-1', context]]);
@@ -2840,6 +2997,8 @@ async function runAll(): Promise<void> {
   await testExecuteTrackedRunRecoverableCheckpointContinuesTodoLoop();
   await testExecuteTrackedRunRecoverableWorkspaceCheckpointContinuesAutoLoop();
   await testPrepareChatExecutionPromptFailureEmitsErrorAndRefreshes();
+  await testPrepareChatExecutionRejectsArenaLockedSession();
+  await testPrepareChatExecutionRejectsHiddenArenaSession();
   await testPrepareChatExecutionMissingApiKeyEmitsErrorAndRefreshes();
   await testPrepareChatExecutionRejectsDirtyRootRuntimeWhileRootRunActive();
   await testPrepareChatExecutionRejectsConcurrentRunInSameSession();
@@ -2868,6 +3027,7 @@ async function runAll(): Promise<void> {
   await testRunningInputNextTurnPassesSelectedAgentName();
   await testRunningInputNextTurnRequeuesWhenPrepareThrows();
   await testPlanInputApprovalActivatesPendingPlanExactly();
+  await testArenaLockedPlanInputResponseDoesNotActivatePlan();
   await testExecutePreparedChatRunSuccessRunsAgentAndCleansUp();
   await testExecutePreparedChatRunFailureEmitsErrorAndCleansUp();
   await testExecutePreparedChatRunContextVersionConflictSkipsRuntimeErrorPersistence();

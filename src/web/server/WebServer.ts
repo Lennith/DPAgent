@@ -3089,6 +3089,18 @@ export class WebServer {
       );
       return;
     }
+    if (this.isArenaLockedContext(target.pending.context)) {
+      this.emitToClient(
+        ws,
+        createPlanInputErrorMessage({
+          runId: target.runId,
+          context: target.pending.context,
+          requestId: target.requestId,
+          error: 'arena_locked',
+        })
+      );
+      return;
+    }
     const answers = this.resolvePlanInputResponseAnswers(ws, request, target);
     if (!answers) {
       return;
@@ -3154,6 +3166,12 @@ export class WebServer {
     target: ResolvedPlanInputResponseTarget,
     answers: PlanInputAnswer[]
   ): void {
+    if (this.isArenaLockedContext(target.pending.context)) {
+      webServerLogger.warn(
+        `[PlanMode] rejected plan input response because source is arena locked sessionId=${target.pending.context.namespace} runId=${target.runId} requestId=${target.requestId}`
+      );
+      return;
+    }
     const pending = this.getPendingPlanInputCoordinator().complete(target, answers, () => {
       this.clearPendingPlanInputMeta(target.pending.context, target.runId, target.requestId);
       if (target.pending.context.scope === 'session') {
@@ -3195,6 +3213,13 @@ export class WebServer {
         requestId: target.requestId,
       })
     );
+  }
+
+  private isArenaLockedContext(context: ContextRef): boolean {
+    if (context.scope !== 'session') {
+      return false;
+    }
+    return Boolean(this.getContextNamespaceMetaSafe(context)?.arenaLock);
   }
   private rejectPendingPlanInputByRunId(runId: string, reason: string): void {
     const pending = this.getPendingPlanInputCoordinator().rejectByRunId(runId, reason, (nextPending) => {

@@ -238,6 +238,8 @@ html, body, #root {
 .session-llm-control,
 .session-llm-trigger,
 .session-share-button,
+.session-arena-button,
+.session-fork-button,
 .composer-voice-button,
 .auto-loop-compact,
 .auto-loop-trigger {
@@ -443,7 +445,9 @@ html, body, #root {
   .session-llm-provider,
   .session-llm-model,
   .session-llm-reasoning,
-  .session-share-label {
+  .session-share-label,
+  .session-arena-label,
+  .session-fork-label {
     display: none !important;
   }
 
@@ -452,7 +456,9 @@ html, body, #root {
     padding-inline: 9px;
   }
 
-  .session-share-button {
+  .session-share-button,
+  .session-arena-button,
+  .session-fork-button {
     width: 32px;
     height: 32px;
     padding: 0;
@@ -596,7 +602,9 @@ html, body, #root {
     width: auto;
   }
 
-  .session-share-button {
+  .session-share-button,
+  .session-arena-button,
+  .session-fork-button {
     width: 32px;
     height: 32px;
     padding: 0;
@@ -609,7 +617,9 @@ html, body, #root {
     padding: 0;
   }
 
-  .session-share-label {
+  .session-share-label,
+  .session-arena-label,
+  .session-fork-label {
     display: none;
   }
 

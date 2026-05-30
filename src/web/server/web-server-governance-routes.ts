@@ -7,7 +7,7 @@ import {
   normalizeTodoTags,
 } from './web-server-todo-route-utils.js';
 import type { WebServerRouteRegistrationDependencies } from './web-server-route-contracts.js';
-import { rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
+import { rejectArenaLockedIfNeeded, rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
 import {
   normalizeGovernanceRouteSessionId,
   resolveGovernanceRouteContext,
@@ -49,6 +49,9 @@ export function registerGovernanceRoutes(deps: WebServerRouteRegistrationDepende
         return;
       }
       if (rejectObserveOnlyIfNeeded(deps, context, res)) {
+        return;
+      }
+      if (rejectArenaLockedIfNeeded(deps, context, res)) {
         return;
       }
       const meta = deps.agent.getContextNamespaceMeta(context);
@@ -117,6 +120,9 @@ export function registerGovernanceRoutes(deps: WebServerRouteRegistrationDepende
       const resolved = resolveGovernanceRouteSession(rawBody.sessionId);
       const { context, sessionId } = resolved;
       if (context && rejectObserveOnlyIfNeeded(deps, context, res)) {
+        return;
+      }
+      if (context && rejectArenaLockedIfNeeded(deps, context, res)) {
         return;
       }
       const resolvedWorkspaceDir = resolveGovernanceRouteWorkspace(deps, resolved);
@@ -304,6 +310,9 @@ export function registerGovernanceRoutes(deps: WebServerRouteRegistrationDepende
     if (context && rejectObserveOnlyIfNeeded(deps, context, res)) {
       return;
     }
+    if (context && rejectArenaLockedIfNeeded(deps, context, res)) {
+      return;
+    }
     const resolvedWorkspaceDir = resolveGovernanceRouteWorkspace(deps, resolved);
     try {
       const action = String(rawBody.action ?? '').trim().toLowerCase();
@@ -455,6 +464,9 @@ export function registerGovernanceRoutes(deps: WebServerRouteRegistrationDepende
     const resolved = resolveGovernanceRouteSession(req.query.sessionId);
     const { context, sessionId } = resolved;
     if (context && rejectObserveOnlyIfNeeded(deps, context, res)) {
+      return;
+    }
+    if (context && rejectArenaLockedIfNeeded(deps, context, res)) {
       return;
     }
     const resolvedWorkspaceDir = resolveGovernanceRouteWorkspace(deps, resolved);

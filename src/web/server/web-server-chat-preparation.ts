@@ -149,6 +149,15 @@ export async function prepareWebServerChatExecution(
   const sessionKey = makeAutoLoopKey(context);
   const runId = createRunId();
   const dispatcher = host.createRunScopedDispatcher(ws, context, runId, undefined, runOrigin);
+  const sourceMeta = host.getContextNamespaceMetaSafe(context);
+  if (sourceMeta?.arenaLock) {
+    dispatcher.error('arena_locked');
+    return null;
+  }
+  if (sourceMeta?.arenaJudge || (sourceMeta?.arenaBranch && sourceMeta.arenaBranch.promoted !== true)) {
+    dispatcher.error('arena_hidden_session');
+    return null;
+  }
   host.currentSessionId = context.scope === 'session' ? context.namespace : host.currentSessionId;
   const workspaceDir = host.resolveWorkspaceDirForRun(context, request.workspaceDir);
   host.persistSessionRunMetadata(context, runOrigin, workspaceDir);

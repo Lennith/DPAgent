@@ -32,6 +32,14 @@ tool-result artifacts. It does not copy active runs, pending plan input,
 share/runtime attachments, automation state, runtime errors, auto-loop state, or
 interrupted-turn files.
 
+Arena branch sessions use the same committed-session fork primitive. Branch
+metadata records `arenaBranch` provenance, contestant LLM selection, optional
+agent injection, and an isolated workspace for implementation mode. Source
+session metadata records `arenaLock` while the Arena is active; source
+convergence is recorded as a compact committed turn with the selected answer or
+proposal summary instead of appending every branch transcript. Judge sessions
+record `arenaJudge` metadata and stay hidden like unpromoted branches.
+
 ## Edit Guidance
 - Keep transaction boundaries in `ContextManager`.
 - Keep projection logic deterministic from events.
@@ -41,6 +49,7 @@ interrupted-turn files.
 ## Closest Tests
 - `tests/unit/context-history-replay.test.ts`
 - `tests/unit/session-fork.test.ts`
+- `tests/unit/arena-workspace.test.ts`
 - `tests/unit/context-payload-projector.test.ts`
 - `tests/unit/compressed-history-context-cache.test.ts`
 - `tests/integration/persistence.test.ts`

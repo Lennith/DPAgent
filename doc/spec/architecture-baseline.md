@@ -127,6 +127,18 @@ with active runs, pending plan input, or interrupted-turn recovery state. Forked
 sessions inherit the same workspace and can therefore conflict on files if they
 are later run concurrently.
 
+Arena is a locked multi-branch session workflow. Creating an Arena records a
+source-session lock, hides unpromoted branch sessions from the normal session
+list, and gives each contestant branch a forked session namespace. Answer Arena
+branches run with a read-heavy toolset, while implementation branches receive
+isolated `.dpagent-arena/` workspaces copied from the same source state and a
+branch-confined file-edit toolset without shell or delegation. Branches must
+submit through `arena_submit_result`; normal sessions never receive that tool.
+The judge runs in a hidden judge session and persists a ranking/rationale into
+Arena state, but cannot auto-select a winner. Applying an implementation winner
+requires a proposal with source and branch workspace hashes; stale source or
+changed branch workspaces are rejected before files are copied back.
+
 ## Subagent Runtime
 The subagent module queues child work under a parent context. It creates or
 resumes records, assigns provider/profile/tool constraints, starts a runner,

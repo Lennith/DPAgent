@@ -29,6 +29,7 @@ export function createDPAgentExecutionRegistryFactory(
     getSessionSearchIndex: () => agent.getSessionSearchIndex(),
     getTodoStore: () => agent.getTodoStore(),
     getAutomationStore: () => agent.getAutomationStore(),
+    getArenaStore: () => agent.getArenaStore(),
     getDownloadLinkIssuer: () => downloadLinkIssuer,
   });
 }

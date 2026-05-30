@@ -5,6 +5,7 @@ import { createResponseRecorder, createRouteAppHarness } from './helpers/web-rou
 function createHarness(
   options: {
     observeOnly?: boolean;
+    arenaLocked?: boolean;
     subagentItems?: unknown[];
     createResult?: unknown;
     resumeResult?: unknown;
@@ -29,7 +30,16 @@ function createHarness(
           defaultToolset: 'default-tools',
         },
       }),
-      getContextNamespaceMeta: () => ({}),
+      getContextNamespaceMeta: () =>
+        options.arenaLocked
+          ? {
+              arenaLock: {
+                arenaId: 'arena-locked',
+                lockedAt: '2026-05-30T00:00:00.000Z',
+                mode: 'implementation',
+              },
+            }
+          : {},
       listToolsets: () => [{ name: 'default-tools' }],
       resolveToolsetName: (context: { namespace: string }) => `session-tools:${context.namespace}`,
       getToolsetPresetStore: () => ({
@@ -51,6 +61,16 @@ function createHarness(
     },
     agentCatalogServices: {},
     contextServices: {
+      getContextNamespaceMetaSafe: () =>
+        options.arenaLocked
+          ? {
+              arenaLock: {
+                arenaId: 'arena-locked',
+                lockedAt: '2026-05-30T00:00:00.000Z',
+                mode: 'implementation',
+              },
+            }
+          : {},
       resolveWorkspaceDirForContext: (context: { namespace: string }) => {
         assert.match(context.namespace, /^sess-/);
         return sessionWorkspaceDir;
@@ -350,6 +370,28 @@ function testPresetMutationObserveOnlyDoesNotSetPreset(): void {
   assert.deepEqual(harness.setPresetInputs, []);
 }
 
+function testPresetMutationArenaLockedDoesNotSetPreset(): void {
+  const harness = createHarness({ arenaLocked: true });
+  const handler = harness.routes.postRoutes.get('/api/toolsets/presets');
+  assert.ok(handler);
+
+  const res = createResponseRecorder();
+  handler(
+    {
+      body: {
+        sessionId: 'sess-preset',
+        scope: 'workspace',
+        toolsetName: 'safe-tools',
+      },
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 409);
+  assert.equal((res.payload as { error: string }).error, 'arena_locked');
+  assert.deepEqual(harness.setPresetInputs, []);
+}
+
 function testPresetDeleteUsesExplicitQueryWorkspace(): void {
   const harness = createHarness();
   const handler = harness.routes.deleteRoutes.get('/api/toolsets/presets');
@@ -384,6 +426,19 @@ function testPresetDeleteObserveOnlyDoesNotClearPreset(): void {
   assert.deepEqual(harness.clearPresetInputs, []);
 }
 
+function testPresetDeleteArenaLockedDoesNotClearPreset(): void {
+  const harness = createHarness({ arenaLocked: true });
+  const handler = harness.routes.deleteRoutes.get('/api/toolsets/presets');
+  assert.ok(handler);
+
+  const res = createResponseRecorder();
+  handler({ query: { sessionId: 'sess-preset', scope: 'workspace' } }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal((res.payload as { error: string }).error, 'arena_locked');
+  assert.deepEqual(harness.clearPresetInputs, []);
+}
+
 function runAll(): void {
   testRetrySubagentReusesOriginalPromptAndMetadata();
   testRetrySubagentRejectsUnsupportedStatusWithoutCreate();
@@ -396,8 +451,10 @@ function runAll(): void {
   testPresetMutationResolvesBodySessionWorkspace();
   testPresetMutationUsesExplicitWorkspaceBeforeSessionWorkspace();
   testPresetMutationObserveOnlyDoesNotSetPreset();
+  testPresetMutationArenaLockedDoesNotSetPreset();
   testPresetDeleteUsesExplicitQueryWorkspace();
   testPresetDeleteObserveOnlyDoesNotClearPreset();
+  testPresetDeleteArenaLockedDoesNotClearPreset();
   console.log('web-toolset-routes tests passed');
 }
 

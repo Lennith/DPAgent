@@ -79,6 +79,7 @@ export interface SessionInfo {
   origin?: SessionOrigin;
   llmSelection?: SessionLlmSelectionView;
   planningState?: SessionPlanningStateView | null;
+  arena?: SessionArenaView | null;
   activeRun?: ActiveRunView | null;
   interactionState?: SessionInteractionStateView;
   isLocalDraft?: boolean;
@@ -92,6 +93,7 @@ export interface SessionDetail {
   origin?: SessionOrigin;
   llmSelection?: SessionLlmSelectionView;
   planningState?: SessionPlanningStateView | null;
+  arena?: SessionArenaView | null;
   interactionState?: SessionInteractionStateView;
   contextUtilization?: {
     observedAt: string;
@@ -127,6 +129,123 @@ export interface SessionDetail {
     toolCallId?: string;
     name?: string;
   }>;
+}
+
+export interface SessionArenaView {
+  locked: boolean;
+  runId?: string;
+  branchId?: string;
+  promoted?: boolean;
+  mode?: 'answer' | 'implementation';
+}
+
+export type ArenaModeView = 'answer' | 'implementation';
+export type ArenaRunStatusView =
+  | 'draft'
+  | 'preparing'
+  | 'running'
+  | 'paused'
+  | 'judging'
+  | 'proposal_ready'
+  | 'applied'
+  | 'closed';
+export type ArenaBranchStatusView =
+  | 'draft'
+  | 'preparing'
+  | 'running'
+  | 'paused'
+  | 'submitted'
+  | 'reopened'
+  | 'blocked'
+  | 'failed'
+  | 'cancelled'
+  | 'frozen'
+  | 'promoted';
+
+export interface ArenaContestantConfigView {
+  id: string;
+  label: string;
+  agentName?: string;
+  llmSelection: SessionLlmSelectionView;
+}
+
+export interface ArenaJudgeConfigView {
+  agentName?: string;
+  llmSelection: SessionLlmSelectionView;
+}
+
+export interface ArenaConfigView {
+  contestants: ArenaContestantConfigView[];
+  judge: ArenaJudgeConfigView;
+}
+
+export interface ArenaBranchView {
+  id: string;
+  index: number;
+  status: ArenaBranchStatusView;
+  contestant: ArenaContestantConfigView;
+  sessionId?: string;
+  workspaceDir?: string;
+  promoted?: boolean;
+  submission?: {
+    status: 'complete' | 'blocked';
+    summary: string;
+    finalAnswer?: string;
+    evidence: string[];
+    changedFiles?: string[];
+    risks?: string[];
+    submittedAt: string;
+  };
+}
+
+export interface ArenaRunView {
+  id: string;
+  sourceSessionId: string;
+  sourceSessionName: string;
+  mode: ArenaModeView;
+  status: ArenaRunStatusView;
+  prompt: string;
+  config: ArenaConfigView;
+  branches: ArenaBranchView[];
+  winner?: {
+    branchId: string;
+    mode: 'manual_winner' | 'judge_recommended';
+    selectedAt: string;
+    reason?: string;
+  };
+  proposal?: {
+    id: string;
+    branchId: string;
+    status: 'draft' | 'ready' | 'applied' | 'stale' | 'conflict';
+    changedFiles: string[];
+    sourceHash?: string;
+    branchHash?: string;
+    summary: string;
+    createdAt: string;
+    appliedAt?: string;
+  };
+  judgeRunId?: string;
+  judgeResult?: {
+    status: 'completed' | 'failed';
+    ranking: Array<{
+      branchId: string;
+      rank: number;
+      rationale?: string;
+    }>;
+    rationale: string;
+    risks: string[];
+    rawOutput?: string;
+    updatedAt: string;
+  };
+  timeline: Array<{
+    id: string;
+    type: string;
+    message: string;
+    createdAt: string;
+    branchId?: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ActiveRunView {

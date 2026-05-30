@@ -181,6 +181,28 @@ async function runCase(): Promise<void> {
       workspaceDir: harness.workspaceDir,
       runtimeDataDir: harness.runtimeDir,
       contextDir: harness.contextDir,
+      config: {
+        llmProfiles: {
+          defaultProfileId: 'default',
+          profiles: [
+            {
+              id: 'default',
+              name: 'Default',
+              provider: 'anthropic',
+              apiKey: 'sk-test-12345678901234567890',
+              apiBase: 'https://api.example.test',
+              defaultModel: 'MiniMax-M2.5',
+              maxOutputTokens: 4096,
+              capabilities: {
+                modelDiscovery: false,
+                reasoningEffort: false,
+                thinkingBudget: true,
+              },
+              updatedAt: '2026-05-29T00:00:00.000Z',
+            },
+          ],
+        },
+      },
     });
     await agent.initialize();
     const downloadLinkIssuer: SendFileToUserLinkIssuer = {
@@ -269,6 +291,7 @@ async function runCase(): Promise<void> {
     assert.equal(names.includes('send_file_to_user'), true);
     assert.equal(names.includes('clarify'), false);
     assert.equal(names.includes('request_user_input'), false);
+    assert.equal(names.includes('arena_submit_result'), false);
 
     agent.getToolRegistry()?.register(new FakeSearchTool());
     const explicitMcpSearchRegistry = buildDPAgentExecutionToolRegistry(registryFactory, {
@@ -756,6 +779,80 @@ async function runCase(): Promise<void> {
     assert.equal(planExecutingNames.includes('shell_execute'), true);
     assert.equal(planExecutingNames.includes('write_file'), true);
     assert.equal(planExecutingNames.includes('send_file_to_user'), true);
+
+    const normalNonArenaRegistry = buildDPAgentExecutionToolRegistry(registryFactory, {
+      context,
+      turnId: 'turn-non-arena',
+      workspaceDir: harness.workspaceDir,
+      includeContextManage: true,
+      includeSubAgentManage: true,
+    });
+    assert.equal(normalNonArenaRegistry.getAll().some((tool: { name: string }) => tool.name === 'arena_submit_result'), false);
+
+    const arenaContext: ContextRef = { scope: 'session', namespace: 'tool-registry-arena-branch' };
+    const arenaRun = agent.getArenaStore().createDraft({
+      sourceSessionId: context.namespace,
+      sourceSessionName: 'tool-registry-session',
+      sourceEventCount: 1,
+      mode: 'answer',
+      currentLlmSelection: {
+        profileId: 'default',
+        model: 'MiniMax-M2.5',
+        reasoningPreset: 'off',
+        updatedAt: '2026-05-29T00:00:00.000Z',
+      },
+      config: {
+        contestants: [
+          {
+            id: 'contestant-1',
+            label: 'Contestant 1',
+            llmSelection: {
+              profileId: 'default',
+              model: 'MiniMax-M2.5',
+              reasoningPreset: 'off',
+              updatedAt: '2026-05-29T00:00:00.000Z',
+            },
+          },
+        ],
+        judge: {
+          llmSelection: {
+            profileId: 'default',
+            model: 'MiniMax-M2.5',
+            reasoningPreset: 'off',
+            updatedAt: '2026-05-29T00:00:00.000Z',
+          },
+        },
+      },
+    });
+    agent.updateContextNamespaceMeta(arenaContext, {
+      workspaceDir: harness.workspaceDir,
+      arenaBranch: {
+        arenaId: arenaRun.id,
+        branchId: 'branch-1',
+        sourceSessionId: context.namespace,
+      },
+    });
+    agent.getArenaStore().setRunStatus(arenaRun.id, 'preparing');
+    agent.getArenaStore().setBranchStatus(arenaRun.id, 'branch-1', 'preparing');
+    agent.getArenaStore().setRunStatus(arenaRun.id, 'running');
+    agent.getArenaStore().setBranchStatus(arenaRun.id, 'branch-1', 'running');
+    const arenaRegistry = buildDPAgentExecutionToolRegistry(registryFactory, {
+      context: arenaContext,
+      turnId: 'turn-arena',
+      workspaceDir: harness.workspaceDir,
+      includeContextManage: true,
+      includeSubAgentManage: true,
+    });
+    const arenaSubmitTool = arenaRegistry.get('arena_submit_result');
+    assert.ok(arenaSubmitTool);
+    const submitResult = await arenaSubmitTool.execute({
+      status: 'complete',
+      summary: 'done',
+      final_answer: 'answer',
+      evidence: ['checked'],
+    });
+    assert.equal(submitResult.success, true);
+    assert.equal(agent.getArenaStore().getRun(arenaRun.id)?.branches[0]?.status, 'submitted');
   } finally {
     cleanup(harness.tempDir);
   }

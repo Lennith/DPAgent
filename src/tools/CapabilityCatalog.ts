@@ -37,8 +37,30 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
       'plan_request_user_input',
       'plan_finalize',
       'auto_loop_exit',
+      'arena_submit_result',
     ],
     allowUnknownTools: true,
+    hidden: true,
+  },
+  {
+    name: 'arena-implementation',
+    description: 'Arena implementation branch toolset with file edits confined to the branch workspace; no shell or delegation.',
+    capabilities: [
+      'file_read',
+      'tool_result_read',
+      'file_write',
+      'file_edit',
+      'file_glob',
+      'file_grep',
+      'note',
+      'context_manage',
+      'skills_catalog',
+      'session_search',
+      'todo_manage',
+      'auto_loop_exit',
+      'arena_submit_result',
+    ],
+    allowUnknownTools: false,
     hidden: true,
   },
   {
@@ -65,6 +87,7 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
       'plan_request_user_input',
       'plan_finalize',
       'auto_loop_exit',
+      'arena_submit_result',
     ],
     allowUnknownTools: false,
   },
@@ -93,6 +116,7 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
       'plan_request_user_input',
       'plan_finalize',
       'auto_loop_exit',
+      'arena_submit_result',
     ],
     allowUnknownTools: false,
   },
@@ -113,6 +137,7 @@ export const DEFAULT_TOOLSETS: ToolsetDefinition[] = [
       'plan_request_user_input',
       'plan_finalize',
       'auto_loop_exit',
+      'arena_submit_result',
     ],
     allowUnknownTools: false,
   },
@@ -223,6 +248,8 @@ export function resolveToolCapabilityFamily(name: string): string {
       return 'plan_finalize';
     case 'exit_auto_loop':
       return 'auto_loop_exit';
+    case 'arena_submit_result':
+      return 'arena_submit_result';
     default:
       return `tool:${normalized}`;
   }

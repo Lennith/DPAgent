@@ -17,6 +17,7 @@ import { registerWebServerAccessMiddleware } from './web-server-access-middlewar
 import { registerSubagentAndToolsetRoutes } from './web-server-subagent-toolset-routes.js';
 import { registerGovernanceRoutes } from './web-server-governance-routes.js';
 import { registerAgentCatalogRoutes } from './web-server-agent-catalog-routes.js';
+import { registerArenaRoutes } from './web-server-arena-routes.js';
 
 export function registerWebServerRoutes(
   deps: WebServerRouteRegistrationDependencies
@@ -35,6 +36,7 @@ export function registerWebServerRoutes(
 
   const clientPath = registerStaticClient(deps.app);
   registerSessionRoutes(deps);
+  registerArenaRoutes(deps);
   registerSubagentAndToolsetRoutes(deps);
   registerSkillRoutes(deps);
   registerGovernanceRoutes(deps);

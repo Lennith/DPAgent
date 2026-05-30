@@ -149,6 +149,8 @@ interface ChatContainerProps {
   onToggleShare?: () => void;
   forkDisabled?: boolean;
   onForkSession?: () => void;
+  arenaDisabled?: boolean;
+  onOpenArena?: () => void;
   onResyncSession?: () => void | Promise<void>;
   showAutoLoopControl?: boolean;
   contextUtilization?: ContextUtilizationData | null;
@@ -201,6 +203,8 @@ export function ChatContainer({
   onToggleShare,
   forkDisabled = false,
   onForkSession,
+  arenaDisabled = false,
+  onOpenArena,
   onResyncSession,
   showAutoLoopControl = true,
   contextUtilization,
@@ -888,6 +892,8 @@ export function ChatContainer({
             onToggleShare={onToggleShare}
             forkDisabled={forkDisabled}
             onForkSession={onForkSession}
+            arenaDisabled={arenaDisabled}
+            onOpenArena={onOpenArena}
             showAutoLoopControl={showAutoLoopControl}
             displayFilters={displayFilters}
             onToggleDisplayFilter={toggleDisplayFilter}

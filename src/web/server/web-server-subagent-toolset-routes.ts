@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { toSessionContext, type WebServerRouteRegistrationDependencies } from './web-server-route-contracts.js';
-import { rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
+import { rejectArenaLockedIfNeeded, rejectObserveOnlyIfNeeded } from './web-server-route-guards.js';
 import type { ContextRef, SubAgentStatus } from '../../types.js';
 
 function resolveToolsetRouteWorkspace(
@@ -69,6 +69,9 @@ export function registerSubagentAndToolsetRoutes(deps: WebServerRouteRegistratio
       if (rejectObserveOnlyIfNeeded(deps, context, res)) {
         return;
       }
+      if (rejectArenaLockedIfNeeded(deps, context, res)) {
+        return;
+      }
       const status = contextServices
         .resolveAgentForContext(context)
         .getSubAgentManager()
@@ -87,6 +90,9 @@ export function registerSubagentAndToolsetRoutes(deps: WebServerRouteRegistratio
     try {
       const context = toSessionContext(req.params.id);
       if (rejectObserveOnlyIfNeeded(deps, context, res)) {
+        return;
+      }
+      if (rejectArenaLockedIfNeeded(deps, context, res)) {
         return;
       }
       const subAgentManager = contextServices.resolveAgentForContext(context).getSubAgentManager();
@@ -126,6 +132,9 @@ export function registerSubagentAndToolsetRoutes(deps: WebServerRouteRegistratio
     try {
       const context = toSessionContext(req.params.id);
       if (rejectObserveOnlyIfNeeded(deps, context, res)) {
+        return;
+      }
+      if (rejectArenaLockedIfNeeded(deps, context, res)) {
         return;
       }
       const subAgentManager = contextServices.resolveAgentForContext(context).getSubAgentManager();
@@ -232,6 +241,9 @@ export function registerSubagentAndToolsetRoutes(deps: WebServerRouteRegistratio
       if (context && rejectObserveOnlyIfNeeded(deps, context, res)) {
         return;
       }
+      if (context && rejectArenaLockedIfNeeded(deps, context, res)) {
+        return;
+      }
       const record = deps.agent.setToolsetPreset({
         scope,
         toolsetName,
@@ -258,6 +270,9 @@ export function registerSubagentAndToolsetRoutes(deps: WebServerRouteRegistratio
     if (context && rejectObserveOnlyIfNeeded(deps, context, res)) {
       return;
     }
+    if (context && rejectArenaLockedIfNeeded(deps, context, res)) {
+      return;
+    }
     const success = deps.agent.clearToolsetPreset({
       scope,
       workspaceDir,
@@ -278,6 +293,9 @@ export function registerSubagentAndToolsetRoutes(deps: WebServerRouteRegistratio
     }
     const context = toSessionContext(req.params.id);
     if (rejectObserveOnlyIfNeeded(deps, context, res)) {
+      return;
+    }
+    if (rejectArenaLockedIfNeeded(deps, context, res)) {
       return;
     }
     try {

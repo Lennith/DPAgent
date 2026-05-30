@@ -61,6 +61,8 @@ interface ChatInputProps {
   onToggleShare?: () => void;
   forkDisabled?: boolean;
   onForkSession?: () => void;
+  arenaDisabled?: boolean;
+  onOpenArena?: () => void;
   showAutoLoopControl?: boolean;
   displayFilters?: ChatDisplayFilters;
   onToggleDisplayFilter?: (key: keyof ChatDisplayFilters) => void;
@@ -99,6 +101,8 @@ export function ChatInput({
   onToggleShare,
   forkDisabled = false,
   onForkSession,
+  arenaDisabled = false,
+  onOpenArena,
   showAutoLoopControl = true,
   displayFilters,
   onToggleDisplayFilter,
@@ -506,6 +510,8 @@ export function ChatInput({
                   onToggleShare={onToggleShare}
                   forkDisabled={forkDisabled}
                   onForkSession={onForkSession}
+                  arenaDisabled={arenaDisabled}
+                  onOpenArena={onOpenArena}
                 />
               </div>
             )}

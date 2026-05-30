@@ -35,6 +35,8 @@ function runAll(): void {
   const webSearchTool = new FakeTool('web_search', 'search');
   const webFetchTool = new FakeTool('web_fetch', 'fetch');
   const readToolResultTool = new FakeTool('read_tool_result', 'read stored tool result');
+  const writeFileTool = new FakeTool('write_file', 'write file');
+  const arenaSubmitTool = new FakeTool('arena_submit_result', 'submit arena result');
   const sendFileTool = new FakeTool('send_file_to_user', 'send file to user');
   const requestUserInputTool = new FakeTool('request_user_input', 'request user input');
   const todoTool = new FakeTool('todo', 'todo');
@@ -50,6 +52,9 @@ function runAll(): void {
   assert.equal(registry.allowsTool('full-access', unknownTool), true);
   assert.equal(registry.allowsTool('windows-dev', shellTool), true);
   assert.equal(registry.allowsTool('windows-safe', shellTool), false);
+  assert.equal(registry.allowsTool('arena-implementation', shellTool), false);
+  assert.equal(registry.allowsTool('arena-implementation', writeFileTool), true);
+  assert.equal(registry.allowsTool('arena-implementation', arenaSubmitTool), true);
   assert.equal(registry.allowsTool('full-access', webSearchTool), true);
   assert.equal(registry.allowsTool('research', webSearchTool), false);
   assert.equal(registry.allowsTool('research', webFetchTool), true);

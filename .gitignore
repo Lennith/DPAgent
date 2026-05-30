@@ -26,6 +26,7 @@ config.yaml
 
 # Test
 coverage/
+outputs/
 
 # Workspace data (optional - uncomment if you don't want to commit)
 # workspace/
@@ -35,6 +36,7 @@ workspace/dpagent-session/
 contexts/
 sessions/
 /runtime/
+.dpagent-arena/
 
 # UX workspace runtime artifacts
 ux-workspace/reports/

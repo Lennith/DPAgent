@@ -20,6 +20,14 @@ Each record must include:
 
 ## Round 49 Records
 
+### Arena locks source sessions and converges one selected branch
+
+- Trigger: Users needed a Share/Fork-level workflow to run the same context through multiple contestant models while keeping the source session stable and comparable.
+- Observed behavior: DPAgent could fork a session manually, but there was no source lock, branch isolation, contestant configuration, submission tool, judge boundary, or winner apply path to converge multiple branches back to one outcome.
+- Impact: Full-access Web users can create an Arena with up to four contestants. The source session is locked and renders an Arena panel until closed or applied; unpromoted branch and judge sessions are hidden from normal session access; Arena branches get the gated `arena_submit_result` tool; implementation branches use branch-confined file-edit tools without shell/delegation; judge output is persisted as Arena ranking/rationale; implementation winners produce a changed-file proposal with source and branch hash safety checks before apply.
+- Fix boundary: Arena store/domain, Web routes, source lock guards, branch workspace/session creation, submit tool registration, proposal/apply safety, Web Arena panel, tests, and current docs only. Judge auto-selection, automatic conflict resolution, branch workspace cleanup, and multi-round source sync remain out of scope.
+- Commit: pending Round 49.
+
 ### Stopped sessions can clean up unfinished Todo work
 
 - Trigger: Stopping or canceling a run could leave current-session Todo items in `pending`, `in_progress`, or `blocked` state with no explicit user control to terminate that Todo contract.

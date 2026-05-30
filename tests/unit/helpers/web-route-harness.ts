@@ -8,11 +8,11 @@ export interface CapturedRoute {
 export interface RouteAppHarness {
   app: {
     use: (...args: unknown[]) => undefined;
-    get: (route: string, handler: RouteHandler) => void;
-    post: (route: string, handler: RouteHandler) => void;
-    put: (route: string, handler: RouteHandler) => void;
-    patch: (route: string, handler: RouteHandler) => void;
-    delete: (route: string, handler: RouteHandler) => void;
+    get: (route: string, ...handlers: RouteHandler[]) => void;
+    post: (route: string, ...handlers: RouteHandler[]) => void;
+    put: (route: string, ...handlers: RouteHandler[]) => void;
+    patch: (route: string, ...handlers: RouteHandler[]) => void;
+    delete: (route: string, ...handlers: RouteHandler[]) => void;
   };
   useRoutes: RouteHandler[];
   getRouteList: CapturedRoute[];
@@ -67,24 +67,29 @@ export function createRouteAppHarness(): RouteAppHarness {
       }
       return undefined;
     },
-    get: (route: string, handler: RouteHandler) => {
+    get: (route: string, ...handlers: RouteHandler[]) => {
+      const handler = handlers[handlers.length - 1];
       getRouteCounts.set(route, (getRouteCounts.get(route) ?? 0) + 1);
       getRoutes.set(route, handler);
       getRouteList.push({ path: route, handler });
     },
-    post: (route: string, handler: RouteHandler) => {
+    post: (route: string, ...handlers: RouteHandler[]) => {
+      const handler = handlers[handlers.length - 1];
       postRoutes.set(route, handler);
       postRouteList.push({ path: route, handler });
     },
-    put: (route: string, handler: RouteHandler) => {
+    put: (route: string, ...handlers: RouteHandler[]) => {
+      const handler = handlers[handlers.length - 1];
       putRoutes.set(route, handler);
       putRouteList.push({ path: route, handler });
     },
-    patch: (route: string, handler: RouteHandler) => {
+    patch: (route: string, ...handlers: RouteHandler[]) => {
+      const handler = handlers[handlers.length - 1];
       patchRoutes.set(route, handler);
       patchRouteList.push({ path: route, handler });
     },
-    delete: (route: string, handler: RouteHandler) => {
+    delete: (route: string, ...handlers: RouteHandler[]) => {
+      const handler = handlers[handlers.length - 1];
       deleteRoutes.set(route, handler);
       deleteRouteList.push({ path: route, handler });
     },

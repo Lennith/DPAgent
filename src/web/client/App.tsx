@@ -9,6 +9,7 @@ import { WorkspaceGovernanceSettings } from './components/settings/WorkspaceGove
 import { LocalFilePickerModal } from './components/common/LocalFilePickerModal.js';
 import { useConfirmDialog } from './components/common/ConfirmDialog.js';
 import AutomationCenter from './components/automation/AutomationCenter.js';
+import { ArenaConfigDialog, ArenaPanel } from './components/arena/ArenaPanel.js';
 import { useThemeConfig } from './components/providers/ThemeProvider.js';
 import { COMPOSER_DRAFT_KEY } from './composer-input-state.js';
 import { resolveMcpIndicatorState } from './mcp-status.js';
@@ -26,10 +27,15 @@ import { appendShareToken, getShareTokenFromLocation } from './shared-access.js'
 import { copyShareUrlToClipboard } from './share-copy-feedback.js';
 import {
   createSessionShare,
+  createSessionArena,
+  fetchSessionArena,
   fetchSessionShareStatus,
   forkSession,
+  postArenaAction,
+  postArenaBranchAction,
   revokeSessionShare,
 } from './session-rest-api.js';
+import type { ArenaConfigView, ArenaModeView, ArenaRunView } from './app-shell-types.js';
 
 const NARROW_TOOLBAR_MEDIA = '(max-width: 1279px), (max-aspect-ratio: 11/10)';
 
@@ -203,6 +209,10 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
   const [workspaceBrowserOpen, setWorkspaceBrowserOpen] = useState(false);
   const [shareStatusBySession, setShareStatusBySession] = useState<Record<string, { active: boolean; expiresAt?: string }>>({});
   const [shareModalUrl, setShareModalUrl] = useState<string | null>(null);
+  const [arenaConfigOpen, setArenaConfigOpen] = useState(false);
+  const [currentArena, setCurrentArena] = useState<ArenaRunView | null>(null);
+  const [lastArenaConfig, setLastArenaConfig] = useState<ArenaConfigView | null>(null);
+  const [arenaLoading, setArenaLoading] = useState(false);
   const [shareInvalidated, setShareInvalidated] = useState(false);
   const [shareBootstrapChecked, setShareBootstrapChecked] = useState(!shareToken);
   const hasConnectedOnceRef = useRef(false);
@@ -472,6 +482,103 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
     }
   }, [addToast, currentSessionId, isSharedMode, sessionController, t]);
 
+  const refreshCurrentArena = useCallback(async () => {
+    if (!currentSessionId) {
+      setCurrentArena(null);
+      return;
+    }
+    setArenaLoading(true);
+    try {
+      const result = await fetchSessionArena(currentSessionId);
+      setCurrentArena(result.arena);
+      setLastArenaConfig(result.lastConfig ?? null);
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        autoDismiss: true,
+      });
+    } finally {
+      setArenaLoading(false);
+    }
+  }, [addToast, currentSessionId]);
+
+  const handleCreateArena = useCallback(async (input: {
+    mode: ArenaModeView;
+    prompt: string;
+    config: ArenaConfigView;
+  }) => {
+    if (!currentSessionId || isSharedMode) {
+      return;
+    }
+    try {
+      const result = await createSessionArena(currentSessionId, input);
+      setCurrentArena(result.arena);
+      setLastArenaConfig(result.lastConfig ?? input.config);
+      setArenaConfigOpen(false);
+      await sessionController.fetchSessions();
+      await sessionController.loadSessionMessages(currentSessionId);
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        autoDismiss: true,
+      });
+    }
+  }, [addToast, currentSessionId, isSharedMode, sessionController]);
+
+  const handleOpenArenaConfig = useCallback(async () => {
+    if (!currentSessionId || isSharedMode) {
+      return;
+    }
+    try {
+      const result = await fetchSessionArena(currentSessionId);
+      setCurrentArena(result.arena);
+      setLastArenaConfig(result.lastConfig ?? null);
+    } catch {
+      setLastArenaConfig(null);
+    } finally {
+      setArenaConfigOpen(true);
+    }
+  }, [currentSessionId, isSharedMode]);
+
+  const runArenaAction = useCallback(async (action: string, body: Record<string, unknown> = {}) => {
+    if (!currentArena) {
+      return;
+    }
+    try {
+      const result = await postArenaAction(currentArena.id, action, body);
+      setCurrentArena(result.arena);
+      await sessionController.fetchSessions();
+      if (currentSessionId) {
+        await sessionController.loadSessionMessages(currentSessionId);
+      }
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        autoDismiss: true,
+      });
+    }
+  }, [addToast, currentArena, currentSessionId, sessionController]);
+
+  const runArenaBranchAction = useCallback(async (branchId: string, action: string) => {
+    if (!currentArena) {
+      return;
+    }
+    try {
+      const result = await postArenaBranchAction(currentArena.id, branchId, action);
+      setCurrentArena(result.arena);
+      await sessionController.fetchSessions();
+    } catch (error) {
+      addToast({
+        type: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        autoDismiss: true,
+      });
+    }
+  }, [addToast, currentArena, sessionController]);
+
   const handleResyncCurrentSession = useCallback(async () => {
     if (!currentSessionId) {
       return;
@@ -528,6 +635,17 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
     }
   }, [currentSessionId, isConnected, sessionController.fetchSessions, sessionController.loadSessionMessages]);
 
+  useEffect(() => {
+    const session = currentSessionId
+      ? sessionController.sessions.find((item) => item.id === currentSessionId)
+      : null;
+    if (isSharedMode || !currentSessionId || !session?.arena?.locked) {
+      setCurrentArena(null);
+      return;
+    }
+    void refreshCurrentArena();
+  }, [currentSessionId, isSharedMode, refreshCurrentArena, sessionController.sessions]);
+
   const handleConfirmWorkspace = useCallback(() => {
     workspaceState.confirmWorkspaceSelection();
     setCurrentSessionId(null);
@@ -562,6 +680,10 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
   }
 
   const currentShareStatus = currentSessionId ? shareStatusBySession[currentSessionId] : undefined;
+  const currentSessionInfo = currentSessionId
+    ? sessionController.sessions.find((session) => session.id === currentSessionId) ?? null
+    : null;
+  const currentSessionArenaLocked = !isSharedMode && currentSessionInfo?.arena?.locked === true;
 
   return (
     <div className="app-shell flex h-screen" style={{ background: theme.colors.bg.gradient }}>
@@ -616,6 +738,23 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                     boxShadow: theme.shadows.lg,
                   }}
                 >
+                  {currentSessionArenaLocked ? (
+                    <ArenaPanel
+                      arena={currentArena}
+                      loading={arenaLoading}
+                      onRefresh={refreshCurrentArena}
+                      onStart={() => runArenaAction('start')}
+                      onPause={() => runArenaAction('pause')}
+                      onResume={() => runArenaAction('resume')}
+                      onClose={() => runArenaAction('close')}
+                      onJudge={() => runArenaAction('judge')}
+                      onCreateProposal={() => runArenaAction('proposal')}
+                      onApply={() => runArenaAction('apply')}
+                      onSelectWinner={(branchId) => runArenaAction('winner', { branchId })}
+                      onPromoteBranch={(branchId) => runArenaBranchAction(branchId, 'promote')}
+                      requestConfirm={confirmDialog.requestConfirmation}
+                    />
+                  ) : (
                   <ChatContainer
                     messages={sessionController.currentMessages}
                     liveEvents={sessionController.currentRuntime.liveEvents}
@@ -671,12 +810,21 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
                       sessionController.currentRuntime.interactionState?.mode === 'observe_only'
                     }
                     onForkSession={isSharedMode ? undefined : handleForkSession}
+                    arenaDisabled={
+                      isSharedMode ||
+                      !currentSessionId ||
+                      sessionController.currentRuntime.isRunning ||
+                      Boolean(sessionController.currentRuntime.pendingPlanInput) ||
+                      sessionController.currentRuntime.interactionState?.mode === 'observe_only'
+                    }
+                    onOpenArena={handleOpenArenaConfig}
                     onResyncSession={currentSessionId ? handleResyncCurrentSession : undefined}
                     websocketConnected={isConnected}
                     sendWebSocket={send}
                     subscribeWebSocket={subscribe}
                     showAutoLoopControl={!isSharedMode}
                   />
+                  )}
                 </div>
 
                 {!isSharedMode && showSubAgentPanel && (
@@ -768,6 +916,17 @@ function AuthenticatedApp({ shareToken }: { shareToken: string | null }) {
             </div>
           ))}
         </div>
+
+        {!isSharedMode && (
+          <ArenaConfigDialog
+            open={arenaConfigOpen}
+            llmProfiles={workspaceState.llmProfiles}
+            currentSelection={sessionController.currentLlmSelection}
+            inheritedConfig={lastArenaConfig}
+            onCancel={() => setArenaConfigOpen(false)}
+            onCreate={handleCreateArena}
+          />
+        )}
 
         {!isSharedMode && <ConfigModal
           isOpen={workspaceState.showConfigModal}

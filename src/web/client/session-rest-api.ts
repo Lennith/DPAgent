@@ -1,6 +1,9 @@
 import type {
   SessionDetail,
   SessionInfo,
+  ArenaConfigView,
+  ArenaModeView,
+  ArenaRunView,
   SessionLlmSelectionPatch,
   SessionLlmSelectionView,
 } from './app-shell-types.js';
@@ -90,6 +93,45 @@ export async function forkSession(sessionId: string): Promise<{ session: Session
     body: JSON.stringify({}),
   });
   return readStrictJsonResponse<{ session: SessionInfo }>(response);
+}
+
+export async function createSessionArena(
+  sessionId: string,
+  input: { mode: ArenaModeView; prompt: string; config?: Partial<ArenaConfigView> }
+): Promise<{ arena: ArenaRunView; lastConfig?: ArenaConfigView }> {
+  const response = await fetch(`/api/sessions/${sessionId}/arena`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  return readStrictJsonResponse<{ arena: ArenaRunView; lastConfig?: ArenaConfigView }>(response);
+}
+
+export async function fetchSessionArena(sessionId: string): Promise<{ arena: ArenaRunView | null; lastConfig?: ArenaConfigView }> {
+  const response = await fetch(`/api/sessions/${sessionId}/arena`);
+  return readStrictJsonResponse<{ arena: ArenaRunView | null; lastConfig?: ArenaConfigView }>(response);
+}
+
+export async function postArenaAction(arenaId: string, action: string, body: Record<string, unknown> = {}): Promise<{ arena: ArenaRunView }> {
+  const response = await fetch(`/api/arena/${arenaId}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return readStrictJsonResponse<{ arena: ArenaRunView }>(response);
+}
+
+export async function postArenaBranchAction(
+  arenaId: string,
+  branchId: string,
+  action: string
+): Promise<{ arena: ArenaRunView }> {
+  const response = await fetch(`/api/arena/${arenaId}/branches/${branchId}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  return readStrictJsonResponse<{ arena: ArenaRunView }>(response);
 }
 
 export async function revokeSessionShare(sessionId: string): Promise<{ active: boolean }> {

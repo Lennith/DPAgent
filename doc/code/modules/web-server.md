@@ -38,6 +38,15 @@ session from a stable committed snapshot, returns the new session info, and
 returns `409` when the source session is active, waiting for plan input, or has
 interrupted recovery state.
 
+Arena routes live in `web-server-arena-routes.ts` and coordinate through
+`ArenaCoordinator`. Source sessions with `arenaLock` reject chat/send and
+context-mutating routes with `409 arena_locked`; unpromoted branch sessions are
+filtered out of session list and detail routes. Hidden judge sessions are also
+blocked from direct chat/detail use. Arena mutations are full-access only.
+Implementation proposal/apply uses source and branch workspace hashes plus
+changed-file lists to reject stale source or changed branch workspaces before
+copying the selected branch result back.
+
 ## Edit Guidance
 - Add domain routes in route modules instead of growing `WebServer.ts` when possible.
 - Keep ownership checks close to route/WebSocket mutation entrypoints.
@@ -52,3 +61,5 @@ interrupted recovery state.
 - `tests/unit/web-request-user-input.test.ts`
 - `tests/unit/web-plan-input-response.test.ts`
 - `tests/unit/session-fork.test.ts`
+- `tests/unit/arena-routes.test.ts`
+- `tests/unit/arena-workspace.test.ts`

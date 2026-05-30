@@ -24,6 +24,7 @@ import {
 } from '../tools/index.js';
 import { ContextManager } from '../context/index.js';
 import { ScheduleTaskTool } from '../tools/ScheduleTaskTool.js';
+import { ArenaStore, ArenaSubmitResultTool } from '../arena/index.js';
 import type { AutomationStore } from '../automation/AutomationStore.js';
 import { SubAgentManager } from '../subagent/SubAgentManager.js';
 import { SkillLoader } from '../skills/SkillLoader.js';
@@ -71,6 +72,7 @@ export interface BuildExecutionToolRegistryInput {
   resolveSubAgentAllowedTools: () => string[];
   downloadLinkIssuer?: SendFileToUserLinkIssuer | null;
   automationStore: AutomationStore;
+  arenaStore?: ArenaStore;
   input: ExecutionToolRegistryOptions;
 }
 
@@ -92,6 +94,7 @@ export function buildExecutionToolRegistry({
   resolveSubAgentAllowedTools,
   downloadLinkIssuer,
   automationStore,
+  arenaStore,
   input,
 }: BuildExecutionToolRegistryInput): ToolRegistry {
   const turnRegistry = new ToolRegistry();
@@ -293,6 +296,21 @@ export function buildExecutionToolRegistry({
     'other'
   );
 
+  const namespaceMeta = input.context.scope === 'session'
+    ? contextManager.getEventStore().loadMeta(input.context.scope, input.context.namespace)
+    : undefined;
+  if (arenaStore && namespaceMeta?.arenaBranch) {
+    registerTurnScopedTool(
+      new ArenaSubmitResultTool({
+        context: input.context,
+        meta: namespaceMeta,
+        arenaStore,
+        todoStore,
+      }),
+      'other'
+    );
+  }
+
   const planInputHandler = input.planningState === 'plan_drafting'
     ? input.callback?.onRequestUserInput
     : undefined;
@@ -336,6 +354,7 @@ export interface DPAgentExecutionToolRegistryFactoryHost {
   getSessionSearchIndex: () => SessionSearchIndex;
   getTodoStore: () => TodoStore;
   getAutomationStore: () => AutomationStore;
+  getArenaStore?: () => ArenaStore | undefined;
   getDownloadLinkIssuer: () => SendFileToUserLinkIssuer | null | undefined;
 }
 
@@ -382,6 +401,7 @@ export class DPAgentExecutionToolRegistryFactory {
           .map((tool) => tool.name),
       downloadLinkIssuer: this.host.getDownloadLinkIssuer(),
       automationStore: this.host.getAutomationStore(),
+      arenaStore: this.host.getArenaStore?.(),
       input,
     });
   }

@@ -23,6 +23,8 @@ interface SessionLlmBarProps {
   onToggleShare?: () => void;
   forkDisabled?: boolean;
   onForkSession?: () => void;
+  arenaDisabled?: boolean;
+  onOpenArena?: () => void;
 }
 
 const REASONING_PRESETS: Array<SessionLlmSelectionView['reasoningPreset']> = [
@@ -64,6 +66,18 @@ function ForkIcon() {
   );
 }
 
+function ArenaIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path d="M4 7h16" />
+      <path d="M7 7v10" />
+      <path d="M17 7v10" />
+      <path d="M5 17h14" />
+      <path d="M9 11h6" />
+    </svg>
+  );
+}
+
 function getAvailableModels(profile: NonNullable<LlmProfilesConfigView['profiles'][number]>): Array<[string, string]> {
   const models = new Map<string, string>();
   const addModel = (model: unknown): void => {
@@ -89,6 +103,8 @@ export function SessionLlmBar({
   onToggleShare,
   forkDisabled = false,
   onForkSession,
+  arenaDisabled = false,
+  onOpenArena,
 }: SessionLlmBarProps) {
   const theme = useThemeConfig();
   const { t } = useI18n();
@@ -217,7 +233,7 @@ export function SessionLlmBar({
   };
 
   if (!currentProfile) {
-    if (!onToggleShare && !onForkSession) {
+    if (!onToggleShare && !onForkSession && !onOpenArena) {
       return null;
     }
     return (
@@ -258,6 +274,25 @@ export function SessionLlmBar({
           >
             <ForkIcon />
             <span className="session-fork-label">{t('app.session.fork')}</span>
+          </button>
+        )}
+        {onOpenArena && (
+          <button
+            type="button"
+            onClick={onOpenArena}
+            disabled={arenaDisabled}
+            className="session-arena-button inline-flex shrink-0 items-center justify-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60"
+            style={{
+              borderColor: theme.colors.border.DEFAULT,
+              backgroundColor: theme.colors.bg.secondary,
+              color: theme.colors.text.secondary,
+              boxShadow: theme.shadows.sm,
+            }}
+            data-testid="session-arena-button"
+            title={t('app.arena.button')}
+          >
+            <ArenaIcon />
+            <span className="session-arena-label">{t('app.arena.button')}</span>
           </button>
         )}
       </div>
@@ -348,6 +383,26 @@ export function SessionLlmBar({
         >
           <ForkIcon />
           <span className="session-fork-label">{t('app.session.fork')}</span>
+        </button>
+      )}
+
+      {onOpenArena && (
+        <button
+          type="button"
+          onClick={onOpenArena}
+          disabled={arenaDisabled}
+          className="session-arena-button inline-flex shrink-0 items-center justify-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-60"
+          style={{
+            borderColor: theme.colors.border.DEFAULT,
+            backgroundColor: theme.colors.bg.secondary,
+            color: theme.colors.text.secondary,
+            boxShadow: theme.shadows.sm,
+          }}
+          data-testid="session-arena-button"
+          title={t('app.arena.button')}
+        >
+          <ArenaIcon />
+          <span className="session-arena-label">{t('app.arena.button')}</span>
         </button>
       )}
 

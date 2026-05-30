@@ -813,6 +813,21 @@ export interface ContextInspectableMeta {
   createdAt?: string;
   updatedAt?: string;
   workspaceDir?: string;
+  arenaLock?: {
+    arenaId: string;
+    lockedAt: string;
+    mode: 'answer' | 'implementation';
+  };
+  arenaBranch?: {
+    arenaId: string;
+    branchId: string;
+    sourceSessionId: string;
+    promoted?: boolean;
+  };
+  arenaJudge?: {
+    arenaId: string;
+    sourceSessionId: string;
+  };
   forkedFrom?: {
     scope: 'session';
     namespace: string;
@@ -1035,6 +1050,21 @@ export interface ContextNamespaceMeta {
   createdAt: string;
   updatedAt: string;
   workspaceDir?: string;
+  arenaLock?: {
+    arenaId: string;
+    lockedAt: string;
+    mode: 'answer' | 'implementation';
+  };
+  arenaBranch?: {
+    arenaId: string;
+    branchId: string;
+    sourceSessionId: string;
+    promoted?: boolean;
+  };
+  arenaJudge?: {
+    arenaId: string;
+    sourceSessionId: string;
+  };
   forkedFrom?: {
     scope: 'session';
     namespace: string;

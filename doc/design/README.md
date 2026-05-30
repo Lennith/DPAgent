@@ -14,6 +14,7 @@ paths belong in spec/protocol and code docs.
 - [Session origin and observe-only](features/session-origin-observe-only.md)
 - [Run interruption and error cards](features/run-interruption-and-error-card-lifecycle.md)
 - [Ralph, Todo, and Plan execution](features/ralph-todo-plan-execution.md)
+- [Arena](features/arena.md)
 - [GLM ASR module](features/glm-asr-module.md)
 - [Hook system](features/hook-system.md)
 

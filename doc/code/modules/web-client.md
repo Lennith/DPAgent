@@ -26,6 +26,14 @@ settings, while observe-only, canceling, and hydrating states are read-only.
 The session fork button lives to the right of the share button. It is disabled
 for shared/observe-only sessions, active runs, and pending plan input; success
 refreshes the session list and opens the new `-fork` session.
+The Arena button lives to the right of Fork. Creating an Arena opens the
+contestant/judge configuration dialog, and an Arena-locked source session
+replaces the normal chat/composer panel with the Arena panel. The panel shows
+branch status cards, judge/proposal/timeline sections, and uses the shared
+confirm dialog for close/apply actions. The dialog defaults to the most recent
+Arena contestant and judge configuration when available. Mobile layout uses
+Branches, Judge, Proposal, and Timeline tabs and keeps primary actions in the
+bottom action area.
 
 ## Edit Guidance
 - Put state orchestration in hooks and rendering in components.
@@ -37,4 +45,5 @@ refreshes the session list and opens the new `-fork` session.
 - `tests/unit/composer-input-state.test.ts`
 - `tests/unit/web-memory-organize-ui.test.ts`
 - `tests/unit/web-interrupted-artifact-ui.test.ts`
+- `tests/unit/web-arena-ui.test.ts`
 - `tests/e2e/release-plan-mode-ux.e2e.ts`
