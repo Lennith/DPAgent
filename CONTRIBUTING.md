@@ -26,7 +26,7 @@ npm run test:execution-tool-registry-gating
 
 ## Branches And Commits
 
-Use clear branch names such as `fix/safe-default-toolset` or `docs/threat-model`. Commit sign-off is welcome when required by your organization, but Gerrit `Change-Id` footers are not part of the public GitHub contribution path.
+Use clear branch names such as `fix/safe-default-toolset` or `docs/threat-model`. Commit sign-off is welcome when required by your organization, but vendor-specific review footers are not part of the public GitHub contribution path.
 
 ## Documentation
 

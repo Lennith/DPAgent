@@ -69,7 +69,7 @@ exposeAsSubagent: true
 
 - 新增包内预置 Agent：`dpagent-assistant`。用户可以通过 `@dpagent-assistant` 调用“DPAgent 助手”，用于教程、诊断、升级、外部 Agent 创建、分享客户端、ASR 配置和 Hook 构建。
 - `dpagent-assistant` 随包携带 7 个 agent-bundled skills：`dpagent-user-guide`、`dpagent-debug-info`、`dpagent-update`、`dpagent-agent-create`、`dpagent-share-client`、`dpagent-asr-setup`、`dpagent-hook-build`。
-- 新增 `dpai-skills/` 作为项目维护的 DPAI 用户层 skill 源目录；release profile/key 类内部测试 skill 不进入公开用户层 skill 集。
+- DPAgent assistant skills are packaged under `agents/dpagent-assistant/skill/`; release profile/key 类内部测试 skill 不进入公开用户层 skill 集。
 - 清理旧的顶层 `skills/` 目录内容，移除与 DPAgent 运行时代码无关的本地 Codex skill 副本，避免 npm 包和源码树混入无关技能资产。
 - npm 打包清单改为通过 `agents/**` 分发 DPAgent 助手及其 bundled skills，不再引用旧的 `skills/dpagent-asr-setup/**` 和 `skills/dpagent-hook-build/**` 路径。
 
@@ -92,4 +92,4 @@ exposeAsSubagent: true
 - 打包用户指南 Markdown、SVG 配图和 HTML guide 路由。
 - 新增 `/guide` 到 `/guide/user-guide` 的只读入口，远端和分享访问均可打开。
 - 聊天面板自动滚动改为“贴底才跟随”，避免用户查看历史时被新消息强制拉到底部。
-- 继续保留 2.2.x 的 release gate：source gate、标准 npm publish、pack audit、安装 smoke 和 Gerrit 流程。
+- 继续保留 2.2.x 的 release gate：source gate、官方 npm publish preflight、pack audit 和安装 smoke。

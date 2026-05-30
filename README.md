@@ -132,7 +132,6 @@ Do not use the removed legacy `docs/` tree as a current behavior source.
 src/              Runtime, CLI, tools, providers, server, and Web client.
 tests/            Unit, integration, and E2E tests.
 agents/           DPAgent assistant and specialist agent profiles.
-dpai-skills/      Packaged DPVR/DPAgent skills.
 scripts/          Build, release, smoke, diagnostic, and evaluation scripts.
 doc/              Current product, guide, design, spec, code, and playbook docs.
 android-client/   Android companion client source.

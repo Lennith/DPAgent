@@ -10,7 +10,6 @@
 - Protocol: exact runtime contracts under `spec/protocols/`. Protocol docs own wire/event/state-machine semantics and are the tie-breaker for DTO or lifecycle ambiguity.
 - Code: source map and module guide. It explains where code lives, what each module owns, key files, edit boundaries, and tests. It does not redefine product behavior.
 - Playbook: commands, release gates, operational procedures, and handoff steps.
-- Internal: mirror, Gerrit, or private registry procedures that are not the public GitHub contribution path.
 - History: archived records. History is not current specification.
 
 ## PRD
@@ -79,9 +78,6 @@
 - [Windows easy-run handoff](playbook/windows-easy-run-handoff.md)
 - [Logging guide](playbook/logging-guide.md)
 - [UX iteration standard](playbook/ux-iteration-standard.md)
-
-## Internal
-- [Internal workflow index](internal/README.md)
 
 ## History
 - [Findings ledger](history/findings-ledger.md)

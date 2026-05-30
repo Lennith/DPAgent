@@ -72,16 +72,8 @@ function resolveRequiredCasesFromPackageJson(): string[] {
         requiredCases?: unknown;
       };
     };
-    internalPublish?: {
-      releaseE2EGate?: {
-        requiredCases?: unknown;
-      };
-    };
   };
-  const requiredCases =
-    pkg.releaseGate?.releaseE2E?.requiredCases ??
-    pkg.internalPublish?.releaseE2EGate?.requiredCases ??
-    [...DEFAULT_RELEASE_E2E_REQUIRED_CASES];
+  const requiredCases = pkg.releaseGate?.releaseE2E?.requiredCases ?? [...DEFAULT_RELEASE_E2E_REQUIRED_CASES];
   if (!Array.isArray(requiredCases)) {
     throw new Error('package.json releaseGate.releaseE2E.requiredCases must be an array.');
   }

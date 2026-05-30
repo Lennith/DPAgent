@@ -1,4 +1,0 @@
-interface:
-  display_name: "DPAgent Share Client"
-  short_description: "Connect to DPAgent share links and download files."
-  default_prompt: "Use $dpagent-share-client to connect to a DPAgent share link, ask for evidence, and download returned files when needed."

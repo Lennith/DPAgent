@@ -15,4 +15,4 @@
 - Verified real Xiaomi MiMo Anthropic and OpenAI-compatible two-turn thinking behavior; the follow-up turn referenced prior reasoning instead of restarting the same thinking path.
 - Verified `deepseek`, `minimax`, and `xiaomi` release toolcall profiles at 10/10 each on the final commit.
 - Verified `npm test`, `npm run build`, `npm run build:web`, `npm run smoke:ui:built`, and `npm run test:release-e2e`.
-- Verified internal npm publish dry-run targets `http://10.100.1.10:4873/`; actual publish was blocked by TCP timeout to that registry from the current network.
+- Verified official npm publish dry-run packaging; actual publish was deferred from the current network.

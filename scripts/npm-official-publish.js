@@ -16,7 +16,7 @@ const {
   validatePublishTagForVersion,
   validateReleaseE2EGateEvidence,
   validateReleaseToolcallGateEvidence,
-} = require('./private-npm-standard.js');
+} = require('./lib/npm-publish-audit.js');
 
 const ROOT = process.cwd();
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';

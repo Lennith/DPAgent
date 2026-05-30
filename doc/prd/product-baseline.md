@@ -58,7 +58,7 @@ recovery state.
 - UX iteration commands are not release gates.
 
 ## Release And Operations Constraints
-- GitHub pull requests are the public upstream merge path. Internal mirrors may keep their own review workflow under `doc/internal/`.
+- GitHub pull requests are the public upstream merge path.
 - Releases must pass the maintained source gate before publish.
 - Runtime artifacts, logs, workspaces, dist output, local context stores, and local release profiles are not source artifacts.
 - User-visible behavior changes must be recorded in [findings ledger](../history/findings-ledger.md) with trigger, impact, and fix boundary.

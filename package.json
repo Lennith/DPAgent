@@ -147,7 +147,6 @@
     "test:governance-tool-audit": "tsx tests/unit/governance-tool-audit.test.ts",
     "test:eval-toolcall-context-session": "tsx tests/unit/eval-toolcall-context-session.test.ts",
     "test:release-toolcall-context-gate": "tsx tests/unit/release-toolcall-context-gate.test.ts",
-    "test:private-npm-standard": "tsx tests/unit/private-npm-standard.test.ts",
     "test:npm-official-publish": "tsx tests/unit/npm-official-publish.test.ts",
     "test:web-composer-input-state": "tsx tests/unit/composer-input-state.test.ts",
     "test:session-fork": "tsx tests/unit/session-fork.test.ts",

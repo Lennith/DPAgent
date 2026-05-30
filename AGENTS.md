@@ -9,7 +9,7 @@ This repository is the DPAgent Node.js runtime. It contains the local agent runt
 - `doc/spec/architecture-baseline.md`: overall architecture and natural-language module specifications.
 - `doc/playbook/development-playbook.md`: development, refactor, test, GitHub release, and publish playbooks.
 
-Product intent lives under `doc/prd/`; user-facing usage lives under `doc/guide/`; feature behavior lives under `doc/design/`; technical specs and protocols live under `doc/spec/`; source ownership lives under `doc/code/`; release and operations docs live under `doc/playbook/`; internal-only mirror or registry procedures live under `doc/internal/`. Historical notes, if retained, live under `doc/history/`. Do not add or reference a legacy `docs/` documentation tree.
+Product intent lives under `doc/prd/`; user-facing usage lives under `doc/guide/`; feature behavior lives under `doc/design/`; technical specs and protocols live under `doc/spec/`; source ownership lives under `doc/code/`; release and operations docs live under `doc/playbook/`. Historical notes, if retained, live under `doc/history/`. Do not add or reference a legacy `docs/` documentation tree.
 
 ## Engineering Rules
 - Keep behavior-preserving refactors behavior-preserving. User-visible semantic changes must be recorded in `doc/history/findings-ledger.md` with trigger, impact, and fix boundary.
@@ -31,7 +31,7 @@ Product intent lives under `doc/prd/`; user-facing usage lives under `doc/guide/
 ## Git And Review
 - Work from latest `main` on a focused branch unless the user requests otherwise.
 - Use path-specific staging.
-- Use GitHub pull requests for public review. Do not require Gerrit `Change-Id` footers for public contributions.
+- Use GitHub pull requests for public review. Do not require vendor-specific review footers for public contributions.
 - Commit sign-off is welcome when required by the contributor or organization.
 - Use subagent review after key commits when requested. P0/P1 findings block the next node. P2 findings are fixed by default or documented in the active round report.
 

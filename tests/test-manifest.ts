@@ -82,7 +82,6 @@ const UNIT_TEST_FILES = [
   'tests/unit/package-release-sanitized-config.test.ts',
   'tests/unit/plan-mode-agent-case.test.ts',
   'tests/unit/plan-mode-tools.test.ts',
-  'tests/unit/private-npm-standard.test.ts',
   'tests/unit/profile-introspection-service.test.ts',
   'tests/unit/read-file-tool.test.ts',
   'tests/unit/release-toolcall-context-gate.test.ts',

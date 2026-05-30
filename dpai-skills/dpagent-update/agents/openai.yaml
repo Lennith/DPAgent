@@ -1,3 +1,0 @@
-display_name: DPAgent Update
-short_description: Self-update a running DPAgent npm installation and restart the web server.
-default_prompt: Diagnose the current DPAgent runtime and dry-run the npm update; run with confirm yes only after the user explicitly requests the real upgrade.

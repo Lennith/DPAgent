@@ -37,4 +37,4 @@
 - [UX iteration standard](ux-iteration-standard.md)
 
 ## Documentation Rule
-`doc/` is the single current documentation source. Historical notes may live under `doc/history/`, internal-only mirror or registry procedures may live under `doc/internal/`, and current behavior must be described in the appropriate current layer: `doc/prd/`, `doc/guide/`, `doc/design/`, `doc/spec/`, `doc/code/`, or `doc/playbook/`.
+`doc/` is the single current documentation source. Historical notes may live under `doc/history/`, and current behavior must be described in the appropriate current layer: `doc/prd/`, `doc/guide/`, `doc/design/`, `doc/spec/`, `doc/code/`, or `doc/playbook/`.

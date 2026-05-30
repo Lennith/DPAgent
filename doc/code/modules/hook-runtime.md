@@ -16,7 +16,7 @@ pipeline ordering, mutation contracts, and block semantics.
 - `src/hooks/HookRunner.ts`: Executes the hook pipeline (user -> system),
   error isolation per hook, block handling per hook point type.
 - `src/hooks/index.ts`: Public facade - exports types, HookRegistry, HookRunner.
-- `hook.config.yaml`: Default hook configuration template (workspace root).
+- `hook.config.yaml`: Local hook configuration file in the workspace root.
 
 ## Runtime Contracts
 Hooks are loaded from `hook.config.yaml` in the workspace root directory.

@@ -12,7 +12,7 @@ Package:
 @dpvr/dpagent
 ```
 
-NPM official publish repacks the built runtime with sanitized package metadata and publishes the public package name. Internal mirror procedures, if needed, live under `doc/internal/`.
+NPM official publish repacks the built runtime with sanitized package metadata and publishes the public package name.
 
 ## Login
 
@@ -64,6 +64,6 @@ The official npm tarball rewrites package metadata:
 
 - `name` becomes `@dpvr/dpagent`.
 - `publishConfig` points to `https://registry.npmjs.org` with `access: public`.
-- `internalPublish`, private publish scripts, development scripts, and `devDependencies` are omitted from the public package metadata.
+- Private publish metadata, development scripts, and `devDependencies` are omitted from the public package metadata.
 
 The file allowlist and forbidden runtime paths stay aligned with the public package allowlist.

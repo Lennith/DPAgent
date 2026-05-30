@@ -11,4 +11,4 @@
 ## Verification Scope
 
 - Added coverage for context version conflict parsing, Web runtime recovery, runtime error projection, orchestrator persistence behavior, and subagent parent-turn buffering.
-- Release verification should include the standard source gate, private npm preflight, private npm publish, and Gerrit review push.
+- Release verification should include the standard source gate and official npm publish preflight.

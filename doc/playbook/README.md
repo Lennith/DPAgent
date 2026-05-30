@@ -18,7 +18,6 @@ Playbooks do not own product requirements, feature behavior, runtime protocols, 
 
 ## Boundary
 - Put reproducible commands, gate evidence rules, and handoff checklists here.
-- Put internal mirror, Gerrit, or private registry procedures in [internal docs](../internal/README.md).
 - Put user install and startup explanations in [guide](../guide/README.md).
 - Put product requirements in [PRD](../prd/README.md).
 - Put feature behavior in [design](../design/README.md).

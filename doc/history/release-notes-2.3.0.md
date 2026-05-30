@@ -11,4 +11,4 @@
 
 - Added Arena store, route, workspace, submit-tool, Web UI, and tool registry coverage.
 - Verified branch LLM runtime overrides, source lock guards, hidden session projection, judge/winner boundaries, proposal stale-source/stale-branch rejection, and mobile Arena UI rendering.
-- Release publishing is intentionally deferred while the internal npm registry is unreachable; package metadata is prepared for the next release gate run.
+- Release publishing is intentionally deferred; package metadata is prepared for the next release gate run.

@@ -7,7 +7,6 @@ import { TEST_MANIFEST } from '../test-manifest.js';
 interface PackageJson {
   files?: string[];
   scripts?: Record<string, string>;
-  internalPublish?: unknown;
   publishConfig?: {
     registry?: string;
     access?: string;
@@ -59,7 +58,6 @@ function testNpmFilesWhitelistIncludesPublicSupportFiles(): void {
   assert.ok(files.includes('SECURITY.md'));
   assert.ok(files.includes('CONTRIBUTING.md'));
   assert.ok(files.includes('SUPPORT.md'));
-  assert.equal(pkg.internalPublish, undefined);
   assert.equal(pkg.publishConfig?.registry, 'https://registry.npmjs.org');
   assert.equal(pkg.publishConfig?.access, 'public');
 }

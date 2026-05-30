@@ -1,4 +1,0 @@
-interface:
-  display_name: "DPAgent Debug Info"
-  short_description: "Collect DPAgent runtime diagnostics for support"
-  default_prompt: "Use $dpagent-debug-info to collect a DPAgent debug bundle for a stuck run, websocket, sharing, or Plan Mode issue."

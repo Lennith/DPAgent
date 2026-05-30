@@ -58,7 +58,7 @@ const {
   ) => Record<string, unknown>;
 };
 
-function baseInternalConfig() {
+function baseAuditConfig() {
   return {
     userSmoke: {
       command: 'npx dpagent --no-open',
@@ -85,7 +85,7 @@ function testOfficialPublishConfigUsesPublicNpmRegistry(): void {
         access: 'public',
       },
     },
-    baseInternalConfig()
+    baseAuditConfig()
   );
 
   assert.equal(cfg.packageName, '@dpvr/dpagent');
@@ -95,7 +95,7 @@ function testOfficialPublishConfigUsesPublicNpmRegistry(): void {
   assert.deepEqual(cfg.forbiddenPackPaths, ['runtime/', 'logs/', '.env']);
 }
 
-function testOfficialPublishConfigDoesNotRequireInternalPublish(): void {
+function testOfficialPublishConfigDoesNotRequirePrivateMetadata(): void {
   const cfg = getNpmOfficialPublishConfig({
     npmOfficialPublish: {
       packageName: '@dpvr/dpagent',
@@ -120,11 +120,11 @@ function testOfficialPublishConfigRejectsPrivateRegistry(): void {
         {
           npmOfficialPublish: {
             packageName: '@dpvr/dpagent',
-            registry: 'http://registry.internal.example:4873',
+            registry: 'http://registry.example.invalid:4873',
             access: 'public',
           },
         },
-        baseInternalConfig()
+        baseAuditConfig()
       ),
     /registry must be https:\/\/registry\.npmjs\.org/i
   );
@@ -154,13 +154,13 @@ function testOfficialPackageJsonIsSanitized(): void {
         typescript: '^5.3.0',
       },
       scripts: {
-        'publish:private': 'npm publish --registry http://registry.internal.example:4873',
+        'publish:private': 'npm publish --registry http://registry.example.invalid:4873',
       },
       publishConfig: {
-        registry: 'http://registry.internal.example:4873',
+        registry: 'http://registry.example.invalid:4873',
       },
-      internalPublish: {
-        registry: 'http://registry.internal.example:4873',
+      privatePublishConfig: {
+        registry: 'http://registry.example.invalid:4873',
       },
     },
     {
@@ -174,7 +174,7 @@ function testOfficialPackageJsonIsSanitized(): void {
   assert.equal((sanitized.publishConfig as { registry: string }).registry, 'https://registry.npmjs.org');
   assert.equal((sanitized.publishConfig as { access: string }).access, 'public');
   assert.deepEqual(sanitized.dependencies, { express: '^4.18.2' });
-  assert.equal(Object.hasOwn(sanitized, 'internalPublish'), false);
+  assert.equal(Object.hasOwn(sanitized, 'privatePublishConfig'), false);
   assert.equal(Object.hasOwn(sanitized, 'scripts'), false);
   assert.equal(Object.hasOwn(sanitized, 'devDependencies'), false);
 }
@@ -212,7 +212,7 @@ function testOfficialPublishPlanAndArgs(): void {
 
 function runAll(): void {
   testOfficialPublishConfigUsesPublicNpmRegistry();
-  testOfficialPublishConfigDoesNotRequireInternalPublish();
+  testOfficialPublishConfigDoesNotRequirePrivateMetadata();
   testOfficialPublishConfigRejectsPrivateRegistry();
   testOfficialPackageNameMustBeScoped();
   testOfficialPackageJsonIsSanitized();

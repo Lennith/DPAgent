@@ -26,17 +26,12 @@ function isRetryableSmokeFetchError(error) {
   );
 }
 
-function fail(message) {
-  console.error(`[private-publish] ERROR: ${message}`);
-  process.exit(1);
-}
-
 function info(message) {
-  console.log(`[private-publish] ${message}`);
+  console.log(`[npm-publish-audit] ${message}`);
 }
 
 function warn(message) {
-  console.warn(`[private-publish] WARN: ${message}`);
+  console.warn(`[npm-publish-audit] WARN: ${message}`);
 }
 
 function runSync(command, args, options = {}) {
@@ -299,56 +294,8 @@ function waitForChildClose(child, timeoutMs = 5000) {
   });
 }
 
-function parseArgs() {
-  const modeArgIndex = process.argv.findIndex((item) => item === '--mode');
-  const mode = modeArgIndex >= 0 ? process.argv[modeArgIndex + 1] : 'preflight';
-  if (mode !== 'preflight' && mode !== 'publish') {
-    fail('Invalid --mode. Use preflight or publish.');
-  }
-  const tagArgIndex = process.argv.findIndex((item) => item === '--tag');
-  const publishTag = tagArgIndex >= 0 ? String(process.argv[tagArgIndex + 1] ?? '').trim() : undefined;
-  if (publishTag !== undefined && !/^[a-z0-9][a-z0-9._-]*$/i.test(publishTag)) {
-    fail('Invalid --tag. Use a non-empty npm dist-tag such as beta.');
-  }
-  return { mode, publishTag };
-}
-
-function createPublishPlan(mode, publishTag) {
-  return {
-    verifyReleaseEvidence: true,
-    buildBeforePublish: true,
-    dryRunPack: false,
-    packagedSmoke: mode === 'publish',
-    registrySmoke: mode === 'publish',
-    publish: mode === 'publish',
-    publishTag,
-  };
-}
-
-function loadPackageJson() {
-  const packagePath = path.join(ROOT, 'package.json');
-  if (!fs.existsSync(packagePath)) {
-    fail(`package.json not found: ${packagePath}`);
-  }
-  const raw = fs.readFileSync(packagePath, 'utf8');
-  return JSON.parse(raw);
-}
-
 function normalizePathForMatch(input) {
   return String(input || '').replace(/\\/g, '/').replace(/^\.\//, '');
-}
-
-function compilePathRules(values, fieldName) {
-  if (!Array.isArray(values)) {
-    fail(`internalPublish.${fieldName} must be an array.`);
-  }
-  return values.map((entry) => {
-    if (typeof entry !== 'string' || entry.trim().length === 0) {
-      fail(`internalPublish.${fieldName} contains invalid entry.`);
-    }
-    const normalized = normalizePathForMatch(entry.trim());
-    return normalized.endsWith('/') ? normalized : `${normalized}`;
-  });
 }
 
 function startsWithAnyPrefix(targetPath, prefixes) {
@@ -358,168 +305,6 @@ function startsWithAnyPrefix(targetPath, prefixes) {
     }
     return targetPath === prefix || targetPath.startsWith(`${prefix}/`);
   });
-}
-
-function getInternalPublishConfig(pkg) {
-  const cfg = pkg.internalPublish;
-  if (!cfg || typeof cfg !== 'object') {
-    fail('Missing internalPublish config in package.json.');
-  }
-  if (typeof cfg.registry !== 'string' || cfg.registry.trim().length === 0) {
-    fail('internalPublish.registry must be set.');
-  }
-  const userSmoke =
-    cfg.userSmoke && typeof cfg.userSmoke === 'object'
-      ? {
-          command: typeof cfg.userSmoke.command === 'string' ? cfg.userSmoke.command.trim() : '',
-          timeoutMs: Number(cfg.userSmoke.timeoutMs),
-          successPattern: cfg.userSmoke.successPattern ? String(cfg.userSmoke.successPattern) : '',
-        }
-      : null;
-  if (userSmoke) {
-    if (!userSmoke.command) {
-      fail('internalPublish.userSmoke.command must be set when userSmoke is provided.');
-    }
-    if (!Number.isFinite(userSmoke.timeoutMs) || userSmoke.timeoutMs <= 0) {
-      fail('internalPublish.userSmoke.timeoutMs must be > 0 when userSmoke is provided.');
-    }
-    if (
-      cfg.userSmoke.successPattern !== undefined &&
-      (typeof cfg.userSmoke.successPattern !== 'string' || cfg.userSmoke.successPattern.trim().length === 0)
-    ) {
-      fail('internalPublish.userSmoke.successPattern must be a non-empty string when provided.');
-    }
-  }
-  if (!cfg.releaseToolcallGate || typeof cfg.releaseToolcallGate !== 'object') {
-    fail('internalPublish.releaseToolcallGate must be set.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.outputRoot !== 'string' ||
-    cfg.releaseToolcallGate.outputRoot.trim().length === 0
-  ) {
-    fail('internalPublish.releaseToolcallGate.outputRoot must be set.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.aggregateFile !== 'string' ||
-    cfg.releaseToolcallGate.aggregateFile.trim().length === 0
-  ) {
-    fail('internalPublish.releaseToolcallGate.aggregateFile must be set.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.markdownFile !== 'string' ||
-    cfg.releaseToolcallGate.markdownFile.trim().length === 0
-  ) {
-    fail('internalPublish.releaseToolcallGate.markdownFile must be set.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.manualReviewFile !== 'string' ||
-    cfg.releaseToolcallGate.manualReviewFile.trim().length === 0
-  ) {
-    fail('internalPublish.releaseToolcallGate.manualReviewFile must be set.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.requiredRuns !== 'number' ||
-    !Number.isFinite(cfg.releaseToolcallGate.requiredRuns) ||
-    cfg.releaseToolcallGate.requiredRuns <= 0
-  ) {
-    fail('internalPublish.releaseToolcallGate.requiredRuns must be > 0.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.requiredRoundsPerRun !== 'number' ||
-    !Number.isFinite(cfg.releaseToolcallGate.requiredRoundsPerRun) ||
-    cfg.releaseToolcallGate.requiredRoundsPerRun <= 0
-  ) {
-    fail('internalPublish.releaseToolcallGate.requiredRoundsPerRun must be > 0.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.requiredModel !== 'string' ||
-    cfg.releaseToolcallGate.requiredModel.trim().length === 0
-  ) {
-    fail('internalPublish.releaseToolcallGate.requiredModel must be set.');
-  }
-  if (
-    cfg.releaseToolcallGate.requiredProfiles !== undefined &&
-    (!Array.isArray(cfg.releaseToolcallGate.requiredProfiles) ||
-      cfg.releaseToolcallGate.requiredProfiles.some((item) => typeof item !== 'string' || item.trim().length === 0))
-  ) {
-    fail('internalPublish.releaseToolcallGate.requiredProfiles must be a string array when provided.');
-  }
-  if (
-    cfg.releaseToolcallGate.requiredProfileModels !== undefined &&
-    (!cfg.releaseToolcallGate.requiredProfileModels ||
-      typeof cfg.releaseToolcallGate.requiredProfileModels !== 'object' ||
-      Array.isArray(cfg.releaseToolcallGate.requiredProfileModels) ||
-      Object.entries(cfg.releaseToolcallGate.requiredProfileModels).some(
-        ([profile, model]) =>
-          typeof profile !== 'string' ||
-          profile.trim().length === 0 ||
-          typeof model !== 'string' ||
-          model.trim().length === 0
-      ))
-  ) {
-    fail('internalPublish.releaseToolcallGate.requiredProfileModels must be an object of non-empty profile model strings when provided.');
-  }
-  if (
-    typeof cfg.releaseToolcallGate.minimumPassRate !== 'number' ||
-    !Number.isFinite(cfg.releaseToolcallGate.minimumPassRate) ||
-    cfg.releaseToolcallGate.minimumPassRate <= 0 ||
-    cfg.releaseToolcallGate.minimumPassRate > 1
-  ) {
-    fail('internalPublish.releaseToolcallGate.minimumPassRate must be within (0, 1].');
-  }
-  if (!cfg.releaseE2EGate || typeof cfg.releaseE2EGate !== 'object') {
-    fail('internalPublish.releaseE2EGate must be set.');
-  }
-  if (typeof cfg.releaseE2EGate.outputRoot !== 'string' || cfg.releaseE2EGate.outputRoot.trim().length === 0) {
-    fail('internalPublish.releaseE2EGate.outputRoot must be set.');
-  }
-  if (typeof cfg.releaseE2EGate.aggregateFile !== 'string' || cfg.releaseE2EGate.aggregateFile.trim().length === 0) {
-    fail('internalPublish.releaseE2EGate.aggregateFile must be set.');
-  }
-  if (typeof cfg.releaseE2EGate.markdownFile !== 'string' || cfg.releaseE2EGate.markdownFile.trim().length === 0) {
-    fail('internalPublish.releaseE2EGate.markdownFile must be set.');
-  }
-  if (
-    !Array.isArray(cfg.releaseE2EGate.requiredCases) ||
-    cfg.releaseE2EGate.requiredCases.length === 0 ||
-    cfg.releaseE2EGate.requiredCases.some((item) => typeof item !== 'string' || item.trim().length === 0)
-  ) {
-    fail('internalPublish.releaseE2EGate.requiredCases must be a non-empty string array.');
-  }
-
-  return {
-    registry: cfg.registry.trim(),
-    userSmoke: userSmoke
-      ? {
-          command: userSmoke.command,
-          timeoutMs: Math.floor(userSmoke.timeoutMs),
-          successPattern: userSmoke.successPattern,
-        }
-      : null,
-    requiredReadmeInitCommand:
-      typeof cfg.requiredReadmeInitCommand === 'string' ? cfg.requiredReadmeInitCommand.trim() : '',
-    forbiddenPackPaths: compilePathRules(cfg.forbiddenPackPaths || [], 'forbiddenPackPaths'),
-    requiredPackPaths: compilePathRules(cfg.requiredPackPaths || [], 'requiredPackPaths'),
-    requireUsabilityEntrypoint: cfg.requireUsabilityEntrypoint !== false,
-    releaseToolcallGate: {
-      outputRoot: cfg.releaseToolcallGate.outputRoot.trim(),
-      aggregateFile: cfg.releaseToolcallGate.aggregateFile.trim(),
-      markdownFile: cfg.releaseToolcallGate.markdownFile.trim(),
-      manualReviewFile: cfg.releaseToolcallGate.manualReviewFile.trim(),
-      requiredRuns: Math.floor(cfg.releaseToolcallGate.requiredRuns),
-      requiredRoundsPerRun: Math.floor(cfg.releaseToolcallGate.requiredRoundsPerRun),
-      requiredModel: cfg.releaseToolcallGate.requiredModel.trim(),
-      requiredProfiles: normalizeStringArray(cfg.releaseToolcallGate.requiredProfiles || []),
-      requiredProfileModels: normalizeProfileModelMap(cfg.releaseToolcallGate.requiredProfileModels || {}),
-      minimumPassRate: Number(cfg.releaseToolcallGate.minimumPassRate),
-    },
-    releaseE2EGate: {
-      outputRoot: cfg.releaseE2EGate.outputRoot.trim(),
-      aggregateFile: cfg.releaseE2EGate.aggregateFile.trim(),
-      markdownFile: cfg.releaseE2EGate.markdownFile.trim(),
-      requiredCases: normalizeStringArray(cfg.releaseE2EGate.requiredCases),
-    },
-  };
 }
 
 function readJsonFileOrError(filePath, label, errors) {
@@ -553,21 +338,6 @@ function normalizeProfileLabels(values) {
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
   );
-}
-
-function normalizeProfileModelMap(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {};
-  }
-  const normalized = {};
-  for (const [profile, model] of Object.entries(value)) {
-    const label = normalizeProfileLabels([profile])[0];
-    const modelValue = String(model || '').trim();
-    if (label && modelValue) {
-      normalized[label] = modelValue;
-    }
-  }
-  return normalized;
 }
 
 function arraysEqual(left, right) {
@@ -908,50 +678,6 @@ function validateReleaseE2EGateEvidence(rootDir, cfg, options = {}) {
   };
 }
 
-function validateUsabilityEntrypoint(pkg, cfg) {
-  if (!cfg.requireUsabilityEntrypoint) {
-    return;
-  }
-  const hasBin = !!pkg.bin && (typeof pkg.bin === 'string' || Object.keys(pkg.bin).length > 0);
-  const hasStartScript = !!pkg.scripts && typeof pkg.scripts.start === 'string' && pkg.scripts.start.trim().length > 0;
-  if (!hasBin && !hasStartScript) {
-    fail('Usability gate failed: package must provide bin or scripts.start for end users.');
-  }
-}
-
-function validateReadmeInitCommand(cfg) {
-  if (!cfg.requiredReadmeInitCommand) {
-    fail('internalPublish.requiredReadmeInitCommand must be configured.');
-  }
-  const readmePath = path.join(ROOT, 'README.md');
-  if (!fs.existsSync(readmePath)) {
-    fail('README.md is required for publish usability gate.');
-  }
-  const content = fs.readFileSync(readmePath, 'utf8');
-  if (!content.includes(cfg.requiredReadmeInitCommand)) {
-    fail(
-      `README usability gate failed: missing init command "${cfg.requiredReadmeInitCommand}".`
-    );
-  }
-}
-
-function checkRegistryConsistency(pkg, cfg) {
-  const publishRegistry = pkg.publishConfig && typeof pkg.publishConfig.registry === 'string'
-    ? pkg.publishConfig.registry.trim()
-    : '';
-  if (publishRegistry && publishRegistry !== cfg.registry) {
-    fail(`publishConfig.registry (${publishRegistry}) does not match internalPublish.registry (${cfg.registry}).`);
-  }
-}
-
-function npmWhoami(registry) {
-  const output = runNpm(['whoami', '--registry', registry], { cwd: ROOT }).trim();
-  if (!output) {
-    fail('npm whoami returned empty account.');
-  }
-  info(`Authenticated as ${output} on ${registry}`);
-}
-
 function npmPackJson(args, cwd) {
   const output = runNpm(['pack', ...args, '--json'], { cwd });
   let parsed;
@@ -964,25 +690,6 @@ function npmPackJson(args, cwd) {
     throw new Error('npm pack json returned empty list.');
   }
   return parsed[parsed.length - 1];
-}
-
-function createPublishTarball() {
-  const tarballDir = fs.mkdtempSync(path.join(os.tmpdir(), 'private-npm-pack-'));
-  try {
-    const packResult = npmPackJson(['--pack-destination', tarballDir], ROOT);
-    const tarballName = packResult.filename;
-    if (!tarballName || typeof tarballName !== 'string') {
-      throw new Error('npm pack did not return tarball filename.');
-    }
-    const tarballPath = path.join(tarballDir, tarballName);
-    if (!fs.existsSync(tarballPath)) {
-      throw new Error(`local tarball missing: ${tarballPath}`);
-    }
-    return { tarballDir, tarballPath, packResult };
-  } catch (error) {
-    removePathWithRetry(tarballDir);
-    throw error;
-  }
 }
 
 function validatePackFileList(packResult, cfg, label = 'publish') {
@@ -1005,10 +712,6 @@ function validatePackFileList(packResult, cfg, label = 'publish') {
   }
   info(`${label} pack audit passed with ${paths.length} files.`);
   return packResult;
-}
-
-function checkDryRunPack(cfg) {
-  return validatePackFileList(npmPackJson(['--dry-run'], ROOT), cfg, 'dry-run');
 }
 
 function startsWithAnyPrefixAny(paths, requiredPrefix) {
@@ -1223,7 +926,7 @@ function installPackage(targetDir, installTarget, registry) {
 }
 
 async function runSmoke(stageName, cfg, installTarget) {
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'private-npm-smoke-'));
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'npm-publish-smoke-'));
   try {
     const smokePort = await findAvailablePort();
     const baseUrl = `http://127.0.0.1:${smokePort}`;
@@ -1249,14 +952,6 @@ async function runSmoke(stageName, cfg, installTarget) {
   }
 }
 
-function buildPublishArgs(publishTarget, registry, publishTag) {
-  const args = ['publish', publishTarget, '--registry', registry];
-  if (publishTag) {
-    args.push('--tag', publishTag);
-  }
-  return args;
-}
-
 function isPrereleaseVersion(version) {
   return /^\d+\.\d+\.\d+-/.test(String(version || '').trim());
 }
@@ -1270,81 +965,9 @@ function validatePublishTagForVersion(pkg, publishTag) {
   }
 }
 
-function verifyPublishedDistTag(pkg, registry, publishTag) {
-  if (!publishTag) {
-    return;
-  }
-  const observed = runNpm(['view', pkg.name, `dist-tags.${publishTag}`, '--registry', registry], { cwd: ROOT }).trim();
-  if (observed !== pkg.version) {
-    fail(`dist-tag ${publishTag} points to ${observed || '<empty>'}, expected ${pkg.version}.`);
-  }
-  info(`dist-tag verified: ${publishTag} -> ${pkg.version}`);
-}
-
-function publish(registry, publishTarget, publishTag) {
-  runNpm(buildPublishArgs(publishTarget, registry, publishTag), { cwd: ROOT });
-  info('publish completed.');
-}
-
-async function main() {
-  const { mode, publishTag } = parseArgs();
-  const plan = createPublishPlan(mode, publishTag);
-  const pkg = loadPackageJson();
-  const cfg = getInternalPublishConfig(pkg);
-
-  info(`mode=${mode}${plan.publishTag ? ` tag=${plan.publishTag}` : ''}`);
-  validatePublishTagForVersion(pkg, plan.publishTag);
-  if (plan.registrySmoke && !cfg.userSmoke) {
-    fail('internalPublish.userSmoke is required because the internal publish path runs post-publish registry smoke.');
-  }
-  validateCleanGitWorktree(ROOT);
-  checkRegistryConsistency(pkg, cfg);
-  validateUsabilityEntrypoint(pkg, cfg);
-  validateReadmeInitCommand(cfg);
-  if (plan.verifyReleaseEvidence) {
-    const releaseE2EEvidence = validateReleaseE2EGateEvidence(ROOT, cfg.releaseE2EGate);
-    info(`release e2e evidence verified: ${releaseE2EEvidence.aggregatePath}`);
-    const releaseGateEvidence = validateReleaseToolcallGateEvidence(ROOT, cfg.releaseToolcallGate);
-    info(`release toolcall evidence verified: ${releaseGateEvidence.aggregatePath}`);
-  }
-  npmWhoami(cfg.registry);
-  if (plan.buildBeforePublish) {
-    runFreshWebBuild();
-  }
-  if (plan.dryRunPack) {
-    checkDryRunPack(cfg);
-  }
-
-  const { tarballDir, tarballPath, packResult } = createPublishTarball();
-
-  try {
-    validatePackFileList(packResult, cfg, 'publish');
-
-    if (plan.packagedSmoke) {
-      await runSmoke('pre-publish local', cfg, tarballPath);
-    }
-
-    if (plan.publish) {
-      publish(cfg.registry, tarballPath, plan.publishTag);
-      verifyPublishedDistTag(pkg, cfg.registry, plan.publishTag);
-      if (plan.registrySmoke) {
-        const installTarget = plan.publishTag ? `${pkg.name}@${plan.publishTag}` : `${pkg.name}@${pkg.version}`;
-        await runSmoke('post-publish registry', cfg, installTarget);
-      }
-    }
-  } finally {
-    removePathWithRetry(tarballDir);
-  }
-
-  info('All checks passed.');
-}
-
 module.exports = {
-  createPublishPlan,
-  buildPublishArgs,
   isPrereleaseVersion,
   validatePublishTagForVersion,
-  getInternalPublishConfig,
   npmPackJson,
   removePathWithRetry,
   runFreshWebBuild,
@@ -1357,9 +980,3 @@ module.exports = {
   validateReleaseE2EGateEvidence,
   validateReleaseToolcallGateEvidence,
 };
-
-if (require.main === module) {
-  main().catch((error) => {
-    fail(error instanceof Error ? error.message : String(error));
-  });
-}

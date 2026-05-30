@@ -23,6 +23,7 @@ logs/
 
 # Local configuration
 config.yaml
+hook.config.yaml
 
 # Test
 coverage/

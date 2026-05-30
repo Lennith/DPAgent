@@ -39,4 +39,4 @@ connection metadata and must not rely on request-body spoofing.
 ## Closest Tests
 - `tests/e2e/release-cli-long-session.e2e.ts`
 - `tests/unit/package-release-sanitized-config.test.ts`
-- `tests/unit/private-npm-standard.test.ts`
+- `tests/unit/npm-official-publish.test.ts`
