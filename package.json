@@ -1,6 +1,6 @@
 {
   "name": "@dpvr/dpagent",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "DPVR dedicated local-first Agent runtime for Node.js, Web UI, tools, MCP, memory, skills, subagents, and automation.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

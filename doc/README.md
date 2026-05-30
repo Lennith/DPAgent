@@ -82,6 +82,8 @@
 ## History
 - [Findings ledger](history/findings-ledger.md)
 - [Archived next-version development plan](history/next-version-development-plan.md)
+- [Release notes 2.3.1](history/release-notes-2.3.1.md)
+- [Release notes 2.3.0](history/release-notes-2.3.0.md)
 - [Release notes 2.2.15](history/release-notes-2.2.15.md)
 - [Release notes 2.2.14](history/release-notes-2.2.14.md)
 - [Release notes 2.2.13](history/release-notes-2.2.13.md)

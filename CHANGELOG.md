@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.1
+
+- Polished Arena transcript readability with source-history and branch detail log improvements.
+- Sanitized Arena branch detail transcripts on the server to avoid exposing hidden branch thinking, tool calls, and tool results.
+- Improved mobile source-history sheet layering and rounded styling.
+- Adjusted desktop user prompt bubble width for better Arena log readability.
+
 ## 2.2.15
 
 - Added provider vendor dialect policies for Xiaomi MiMo, DeepSeek, Anthropic, and official MiniMax/OpenAI-compatible routing.
