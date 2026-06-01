@@ -106,6 +106,8 @@ export interface ConfigModalOtherTabProps {
   setCtxPrecompressChunkTokens: (value: number) => void;
   ctxCompressionMaxTokens: number;
   setCtxCompressionMaxTokens: (value: number) => void;
+  workspaceTimelineEnabled: boolean;
+  setWorkspaceTimelineEnabled: (value: boolean) => void;
 }
 
 export function ConfigModalOtherTab({
@@ -142,6 +144,8 @@ export function ConfigModalOtherTab({
   setCtxPrecompressChunkTokens,
   ctxCompressionMaxTokens,
   setCtxCompressionMaxTokens,
+  workspaceTimelineEnabled,
+  setWorkspaceTimelineEnabled,
 }: ConfigModalOtherTabProps) {
   const { theme: activeTheme, setTheme } = useTheme();
   const theme = useThemeConfig();
@@ -328,6 +332,14 @@ export function ConfigModalOtherTab({
         disabled={settingsControlsDisabled}
         label={t('config.completionMarker.label')}
         description={t('config.completionMarker.description')}
+      />
+      <SettingsToggleCard
+        testId="config-workspace-timeline-toggle"
+        checked={workspaceTimelineEnabled}
+        onChange={setWorkspaceTimelineEnabled}
+        disabled={settingsControlsDisabled}
+        label={t('config.workspaceTimeline.label')}
+        description={t('config.workspaceTimeline.description')}
       />
 
       <div className="mt-6 space-y-3">

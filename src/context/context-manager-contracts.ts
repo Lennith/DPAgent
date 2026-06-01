@@ -89,6 +89,14 @@ export interface CommitTurnInput {
   finalOutputText?: string;
   finishReason?: string;
   usage?: TokenUsage;
+  workspaceTimeline?: {
+    deltaId: string;
+    revisionId: string;
+    trustLevel: 'trusted' | 'git_observed' | 'observed_partial' | 'untrusted';
+    changedFiles: string[];
+    captureWarnings: string[];
+    auditOnly: boolean;
+  };
 }
 
 export interface TurnPromptState {

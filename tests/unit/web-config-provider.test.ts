@@ -85,6 +85,54 @@ function testConfigRoutesExposeCanonicalProfiles(): void {
   assert.equal((settingsRes.payload as any).web.sessionShareTtlHours, 24);
   assert.equal((settingsRes.payload as any).agent.maxSteps, 100);
   assert.equal((settingsRes.payload as any).agent.completionMarkerEnforcementEnabled, false);
+  assert.equal((settingsRes.payload as any).workspaceTimeline.enabled, false);
+}
+
+async function testWorkspaceTimelineSettingsRoundTrip(): Promise<void> {
+  const server = createWebServerDouble();
+  const { app, putRoutes } = createRouteAppHarness();
+  const config = createBaseConfig();
+  let refreshRuntimeCalls = 0;
+  let persistedConfig: unknown;
+
+  server.app = app;
+  server.wss = { clients: new Set() };
+  server.agent = {
+    getConfig: () => config,
+    updateConfig: (updates: any) => {
+      if (updates.workspaceTimeline) {
+        (config as any).workspaceTimeline = updates.workspaceTimeline;
+      }
+    },
+  };
+  server.refreshConfigDependentRuntimes = async () => {
+    refreshRuntimeCalls += 1;
+  };
+  server.persistConfigFile = (nextConfig: unknown) => {
+    persistedConfig = nextConfig;
+  };
+  server.refreshGlobalAgentCatalog = () => undefined;
+  server.hasUsableApiKey = () => true;
+  server.automationRoutes = { register: () => undefined };
+
+  server.setupRoutes();
+  const handler = putRoutes.get('/api/settings');
+  assert.ok(handler, 'expected PUT /api/settings route');
+
+  const res = createResponseRecorder();
+  await handler?.(
+    {
+      body: {
+        workspaceTimeline: { enabled: true },
+      },
+    },
+    res
+  );
+
+  assert.equal(refreshRuntimeCalls, 1);
+  assert.equal((config as any).workspaceTimeline.enabled, true);
+  assert.equal((persistedConfig as any).workspaceTimeline.enabled, true);
+  assert.equal((res.payload as any).workspaceTimeline.enabled, true);
 }
 
 function testLegacyApiConfigMigratesIntoDefaultLlmProfileOnSave(): void {
@@ -1732,6 +1780,7 @@ async function runAll(): Promise<void> {
   testConfigRoutesExposeCanonicalProfiles();
   testLegacyApiConfigMigratesIntoDefaultLlmProfileOnSave();
   testSystemRoutesRegisterOnce();
+  await testWorkspaceTimelineSettingsRoundTrip();
   await testLlmProfilesPutPersistsProfileContextWindowOverride();
   await testRemoteAccessSettingsDoNotRewriteProfileApiKeys();
   await testLlmProfilesPutRollsBackContextWindowOverrideWhenRefreshFails();

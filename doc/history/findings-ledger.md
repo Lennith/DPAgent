@@ -18,6 +18,16 @@ Each record must include:
 - Fix boundary
 - Commit
 
+## Round 50 Records
+
+### Workspace Timeline is a Settings-gated test feature
+
+- Trigger: Large workspaces and Arena branches need a shared, incremental way to capture per-turn file changes without copying whole repositories or creating user-visible checkpoint commits.
+- Observed behavior: Workspace state was tied to the live directory, Arena worktree/copy fallback, or manual Git state; DPAgent had no runtime-owned turn delta ledger or retention window.
+- Impact: Workspace Timeline is now an explicit test feature exposed in Web Settings -> Other. It remains off by default. When enabled, DPAgent captures begin/end workspace manifests, stores file blobs in runtime CAS, attaches committed delta metadata to context events, exposes timeline/delta APIs, and retains the latest 5 stage deltas per session by default. The capture path does not create Git commits, private refs, stashes, or index changes. The rollback API restores retained blob-backed session revisions, appends rollback audit records, and writes context patch metadata so later turns can see the active workspace revision and latest rollback.
+- Fix boundary: Workspace Timeline store/coordinator, config normalization, Settings UI/API toggle, runtime turn commit wrapping, Web timeline/delta/rollback APIs, rollback context metadata, tests, and current docs only. User-facing rollback UI, optimized touched-path capture, Arena replacement of worktree/copy fallback, stale external-dirty conflict UI, and physical CAS blob GC remain out of scope.
+- Commit: pending Round 50.
+
 ## Round 49 Records
 
 ### Arena locks source sessions and converges one selected branch
@@ -26,6 +36,14 @@ Each record must include:
 - Observed behavior: DPAgent could fork a session manually, but there was no source lock, branch isolation, contestant configuration, submission tool, judge boundary, or winner apply path to converge multiple branches back to one outcome.
 - Impact: Full-access Web users can create an Arena with up to four contestants. The source session is locked and renders an Arena panel until closed or applied; unpromoted branch and judge sessions are hidden from normal session access; Arena branches get the gated `arena_submit_result` tool; implementation branches use branch-confined file-edit tools without shell/delegation; judge output is persisted as Arena ranking/rationale; implementation winners produce a changed-file proposal with source and branch hash safety checks before apply.
 - Fix boundary: Arena store/domain, Web routes, source lock guards, branch workspace/session creation, submit tool registration, proposal/apply safety, Web Arena panel, source-history and branch-detail read-only transcript surfaces, tests, and current docs only. Judge auto-selection, automatic conflict resolution, branch workspace cleanup, and multi-round source sync remain out of scope.
+- Commit: pending Round 49.
+
+### Arena no-git workspace copy skips symlinks
+
+- Trigger: A no-git workspace used for Arena branch isolation contained symlinked tool/skill directories.
+- Observed behavior: Directory-copy fallback attempted to recreate symlinks and could fail on Windows with `EPERM` before branches were prepared.
+- Impact: Arena directory-copy fallback now skips symlink entries, matching the existing diff/hash behavior that ignores symlinks. Normal files and directories still copy, and excluded runtime roots such as `node_modules`, `dist`, `logs`, and `runtime` remain excluded.
+- Fix boundary: Arena workspace copy fallback only; git worktree handling, proposal/apply file semantics, and source workspace contents are otherwise unchanged.
 - Commit: pending Round 49.
 
 ### Stopped sessions can clean up unfinished Todo work

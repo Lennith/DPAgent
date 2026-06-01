@@ -796,6 +796,107 @@ async function testImplementationProposalAndApply(): Promise<void> {
   }
 }
 
+async function testDuelWinnerApplyUpdatesSourceFrontendOnly(): Promise<void> {
+  const { routeHarness, arenaStore, sourceWorkspaceDir, cleanup } = createSessionRouteHarness();
+  try {
+    const create = routeHarness.postRoutes.get('/api/sessions/:id/arena');
+    const start = routeHarness.postRoutes.get('/api/arena/:arenaId/start');
+    const winner = routeHarness.postRoutes.get('/api/arena/:arenaId/winner');
+    const proposal = routeHarness.postRoutes.get('/api/arena/:arenaId/proposal');
+    const apply = routeHarness.postRoutes.get('/api/arena/:arenaId/apply');
+    assert.ok(create && start && winner && proposal && apply);
+
+    const webSrcDir = path.join(sourceWorkspaceDir, 'apps', 'web', 'src');
+    fs.mkdirSync(webSrcDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(webSrcDir, 'App.tsx'),
+      "export function App() {\n  return <main className=\"app-shell\">SoundNet</main>;\n}\n",
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(webSrcDir, 'index.css'),
+      ':root { color-scheme: light; }\n.app-shell { background: #ffffff; color: #111827; }\n',
+      'utf-8',
+    );
+
+    const createRes = createResponseRecorder();
+    await create(
+      {
+        params: { id: 'sess-open' },
+        body: { prompt: 'duel: update the frontend to a dark visual style' },
+      },
+      createRes,
+    );
+    const arena = (createRes.payload as any).arena;
+    const startRes = createResponseRecorder();
+    await start({ params: { arenaId: arena.id }, body: {} }, startRes);
+    const branches = (startRes.payload as any).arena.branches;
+    assert.ok(branches.length >= 2);
+
+    const winningBranch = branches[0];
+    const losingBranch = branches[1];
+    fs.writeFileSync(
+      path.join(winningBranch.workspaceDir, 'apps', 'web', 'src', 'App.tsx'),
+      "export function App() {\n  return <main className=\"app-shell theme-dark\">SoundNet Dark</main>;\n}\n",
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(winningBranch.workspaceDir, 'apps', 'web', 'src', 'index.css'),
+      ':root { color-scheme: dark; }\n.app-shell.theme-dark { background: #060b16; color: #f8fafc; }\n',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(losingBranch.workspaceDir, 'apps', 'web', 'src', 'index.css'),
+      ':root { color-scheme: light; }\n.app-shell { background: #fff7ed; color: #9a3412; }\n',
+      'utf-8',
+    );
+    fs.writeFileSync(path.join(losingBranch.workspaceDir, 'loser-only.txt'), 'do not apply', 'utf-8');
+
+    arenaStore.submitBranchResult({
+      arenaId: arena.id,
+      branchId: winningBranch.id,
+      submission: {
+        status: 'complete',
+        summary: 'Dark frontend style is implemented.',
+        evidence: ['Updated apps/web/src/App.tsx', 'Updated apps/web/src/index.css'],
+        changedFiles: ['apps/web/src/App.tsx', 'apps/web/src/index.css'],
+      },
+    });
+    arenaStore.submitBranchResult({
+      arenaId: arena.id,
+      branchId: losingBranch.id,
+      submission: {
+        status: 'complete',
+        summary: 'Alternate warm style.',
+        evidence: ['Updated apps/web/src/index.css'],
+        changedFiles: ['apps/web/src/index.css', 'loser-only.txt'],
+      },
+    });
+
+    const winnerRes = createResponseRecorder();
+    await winner({ params: { arenaId: arena.id }, body: { branchId: winningBranch.id } }, winnerRes);
+    assert.equal(winnerRes.statusCode, 200);
+
+    const proposalRes = createResponseRecorder();
+    await proposal({ params: { arenaId: arena.id }, body: {} }, proposalRes);
+    assert.equal(proposalRes.statusCode, 200);
+    const changedFiles = (proposalRes.payload as any).arena.proposal.changedFiles as string[];
+    assert.ok(changedFiles.includes('apps/web/src/App.tsx'));
+    assert.ok(changedFiles.includes('apps/web/src/index.css'));
+    assert.equal(changedFiles.includes('loser-only.txt'), false);
+
+    const applyRes = createResponseRecorder();
+    await apply({ params: { arenaId: arena.id }, body: {} }, applyRes);
+    assert.equal(applyRes.statusCode, 200);
+    assert.equal((applyRes.payload as any).arena.status, 'applied');
+    assert.match(fs.readFileSync(path.join(webSrcDir, 'App.tsx'), 'utf-8'), /theme-dark/);
+    assert.match(fs.readFileSync(path.join(webSrcDir, 'index.css'), 'utf-8'), /color-scheme: dark/);
+    assert.equal(fs.existsSync(path.join(sourceWorkspaceDir, 'loser-only.txt')), false);
+  } finally {
+    cleanup();
+  }
+}
+
 async function testSessionOnlyArenaAppliesWithoutProposal(): Promise<void> {
   const { routeHarness, arenaStore, metaBySession, cleanup } = createSessionRouteHarness();
   try {
@@ -994,6 +1095,7 @@ async function run(): Promise<void> {
   await testArenaRejectsNestedBranchSource();
   await testImplementationArenaWithoutWorkspaceUsesSessionOnlyBranches();
   await testImplementationProposalAndApply();
+  await testDuelWinnerApplyUpdatesSourceFrontendOnly();
   await testSessionOnlyArenaAppliesWithoutProposal();
   await testImplementationApplyRejectsStaleSource();
   await testZeroDiffProposalRejectsLateBranchChange();

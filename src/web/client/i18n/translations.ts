@@ -415,6 +415,9 @@ const zhCN = {
   'config.completionMarker.label': '启用结束标记强制检测',
   'config.completionMarker.description':
     '开启后，执行结果必须以 `【完成！】` 或 `【汇报结束！】` 收尾；关闭后不再做这项强制检测。',
+  'config.workspaceTimeline.label': '启用 Workspace Timeline（测试）',
+  'config.workspaceTimeline.description':
+    '记录轮次文件变更，并允许通过 API 回滚到最近保留的 revision。默认关闭。',
   'config.maxSteps.label': '最大步数',
   'config.loadingSettings': '正在加载设置...',
   'config.settingsTitle': '设置',
@@ -1025,6 +1028,9 @@ const enUS: Record<TranslationKey, string> = {
   'config.completionMarker.label': 'Enable completion marker enforcement',
   'config.completionMarker.description':
     'When enabled, execution reports must end with `【完成！】` or `【汇报结束！】`; when disabled, this check is skipped.',
+  'config.workspaceTimeline.label': 'Enable Workspace Timeline (test)',
+  'config.workspaceTimeline.description':
+    'Records per-turn file changes and enables API rollback to retained revisions. Off by default.',
   'config.maxSteps.label': 'Max steps',
   'config.loadingSettings': 'Loading settings...',
   'config.settingsTitle': 'Settings',

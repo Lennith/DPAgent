@@ -84,6 +84,8 @@ function testCompletionMarkerSettingsTranslations(): void {
   const enLabel = resolveTranslation('en-US', 'config.completionMarker.label');
   const zhDescription = resolveTranslation('zh-CN', 'config.completionMarker.description');
   const enDescription = resolveTranslation('en-US', 'config.completionMarker.description');
+  const zhTimeline = resolveTranslation('zh-CN', 'config.workspaceTimeline.label');
+  const enTimeline = resolveTranslation('en-US', 'config.workspaceTimeline.label');
   const zhLoading = resolveTranslation('zh-CN', 'config.loadingSettings');
   const enLoading = resolveTranslation('en-US', 'config.loadingSettings');
   const zhLoadError = resolveTranslation('zh-CN', 'config.error.loadSettings');
@@ -95,6 +97,8 @@ function testCompletionMarkerSettingsTranslations(): void {
   assert.match(zhDescription, /\u3010\u6c47\u62a5\u7ed3\u675f\uff01\u3011/);
   assert.match(enDescription, /\u3010\u5b8c\u6210\uff01\u3011/);
   assert.match(enDescription, /\u3010\u6c47\u62a5\u7ed3\u675f\uff01\u3011/);
+  assert.equal(zhTimeline, '\u542f\u7528 Workspace Timeline\uff08\u6d4b\u8bd5\uff09');
+  assert.equal(enTimeline, 'Enable Workspace Timeline (test)');
   assert.equal(zhLoading, '\u6b63\u5728\u52a0\u8f7d\u8bbe\u7f6e...');
   assert.equal(enLoading, 'Loading settings...');
   assert.equal(zhLoadError, '\u52a0\u8f7d\u8bbe\u7f6e\u5931\u8d25\uff0c\u8bf7\u5173\u95ed\u540e\u91cd\u8bd5\u3002');

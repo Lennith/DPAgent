@@ -9,6 +9,7 @@ import type {
   RemoteAccessAuthView,
 } from '../../shared/web-settings-contracts.js';
 import { DEFAULT_SESSION_SHARE_TTL_HOURS } from '../../shared/session-share-defaults.js';
+import { DEFAULT_WORKSPACE_TIMELINE_CONFIG } from '../../workspace-timeline/index.js';
 
 export interface ConfigMutationAgent {
   getConfig(): AgentConfig;
@@ -63,6 +64,7 @@ export class ConfigMutationService {
       web: previousConfig.web,
       remoteAccessAuth: previousConfig.remoteAccessAuth,
       agentProviders: previousConfig.agentProviders,
+      workspaceTimeline: previousConfig.workspaceTimeline,
     });
     try {
       this.services.persistConfigFile(previousConfig);
@@ -138,11 +140,14 @@ export function buildPublicSettingsView(
       maxSteps: config.agent.maxSteps,
       completionMarkerEnforcementEnabled:
         config.agent.completionMarkerEnforcementEnabled === true,
-      defaultToolset: config.agent.defaultToolset || 'windows-safe',
+      defaultToolset: config.agent.defaultToolset || 'windows-dev',
       contextReplayMinRounds: config.agent.contextReplayMinRounds ?? 6,
       contextReplayMaxRounds: config.agent.contextReplayMaxRounds ?? 12,
       contextReplayBudgetRatio: config.agent.contextReplayBudgetRatio ?? 0.55,
     },
     remoteAccessAuth: getRemoteAccessAuthView(config),
+    workspaceTimeline: {
+      enabled: config.workspaceTimeline?.enabled ?? DEFAULT_WORKSPACE_TIMELINE_CONFIG.enabled,
+    },
   };
 }

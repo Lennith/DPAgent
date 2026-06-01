@@ -1,85 +1,70 @@
 # DPAgent Configuration
 
-DPAgent reads runtime settings from `config.yaml`. The repository commits only `config.example.yaml`; copy it locally and keep the real `config.yaml` out of git.
+The runtime configuration source is `config.yaml`. First package run creates a
+minimal template in the current working directory. Source-tree development can
+edit the repository-local `config.yaml`, but local config must not be committed.
 
-```bash
-cp config.example.yaml config.yaml
-```
-
-PowerShell:
-
-```powershell
-Copy-Item config.example.yaml config.yaml
-```
-
-## Safe Default
-
-The example and runtime defaults use a conservative setup-first posture:
-
+## Minimal Configuration
 ```yaml
 llmProfiles:
-  defaultProfileId: ''
+  defaultProfileId: ""
   profiles: []
 
 agent:
-  workspaceDir: ./workspace
-  contextDir: ./contexts
-  runtimeDataDir: ./runtime
-  globalAgentsDir: ./agents
-  defaultToolset: windows-safe
-
-tools:
-  enableFileTools: true
-  enableWeb: false
-  enableShell: false
-
-mcp:
-  enabled: false
-  servers: []
-
-remoteAccessAuth:
-  enabled: false
+  workspaceDir: "./workspace"
+  contextDir: "./contexts"
+  runtimeDataDir: "./runtime"
+  skillsDir: "C:\\Users\\...\\.codex\\skills"
+  globalAgentsDir: "./agents"
 ```
 
-`windows-safe` is read-heavy. It allows file read/glob/grep, tool result read, context, memory, session search, Todo, skill catalog, and plan input/finalization. It does not expose shell, write/edit, web, MCP unknown tools, file download, skill writes, automation scheduling, or subagent delegation.
-
-## LLM Profiles
-
-Create a provider profile from Web Settings before running chat, automation, or subagents. The package no longer ships a runnable default provider/model profile.
-
-Do not commit real API keys. Prefer environment-specific local config files or secret managers for shared machines.
-
-## Opt-In Toolsets
-
-Use explicit toolsets when the workspace and prompt are trusted:
-
-- `windows-safe`: default read-heavy mode.
-- `windows-dev`: adds file write/edit, shell, skill writes, subagents, automation, and file download.
-- `research`: adds web fetch to the development toolset.
-- `full-access`: hidden escape hatch for trusted maintainers; disables workspace sandbox checks and allows unknown MCP tools.
-
-To opt in for local development:
-
+## Common Agent Fields
 ```yaml
 agent:
-  defaultToolset: windows-dev
-
-tools:
-  enableShell: true
+  maxSteps: 100
+  tokenLimit: 210000
+  workspaceDir: "./workspace"
+  contextDir: "./contexts"
+  runtimeDataDir: "./runtime"
+  defaultToolset: "full-access"
+  skillsDir: "C:\\Users\\...\\.codex\\skills"
+  globalAgentsDir: "./agents"
 ```
 
-Do not enable `full-access` in shared examples or default project configs.
+- `workspaceDir`: default workspace for file tools, shell, workspace memory, and skills.
+- `contextDir`: event-sourced session context directory.
+- `runtimeDataDir`: memory, skills, audit, session search, Todo, and other runtime data.
+- `defaultToolset`: default capability whitelist.
+- `skillsDir`: global skill directory. Each child skill directory contains `SKILL.md`.
+- `globalAgentsDir`: native or custom agent profile directory. Each profile lives under
+  `globalAgentsDir/<agentName>/AGENTS.md`; optional profile settings live in
+  `globalAgentsDir/<agentName>/agent.yaml`; optional agent-specific skills live under
+  `globalAgentsDir/<agentName>/skill/`. Set `loadGlobalSkills: false` in
+  `agent.yaml` when that external agent should ignore the Settings global skills
+  directory; the default is `true`. Workspace skills under `workspaceDir/skills/`
+  are runtime-generated or approved workspace sources and are not controlled by
+  `loadGlobalSkills`.
 
-## Web Access
+## Tool Configuration
+```yaml
+tools:
+  enableFileTools: true
+  enableWeb: true
+  enableShell: true
+  shellType: powershell
+  shellTimeout: 30000
+```
 
-`enableWeb` registers the built-in `web_fetch` tool for known URL retrieval. It does not register a default search tool.
+Create a provider profile from Web Settings before running chat, automation, or subagents.
 
-The package includes the read-only native `web-access` skill as a strategy guide for search and webpage retrieval tasks.
+`enableWeb` registers the built-in `web_fetch` tool for known URL retrieval. It
+does not register a default search tool.
 
-## MCP
+Removed legacy settings such as `session_note`, `enableNote`,
+`memoryWriteMode`, `skillWriteMode`, old `dpagent.yaml`, and old `history_message_*.jsonl`
+semantics are not current configuration contracts.
 
-MCP is disabled unless both `mcp.enabled: true` and at least one server are configured. MCP servers run as local child processes and can inherit environment variables depending on their command and env block.
-
+## MCP Configuration
 ```yaml
 mcp:
   enabled: false
@@ -88,22 +73,24 @@ mcp:
   servers: []
 ```
 
-When `enabled: false` or `servers: []`, MCP tools are not registered. DPAgent does not inject a default Web MCP server; any MCP server must be explicitly configured.
+When `enabled: false` or `servers: []`, MCP tools are not registered. DPAgent
+does not inject a default Web MCP server; any MCP server must be explicitly
+configured.
 
-Removed legacy settings such as `session_note`, `enableNote`, `memoryWriteMode`, `skillWriteMode`, old `dpagent.yaml`, and old `history_message_*.jsonl` semantics are not current configuration contracts.
+## Experimental Workspace Timeline
 
-## Remote Access
-
-Remote access auth is disabled in the example. If enabled, use a strong password, keep `trustProxy` false unless a trusted reverse proxy sets headers correctly, and read [SECURITY.md](SECURITY.md) first.
+Workspace Timeline is an experimental test feature. It is off by default and is
+enabled from Web Settings -> Other with the "Workspace Timeline (test)" checkbox.
+When enabled, DPAgent records retained turn deltas under `runtimeDataDir` and
+exposes API-only rollback for retained revisions. There is no rollback UI yet.
 
 ## Validation
-
 After config-sensitive changes, run the closest relevant checks:
 
 ```bash
-npm run build
-npm run test:toolset-registry
-npm run test:execution-tool-registry-gating
+npm run build:web
+npm test
 ```
 
 Release candidates follow [release gate overview](doc/playbook/release-gate-overview.md).
+Local config and release profiles follow [local config and profile hygiene](doc/playbook/local-config-profile-hygiene.md).

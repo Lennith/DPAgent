@@ -1,6 +1,6 @@
 ---
 name: dpagent-user-guide
-description: Explain DPAgent to end users with the packaged user guide, screenshots, feature map, mobile usage, share links, agents, skills, Plan Mode, Ralph loop, ASR, hooks, and troubleshooting. Use when a user asks how to use DPAgent or wants a plain-language guide.
+description: Explain DPAgent to end users with the packaged user guide, screenshots, feature map, mobile usage, share links, session fork, Arena, agents, skills, Plan Mode, Ralph loop, ASR, hooks, and troubleshooting. Use when a user asks how to use DPAgent or wants a plain-language guide.
 ---
 
 # DPAgent User Guide
@@ -18,7 +18,7 @@ Use this skill when the user needs product-level DPAgent guidance rather than co
 ## Coverage
 
 - DPAgent installation and first setup.
-- Main chat UI, composer controls, TB/TC/TR filters, file mentions, model selection, Plan Mode, and Ralph loop.
+- Main chat UI, composer controls, TB/TC/TR filters, file mentions, model selection, session Fork, Arena, Plan Mode, and Ralph loop.
 - Mobile access and share-link usage.
 - External agents and bundled agents.
 - User-facing skills: debug info, update, agent creation, share client, ASR setup, hook builder.

@@ -35,6 +35,12 @@ import { SkillWriteStore } from './skills/SkillWriteStore.js';
 import { readSkillVersion } from './skills/skill-markdown.js';
 import { TodoStore } from './todo/TodoStore.js';
 import { ArenaStore } from './arena/index.js';
+import {
+  normalizeWorkspaceTimelineConfig,
+  TurnWorkspaceTransactionCoordinator,
+  WorkspaceTimelineStore,
+  type WorkspaceTurnHandle,
+} from './workspace-timeline/index.js';
 import { agentLogger } from './utils/logger.js';
 import { createDPAgentCoreServices } from './runtime/dpagent-core-services.js';
 import { getRuntimePlatformCapabilities } from './runtime-platform.js';
@@ -133,6 +139,8 @@ export class DPAgent {
   private skillLoader: SkillLoader;
   private automationStore: AutomationStore;
   private arenaStore: ArenaStore;
+  private workspaceTimelineStore: WorkspaceTimelineStore;
+  private workspaceTransactionCoordinator: TurnWorkspaceTransactionCoordinator;
   private hookRegistry?: HookRegistry;
   private hookRunner?: HookRunner;
   private skillWriteStore: SkillWriteStore;
@@ -144,6 +152,10 @@ export class DPAgent {
 
   getArenaStore(): ArenaStore {
     return this.arenaStore;
+  }
+
+  getWorkspaceTimelineStore(): WorkspaceTimelineStore {
+    return this.workspaceTimelineStore;
   }
 
   initHooks(workspaceDir: string): void {
@@ -297,6 +309,15 @@ export class DPAgent {
     this.contextDir = cfg.agent.contextDir ?? path.join(cfg.agent.workspaceDir, '.dpagent', 'contexts');
     this.automationStore = new AutomationStore(path.join(this.runtimeDataDir, 'automations'));
     this.arenaStore = new ArenaStore(path.join(this.runtimeDataDir, 'arena'));
+    this.workspaceTimelineStore = new WorkspaceTimelineStore({
+      runtimeDataDir: this.runtimeDataDir,
+      config: cfg.workspaceTimeline ?? {
+        enabled: false,
+        captureMode: 'advisory',
+        retainedStageTurns: 5,
+        gitPrivateRefs: false,
+      },
+    });
     this.contextUsageCalibrationStore = new ContextUsageCalibrationStore(this.runtimeDataDir);
     const coreServices = createDPAgentCoreServices({
       contextDir: this.contextDir,
@@ -304,6 +325,11 @@ export class DPAgent {
       getLlmClient: () => this.llmClient,
     });
     this.contextManager = coreServices.contextManager;
+    this.workspaceTransactionCoordinator = new TurnWorkspaceTransactionCoordinator({
+      contextManager: this.contextManager,
+      timelineStore: this.workspaceTimelineStore,
+    });
+    this.workspaceTransactionCoordinator.recoverPreparedCommits();
     this.memoryStore = coreServices.memoryStore;
     this.governanceAuditStore = coreServices.governanceAuditStore;
     this.memoryPromotionCoordinator = coreServices.memoryPromotionCoordinator;
@@ -596,6 +622,11 @@ export class DPAgent {
       runFamilyId: interruptedContext.runFamilyId,
       maxSteps: options.agentRuntimeOverrides?.maxSteps ?? this.config.get().agent.maxSteps,
     });
+    const workspaceTurnHandle: WorkspaceTurnHandle | null = this.workspaceTransactionCoordinator.beginTurn({
+      context,
+      turnId: turn.turnId,
+      workspaceDir: runWorkspaceDir,
+    });
     const turnToolRegistry = this.createTurnToolRegistry(
       context,
       turn.turnId,
@@ -691,6 +722,7 @@ export class DPAgent {
         .filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
 
       if (finishReason === 'cancelled') {
+        this.workspaceTransactionCoordinator.abortTurn(workspaceTurnHandle, 'Run was cancelled before turn commit.');
         const interrupted = finalizeInterruptedRun(this.contextManager, {
           context,
           turnId: turn.turnId,
@@ -734,7 +766,7 @@ export class DPAgent {
         };
       }
 
-      const commitResult = this.contextManager.commitTurn(turn.turnId, {
+      const commitResult = this.workspaceTransactionCoordinator.commitPreparedTurn(turn.turnId, workspaceTurnHandle, {
         messages: turnMessages,
         rawUserPrompt: promptEnvelope.rawUserPrompt,
         historyUserPrompt: promptEnvelope.historyUserPrompt,
@@ -848,6 +880,7 @@ export class DPAgent {
         terminalState,
       };
     } catch (error) {
+      this.workspaceTransactionCoordinator.abortTurn(workspaceTurnHandle, error instanceof Error ? error.message : String(error));
       const err = error instanceof Error ? error : new Error(String(error));
       const turnMessages = this.collectTurnMessages(turnAgent, baselineMessageCount);
       const interrupted = finalizeInterruptedRun(this.contextManager, {
@@ -1121,6 +1154,18 @@ export class DPAgent {
         ...(updates.web ?? {}),
       };
     }
+    if (Object.prototype.hasOwnProperty.call(updates, 'workspaceTimeline')) {
+      this.config['config'].workspaceTimeline = normalizeWorkspaceTimelineConfig(updates.workspaceTimeline);
+      this.workspaceTimelineStore = new WorkspaceTimelineStore({
+        runtimeDataDir: this.runtimeDataDir,
+        config: this.config['config'].workspaceTimeline,
+      });
+      this.workspaceTransactionCoordinator = new TurnWorkspaceTransactionCoordinator({
+        contextManager: this.contextManager,
+        timelineStore: this.workspaceTimelineStore,
+      });
+      this.workspaceTransactionCoordinator.recoverPreparedCommits();
+    }
     const nextConfig = this.config.get();
     this.toolsetRegistry = createToolsetRegistry(nextConfig.agent.defaultToolset, nextConfig.toolsets?.custom ?? []);
     const updatedConfig = this.config.get();
@@ -1188,11 +1233,7 @@ export class DPAgent {
       return this.toolsetRegistry.requireToolset(workspacePreset.toolsetName, 'workspace toolset preset').name;
     }
     if (workspaceDir) {
-      const configuredDefaultToolset = String(this.config.get().agent.defaultToolset ?? '').trim();
-      const defaultToolset = configuredDefaultToolset
-        ? this.toolsetRegistry.requireToolset(configuredDefaultToolset, 'default toolset').name
-        : this.toolsetRegistry.getDefaultName();
-      const seeded = this.toolsetPresetStore.setWorkspacePreset(workspaceDir, defaultToolset);
+      const seeded = this.toolsetPresetStore.setWorkspacePreset(workspaceDir, 'full-access');
       return this.toolsetRegistry.requireToolset(seeded.toolsetName, 'workspace toolset preset').name;
     }
     const configuredDefaultToolset = String(this.config.get().agent.defaultToolset ?? '').trim();

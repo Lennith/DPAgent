@@ -1359,6 +1359,13 @@ export interface AsrConfig {
   restartBackoffMs: number;
 }
 
+export interface WorkspaceTimelineConfig {
+  enabled: boolean;
+  captureMode: 'advisory' | 'trusted_tools' | 'git_observed';
+  retainedStageTurns: number;
+  gitPrivateRefs: boolean;
+}
+
 export interface AgentConfig {
   api: {
     apiKey: string;
@@ -1426,6 +1433,7 @@ export interface AgentConfig {
   remoteAccessAuth?: RemoteAccessAuthConfig;
   agentProviders?: SubAgentProviderConfig[];
   asr?: AsrConfig;
+  workspaceTimeline?: WorkspaceTimelineConfig;
 }
 
 export type ShellType = 'powershell' | 'cmd' | 'bash' | 'sh';

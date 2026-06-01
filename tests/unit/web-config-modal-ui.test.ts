@@ -87,6 +87,9 @@ const settingsResponse = {
     sessionTtlMs: 7 * 24 * 60 * 60 * 1000,
     trustProxy: true,
   },
+  workspaceTimeline: {
+    enabled: true,
+  },
 };
 
 function renderConfigModalStatic(isOpen: boolean, withProfiles = false): string {
@@ -203,6 +206,9 @@ function testLoadedModalKeepsEnglishReadableAndUsesTokenFields(): void {
   assert.match(html, /Trust Proxy/);
   assert.match(html, /Share link expiry \(hours\)/);
   assert.match(html, /Applies to newly created share links/);
+  assert.match(html, /data-testid="config-workspace-timeline-toggle"[^>]*checked/);
+  assert.match(html, /Enable Workspace Timeline \(test\)/);
+  assert.match(html, /Records per-turn file changes/);
   assert.match(html, /Context Window &amp; Compression/);
   assert.match(html, /Context window tokens/);
   assert.match(html, /Precompress chunk tokens/);

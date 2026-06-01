@@ -134,6 +134,7 @@ export function ConfigModal({
     ctxPrecompressKeepLlmRounds,
     ctxPrecompressChunkTokens,
     ctxCompressionMaxTokens,
+    workspaceTimelineEnabled,
   } = settingsDraft;
   const patchSettingsDraft = (patch: Partial<SettingsDraft>): void => {
     dispatchSettingsDraft({ type: 'patch', patch });
@@ -160,6 +161,8 @@ export function ConfigModal({
     patchSettingsDraft({ ctxPrecompressChunkTokens: value });
   const setCtxCompressionMaxTokens = (value: number): void =>
     patchSettingsDraft({ ctxCompressionMaxTokens: value });
+  const setWorkspaceTimelineEnabled = (value: boolean): void =>
+    patchSettingsDraft({ workspaceTimelineEnabled: value });
   const [activeTab, setActiveTab] = useState<'providers' | 'skills' | 'agents' | 'governance' | 'other'>(
     initialActiveTab
   );
@@ -845,6 +848,8 @@ export function ConfigModal({
             setCtxPrecompressChunkTokens={setCtxPrecompressChunkTokens}
             ctxCompressionMaxTokens={ctxCompressionMaxTokens}
             setCtxCompressionMaxTokens={setCtxCompressionMaxTokens}
+            workspaceTimelineEnabled={workspaceTimelineEnabled}
+            setWorkspaceTimelineEnabled={setWorkspaceTimelineEnabled}
           />
         )}
 

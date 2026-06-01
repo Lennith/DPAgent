@@ -92,6 +92,13 @@ function shouldCopyPath(sourceRoot: string, sourcePath: string): boolean {
   if (!relative) {
     return true;
   }
+  try {
+    if (fs.lstatSync(sourcePath).isSymbolicLink()) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
   const firstSegment = relative.split(path.sep)[0];
   return !EXCLUDED_ROOTS.has(firstSegment);
 }

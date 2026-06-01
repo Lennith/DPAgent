@@ -817,6 +817,36 @@ export class ContextManager {
     return this.transactionCoordinator.rollbackTransaction(transactionId);
   }
 
+  recordWorkspaceRollback(input: {
+    context: ContextRef;
+    targetRevisionId: string;
+    changedFiles: string[];
+    reason?: string;
+    appliedAt: string;
+  }): void {
+    const normalized = this.normalizeRef(input.context);
+    const turnId = this.generateTurnId();
+    const details = {
+      targetRevisionId: input.targetRevisionId,
+      changedFiles: [...input.changedFiles],
+      reason: String(input.reason ?? ''),
+      appliedAt: input.appliedAt,
+    };
+    const events = [
+      this.createEvent(normalized, turnId, 'context_patch', {
+        op: 'set',
+        key: 'workspaceTimeline.currentRevision',
+        value: input.targetRevisionId,
+      }),
+      this.createEvent(normalized, turnId, 'context_patch', {
+        op: 'set',
+        key: 'workspaceTimeline.lastRollback',
+        value: JSON.stringify(details),
+      }),
+    ];
+    this.eventStore.appendEvents(normalized.scope, normalized.namespace, events);
+  }
+
   /**
    * REQ-0012: Automatic rollback to last known good state when version jump detected.
    * Returns the validation result indicating if rollback was performed.
@@ -863,6 +893,7 @@ export class ContextManager {
       messageCount: input.messages.length,
       finishReason: input.finishReason ?? '',
       usage: input.usage ? { ...input.usage } : undefined,
+      workspaceTimeline: input.workspaceTimeline ? { ...input.workspaceTimeline } : undefined,
     });
     const requestedBufferedCount =
       typeof options?.bufferedEventCount === 'number' && Number.isFinite(options.bufferedEventCount)

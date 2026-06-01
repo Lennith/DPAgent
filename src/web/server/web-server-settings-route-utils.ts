@@ -7,6 +7,10 @@ import type {
   LlmProviderProfileConfig,
 } from '../../types.js';
 import { normalizeSessionShareTtlHours } from '../../shared/session-share-defaults.js';
+import {
+  DEFAULT_WORKSPACE_TIMELINE_CONFIG,
+  normalizeWorkspaceTimelineConfig,
+} from '../../workspace-timeline/index.js';
 import type {
   LlmProfileMutationView,
   SettingsMutationRequest,
@@ -190,6 +194,9 @@ export function buildSettingsUpdates(
     ...(currentConfig.remoteAccessAuth ?? {}),
   };
   const nextWeb = { ...(currentConfig.web ?? {}) };
+  const nextWorkspaceTimeline = normalizeWorkspaceTimelineConfig(
+    currentConfig.workspaceTimeline ?? DEFAULT_WORKSPACE_TIMELINE_CONFIG
+  );
   const hasRemoteAccessAuthUpdate =
     typeof body.remoteAccessAuth === 'object' && body.remoteAccessAuth !== null;
 
@@ -275,6 +282,13 @@ export function buildSettingsUpdates(
       );
     }
   }
+  const hasWorkspaceTimelineUpdate =
+    typeof body.workspaceTimeline === 'object' && body.workspaceTimeline !== null;
+  if (hasWorkspaceTimelineUpdate && body.workspaceTimeline) {
+    if (typeof body.workspaceTimeline.enabled === 'boolean') {
+      nextWorkspaceTimeline.enabled = body.workspaceTimeline.enabled;
+    }
+  }
 
   const updates: Partial<AgentConfig> = { agent: nextAgent };
   if (hasWebUpdate) {
@@ -285,6 +299,9 @@ export function buildSettingsUpdates(
   }
   if (hasContextBudgetUpdate) {
     updates.contextBudget = nextContextBudget;
+  }
+  if (hasWorkspaceTimelineUpdate) {
+    updates.workspaceTimeline = nextWorkspaceTimeline;
   }
   if (Array.isArray(body.profiles)) {
     updates.llmProfiles = buildLlmProfilesUpdate(currentConfig, body);

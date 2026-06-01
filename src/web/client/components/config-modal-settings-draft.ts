@@ -31,6 +31,7 @@ export interface SettingsDraft {
   ctxPrecompressKeepLlmRounds: number;
   ctxPrecompressChunkTokens: number;
   ctxCompressionMaxTokens: number;
+  workspaceTimelineEnabled: boolean;
 }
 
 export interface SettingsDraftState {
@@ -63,6 +64,7 @@ export function createDefaultSettingsDraft(): SettingsDraft {
     ctxPrecompressKeepLlmRounds: 5,
     ctxPrecompressChunkTokens: charsToTokenHint(60000),
     ctxCompressionMaxTokens: charsToTokenHint(6000),
+    workspaceTimelineEnabled: false,
   };
 }
 
@@ -106,6 +108,7 @@ export function createSettingsDraftFromResponse(settings: PublicSettingsView): S
     ctxPrecompressKeepLlmRounds: numberOrDefault(contextBudget.precompressKeepLlmRounds, 5),
     ctxPrecompressChunkTokens: charsToTokenHint(numberOrDefault(contextBudget.precompressChunkChars, 60000)),
     ctxCompressionMaxTokens: charsToTokenHint(numberOrDefault(contextBudget.compressionMaxChars, 6000)),
+    workspaceTimelineEnabled: settings.workspaceTimeline?.enabled === true,
   };
 }
 
@@ -138,6 +141,9 @@ export function buildAgentSettingsPayload(draft: SettingsDraft): Record<string, 
     },
     web: {
       sessionShareTtlHours: normalizeSessionShareTtlHours(draft.sessionShareTtlHours),
+    },
+    workspaceTimeline: {
+      enabled: draft.workspaceTimelineEnabled,
     },
   };
   if (draft.authClearPassword) {

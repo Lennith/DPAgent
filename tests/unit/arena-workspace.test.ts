@@ -97,9 +97,21 @@ function testNoGitWorkspaceCopiesDirtySource(): void {
   const root = tempRoot();
   try {
     const source = path.join(root, 'source');
+    const outside = path.join(root, 'outside');
     fs.mkdirSync(source, { recursive: true });
+    fs.mkdirSync(outside, { recursive: true });
     fs.writeFileSync(path.join(source, 'tracked.txt'), 'base', 'utf-8');
     fs.writeFileSync(path.join(source, 'dirty.txt'), 'dirty', 'utf-8');
+    fs.writeFileSync(path.join(outside, 'linked.txt'), 'skip symlink target', 'utf-8');
+    let createdSymlink = false;
+    try {
+      fs.symlinkSync(outside, path.join(source, 'linked-dir'), process.platform === 'win32' ? 'junction' : 'dir');
+      createdSymlink = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') {
+        throw error;
+      }
+    }
     fs.mkdirSync(path.join(source, 'node_modules'), { recursive: true });
     fs.writeFileSync(path.join(source, 'node_modules', 'skip.txt'), 'skip', 'utf-8');
     fs.mkdirSync(path.join(source, 'logs'), { recursive: true });
@@ -114,6 +126,9 @@ function testNoGitWorkspaceCopiesDirtySource(): void {
     assert.equal(fs.readFileSync(path.join(result.workspaceDir, 'dirty.txt'), 'utf-8'), 'dirty');
     assert.equal(fs.existsSync(path.join(result.workspaceDir, 'node_modules')), false);
     assert.equal(fs.existsSync(path.join(result.workspaceDir, 'logs')), false);
+    if (createdSymlink) {
+      assert.equal(fs.existsSync(path.join(result.workspaceDir, 'linked-dir')), false);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

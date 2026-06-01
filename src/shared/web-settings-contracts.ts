@@ -1,6 +1,7 @@
 import type {
   ContextBudgetConfig,
   LlmProviderProfileConfig,
+  WorkspaceTimelineConfig,
 } from '../types.js';
 
 export type PublicLlmProfile = Omit<LlmProviderProfileConfig, 'apiKey'> & {
@@ -40,6 +41,7 @@ export interface PublicSettingsView {
     contextReplayBudgetRatio: number;
   };
   remoteAccessAuth: RemoteAccessAuthView;
+  workspaceTimeline: Pick<WorkspaceTimelineConfig, 'enabled'>;
 }
 
 export type LlmProfileMutationView = Partial<LlmProviderProfileConfig> & {
@@ -70,4 +72,7 @@ export interface SettingsMutationRequest {
   contextReplayMaxRounds?: number;
   contextReplayBudgetRatio?: number;
   contextBudget?: Partial<ContextBudgetConfig>;
+  workspaceTimeline?: {
+    enabled?: boolean;
+  };
 }

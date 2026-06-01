@@ -25,7 +25,7 @@ DPAgent 不适合当成完全开放的公网远程执行服务。它可以读写
 如果你已经通过 npm 安装：
 
 ```powershell
-npm i -g @dpvr/dpagent --registry https://registry.npmjs.org
+npm i -g @dpvr/dpagent --registry http://10.100.1.10:4873
 npx dpagent
 ```
 
@@ -211,6 +211,36 @@ Plan Mode 的典型流程：
 - 不要把工作区设到太大的系统目录，例如整个系统盘根目录。
 
 工作区里的 `AGENTS.md` 是“工作区说明”，用于告诉 Agent 当前项目规则，例如测试命令、提交规范、目录约束。它不是角色设定，不会把 Agent 变成另一个身份。
+
+## 会话 Fork 和 Arena
+
+### Fork 会话
+
+Fork 会把当前会话的已提交上下文复制成一个新会话。默认名称是在原名称后加 `-fork`，例如 `aaa` 会变成 `aaa-fork`，之后可以继续改名。
+
+适合：
+
+- 从同一段历史开始尝试另一种方向。
+- 保留原会话不动，在副本里继续实验。
+- 把一个长上下文拆成多个后续任务。
+
+Fork 不会自动发送消息，也不会复制正在运行、中断、待输入或临时状态。源会话需要处于稳定状态。
+
+### Arena
+
+Arena 会从当前会话创建多个公平分支，让最多 4 个选手在同一上下文和独立工作区里处理同一个 prompt。选手可以使用不同 Agent、LLM Profile、模型和推理档位。
+
+进入 Arena 后，源会话会被锁定，主面板切换成 Arena 面板。你可以查看每个选手的日志、提交结果、Judge 建议和 Proposal；也可以通过“原会话”入口只读查看源会话历史。
+
+典型流程：
+
+1. 点击 Fork 右侧的 Arena。
+2. 选择选手和 Judge 配置。
+3. Start 后所有分支并发执行。
+4. 选手提交后，可以运行 Judge，也可以手动选择 winner。
+5. 有文件改动时，先生成 Proposal，再二次确认 Apply。
+
+Apply 只会把 winner 分支的提案改动合入源工作区。其他选手的改动不会自动合入。Arena 结束或 Apply 后，源会话解除锁定。
 
 ## 分享链接
 

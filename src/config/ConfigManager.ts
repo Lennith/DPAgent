@@ -20,6 +20,10 @@ import {
   DEFAULT_SESSION_SHARE_TTL_HOURS,
   normalizeSessionShareTtlHours,
 } from '../shared/session-share-defaults.js';
+import {
+  DEFAULT_WORKSPACE_TIMELINE_CONFIG,
+  normalizeWorkspaceTimelineConfig,
+} from '../workspace-timeline/index.js';
 
 export interface MCPRuntimeConfig {
   enabled: boolean;
@@ -63,7 +67,7 @@ const DEFAULT_CONFIG: AgentConfig = {
     tokenLimit: 80000,
     workspaceDir: './workspace',
     completionMarkerEnforcementEnabled: false,
-    defaultToolset: 'windows-safe',
+    defaultToolset: 'full-access',
     subAgentMaxParallelPerParent: 4,
     subAgentGlobalMaxParallel: 10,
     contextReplayMinRounds: 6,
@@ -76,13 +80,13 @@ const DEFAULT_CONFIG: AgentConfig = {
   },
   tools: {
     enableFileTools: true,
-    enableWeb: false,
-    enableShell: false,
+    enableWeb: true,
+    enableShell: true,
     shellType: 'powershell',
     shellTimeout: 30000,
   },
   mcp: {
-    enabled: false,
+    enabled: true,
     servers: [],
     connectTimeout: 10,
     executeTimeout: 60,
@@ -112,6 +116,7 @@ const DEFAULT_CONFIG: AgentConfig = {
     },
   ],
   asr: DEFAULT_GLM_ASR_CONFIG,
+  workspaceTimeline: DEFAULT_WORKSPACE_TIMELINE_CONFIG,
 };
 
 type CustomToolsetConfig = NonNullable<NonNullable<AgentConfig['toolsets']>['custom']>[number];
@@ -196,6 +201,12 @@ export class ConfigManager {
           (overrides.asr ?? {}) as Record<string, unknown>
         )
       ),
+      workspaceTimeline: normalizeWorkspaceTimelineConfig(
+        this.mergeDeepObject(
+          (defaults.workspaceTimeline ?? DEFAULT_WORKSPACE_TIMELINE_CONFIG) as unknown as Record<string, unknown>,
+          (overrides.workspaceTimeline ?? {}) as Record<string, unknown>
+        )
+      ),
     };
 
     return merged;
@@ -208,6 +219,7 @@ export class ConfigManager {
     sanitized.contextBudget = this.normalizeContextBudget(sanitized);
     sanitized.web = this.normalizeWebConfig(sanitized.web);
     sanitized.asr = normalizeAsrConfig(sanitized.asr);
+    sanitized.workspaceTimeline = normalizeWorkspaceTimelineConfig(sanitized.workspaceTimeline);
     sanitized.llmProfiles = normalizeLlmProfilesConfig({ llmProfiles: sanitized.llmProfiles });
     sanitized.toolsets = {
       custom: this.normalizeCustomToolsets(sanitized.toolsets?.custom),
